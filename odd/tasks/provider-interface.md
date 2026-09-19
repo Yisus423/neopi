@@ -34,4 +34,11 @@ of our own. Swap-friendly: if nimgent stalls (solo dev, no releases), fork it
 
 ## Evidence
 
-(commit identities recorded here as tasks close)
+- `90dc242` — feat: provider primitives with anti-corruption layer over nimgent
+  (10 files, 432 insertions: src/neopi/provider.nim, scripted + real tests,
+  skeleton, task doc)
+- Tests: 10 run, 10 OK, 0 FAILED (scripted suite; the live OpenRouter check
+  self-skips without OPENROUTER_API_KEY and awaits a keyed run in the user's
+  shell)
+- Subagent fallback: gentle-ai-worker failed twice at turn 0 (runtime error),
+  so the parent implemented inline under the fallback rule
