@@ -5,3 +5,8 @@
 .env
 build/
 nimcache/
+
+# Compiled test binaries (nim default output lands next to the source)
+tests/tp_all
+tests/tp_provider
+tests/tp_real

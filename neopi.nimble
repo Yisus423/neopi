@@ -8,4 +8,4 @@ requires "nim >= 2.0.0"
 requires "https://github.com/martineastwood/nimgent"
 
 task test, "Run the test suite":
-  exec "nim c -r --hints:off --threads:on --mm:orc tests/tp_all.nim"
+  exec "nim c -r --hints:off --threads:on --mm:orc -o:build/tp_all tests/tp_all.nim"
