@@ -1,2 +1,7 @@
 # Local Pi runtime state
 .atl/
+
+# Local secrets and build output
+.env
+build/
+nimcache/

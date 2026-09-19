@@ -1,16 +1,33 @@
 ## Live streaming check against OpenRouter. Skips itself when no key is set.
-import std/[os, syncio]
+## Reads OPENROUTER_API_KEY from the environment or from a local .env file.
+import std/[os, strutils, syncio]
 import neopi/provider
 import unittest2
 
+proc loadDotEnv(path = ".env") =
+  ## Populate the environment from a local KEY=VALUE file. Existing values
+  ## win; the file never overwrites them.
+  if not fileExists(path):
+    return
+  for line in lines(path):
+    let trimmed = line.strip
+    if trimmed.len > 0 and not trimmed.startsWith('#'):
+      let sep = trimmed.find('=')
+      if sep > 0:
+        let key = trimmed[0 ..< sep].strip
+        let value = trimmed[sep + 1 .. ^1].strip(chars = Whitespace + {'"'})
+        if key.len > 0 and getEnv(key).len == 0:
+          putEnv(key, value)
+
 suite "real streaming (OpenRouter)":
   test "streams text deltas from a live model":
+    loadDotEnv()
     let key = getEnv("OPENROUTER_API_KEY")
     if key.len == 0:
       skip()
       return
     let modelId = getEnv("OPENROUTER_MODEL",
-      "meta-llama/llama-3.3-70b-instruct:free")
+      "inclusionai/ling-3.0-flash-vl:free")
     let m = openRouter(key).model(modelId)
     var got = ""
     var finished = false
