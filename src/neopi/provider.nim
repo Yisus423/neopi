@@ -8,7 +8,12 @@
 ## above this layer.
 
 import std/json
+import neopi/hooks
 import nimgent as ng
+
+# Same file-scope typedef as lua.nim/hooks.nim: provider.nim's generated C
+# materializes the HookBus object, whose field holds the opaque state type.
+{.emit: """/*TYPESECTION*/ typedef struct lua_State lua_State;""".}
 import nimgent/providers/openai as ngOpenAI
 import nimgent/providers/openrouter as ngOpenRouter
 import nimgent/testing as ngTesting
@@ -142,15 +147,35 @@ proc splitSystem(messages: seq[Message]): tuple[system: string, rest: seq[ng.Mes
     of roleAssistant:
       result.rest.add ng.assistantMessage(msg.text)
 
-proc mappedTools(tools: seq[Tool]): seq[ng.Tool] =
-  ## Map neopi tools onto nimgent runtime-schema tools. A callback result
-  ## becomes both the provider-facing output and the retained JSON value.
+proc mappedTools(tools: seq[Tool], bus: HookBus): seq[ng.Tool] =
+  ## Map neopi tools onto nimgent runtime-schema tools. With a bus, the
+  ## `tool_call` hook can block (a hook_denied denial) or rewrite the
+  ## arguments before the callback, and `tool_result` can rewrite the output
+  ## after it. A callback result becomes both the provider-facing output and
+  ## the retained JSON value.
   for t in tools:
     let tool = t  # explicit copy: a lent loop view cannot be captured
     result.add ng.rawTool(tool.name, tool.description, tool.inputSchema,
       proc (context: ng.ToolContext, input: JsonNode): ng.ToolResult =
-        let output = tool.execute(input)
-        ng.ToolResult(output: output, value: %output))
+        var effective = input
+        if not bus.isNil:
+          var payload = %*{"tool": tool.name}
+          payload["args"] = input
+          let verdict = bus.emit("tool_call", payload)
+          if not verdict.allowed:
+            return ng.toolFailure("hook_denied", verdict.reason)
+          if verdict.patched and not verdict.payload.isNil and
+              verdict.payload.hasKey("args"):
+            effective = verdict.payload["args"]
+        let output = tool.execute(effective)
+        var sent = output
+        if not bus.isNil:
+          let verdict = bus.emit("tool_result",
+            %*{"tool": tool.name, "output": output})
+          if verdict.patched and not verdict.payload.isNil and
+              verdict.payload.hasKey("output"):
+            sent = verdict.payload["output"].getStr
+        ng.ToolResult(output: sent, value: %sent))
 
 proc toFinishReason(reason: ng.FinishReason): FinishReason =
   ## Map a nimgent finish reason onto the neopi enum.
@@ -183,6 +208,16 @@ proc adaptStream(cb: StreamCallback): ng.StreamCallback =
     else:
       true
 
+proc hookStream(bus: HookBus, inner: ng.StreamCallback): ng.StreamCallback =
+  ## Wrap a mapped stream callback with the observe-only `stream_text` hook:
+  ## fire the hook on text deltas, then forward the event to the inner
+  ## callback. The hook result cannot cancel; it is discarded, and
+  ## cancellation still flows through the inner callback.
+  proc (ev: ng.StreamEvent): bool =
+    if ev.kind == ng.seTextDelta:
+      discard bus.emit("stream_text", %*{"text": ev.text})
+    inner(ev)
+
 proc translate(e: ref CatchableError) {.noinline, noreturn.} =
   ## Re-raise a failure as a neopi-owned exception at the boundary. Failures
   ## nimgent does not own pass through unchanged.
@@ -198,49 +233,66 @@ proc translate(e: ref CatchableError) {.noinline, noreturn.} =
   raise e
 
 proc generate*(m: Model, prompt: string, tools: seq[Tool] = @[],
-               maxSteps: Positive = 1, system = ""): Response =
+               maxSteps: Positive = 1, system = "", bus: HookBus = nil): Response =
   ## One text completion, with tool round-trips when the model calls a tool.
   ## `maxSteps` caps model turns; 1 means no continuation after a tool call.
+  ## With a bus, tool calls and results fire the `tool_call`/`tool_result`
+  ## hooks.
   try:
     toResponse(ng.generateText(
       ng.LanguageModel(provider: m.provider.impl, id: m.id),
-      prompt = prompt, system = system, tools = mappedTools(tools),
+      prompt = prompt, system = system, tools = mappedTools(tools, bus),
       maxSteps = maxSteps))
   except CatchableError as e:
     translate(e)
 
 proc generate*(m: Model, messages: seq[Message], tools: seq[Tool] = @[],
-               maxSteps: Positive = 1): Response =
-  ## One text completion from an ordered message list.
+               maxSteps: Positive = 1, bus: HookBus = nil): Response =
+  ## One text completion from an ordered message list. With a bus, tool calls
+  ## and results fire the `tool_call`/`tool_result` hooks.
   let split = splitSystem(messages)
   try:
     toResponse(ng.generateText(
       ng.LanguageModel(provider: m.provider.impl, id: m.id),
       messages = split.rest, system = split.system,
-      tools = mappedTools(tools), maxSteps = maxSteps))
+      tools = mappedTools(tools, bus), maxSteps = maxSteps))
   except CatchableError as e:
     translate(e)
 
 proc stream*(m: Model, prompt: string, onEvent: StreamCallback,
-             tools: seq[Tool] = @[], maxSteps: Positive = 1, system = ""): Response =
+             tools: seq[Tool] = @[], maxSteps: Positive = 1, system = "",
+             bus: HookBus = nil): Response =
   ## Stream text deltas, with tool round-trips when the model calls a tool.
-  ## The response holds the full text once the stream finishes.
+  ## The response holds the full text once the stream finishes. With a bus,
+  ## text deltas fire the observe-only `stream_text` hook.
   try:
+    let adapted =
+      if not bus.isNil:
+        hookStream(bus, adaptStream(onEvent))
+      else:
+        adaptStream(onEvent)
     toResponse(ng.streamText(
       ng.LanguageModel(provider: m.provider.impl, id: m.id),
-      adaptStream(onEvent), prompt = prompt, system = system,
-      tools = mappedTools(tools), maxSteps = maxSteps))
+      adapted, prompt = prompt, system = system,
+      tools = mappedTools(tools, bus), maxSteps = maxSteps))
   except CatchableError as e:
     translate(e)
 
 proc stream*(m: Model, messages: seq[Message], onEvent: StreamCallback,
-             tools: seq[Tool] = @[], maxSteps: Positive = 1): Response =
-  ## Stream text deltas from an ordered message list.
+             tools: seq[Tool] = @[], maxSteps: Positive = 1,
+             bus: HookBus = nil): Response =
+  ## Stream text deltas from an ordered message list. With a bus, text
+  ## deltas fire the observe-only `stream_text` hook.
   let split = splitSystem(messages)
   try:
+    let adapted =
+      if not bus.isNil:
+        hookStream(bus, adaptStream(onEvent))
+      else:
+        adaptStream(onEvent)
     toResponse(ng.streamText(
       ng.LanguageModel(provider: m.provider.impl, id: m.id),
-      adaptStream(onEvent), messages = split.rest, system = split.system,
-      tools = mappedTools(tools), maxSteps = maxSteps))
+      adapted, messages = split.rest, system = split.system,
+      tools = mappedTools(tools, bus), maxSteps = maxSteps))
   except CatchableError as e:
     translate(e)

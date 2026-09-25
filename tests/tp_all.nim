@@ -2,4 +2,5 @@
 ## OPENROUTER_API_KEY.
 import unittest2
 import tp_provider
+import tp_lua
 import tp_real

@@ -27,7 +27,7 @@ suite "real streaming (OpenRouter)":
       skip()
       return
     let modelId = getEnv("OPENROUTER_MODEL",
-      "inclusionai/ling-3.0-flash-vl:free")
+      "inclusionai/ling-3.0-flash-vl")
     let m = openRouter(key).model(modelId)
     var got = ""
     var finished = false
