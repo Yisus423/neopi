@@ -40,15 +40,38 @@ model: the core exposes primitives, Lua composes.
 
 ## Tasks
 
-- [ ] 1. LuaJIT dependency available (5.1 headers and lib on this machine)
-- [ ] 2. `src/neopi/lua.nim`: FFI bindings + LuaState wrapper + script loading
-- [ ] 3. `src/neopi/hooks.nim`: hook registry + emit with pcall containment
-- [ ] 4. Wire provider paths through the hooks (tool_call block/rewrite,
+- [x] 1. LuaJIT dependency available (5.1 headers and lib on this machine)
+- [x] 2. `src/neopi/lua.nim`: FFI bindings + LuaState wrapper + script loading
+- [x] 3. `src/neopi/hooks.nim`: hook registry + emit with pcall containment
+- [x] 4. Wire provider paths through the hooks (tool_call block/rewrite,
       tool_result rewrite, stream events)
-- [ ] 5. Tests: a Lua script registers hooks → core emits → Lua blocks and
+- [x] 5. Tests: a Lua script registers hooks → core emits → Lua blocks and
       rewrites → behavior changes (scripted provider)
-- [ ] 6. Work-unit commit(s) on the feature branch; record evidence here
+- [x] 6. Work-unit commit(s) on the feature branch; record evidence here
 
 ## Evidence
 
-(recorded as tasks close)
+- `90dc242` — feat: provider primitives with anti-corruption layer over nimgent
+- `c3fc62e` — docs: record provider-interface evidence
+- `4ba5923` — test: read live-check credentials from .env, fix the default free model
+- `0ab8197` — fix: untrack compiled test binary, route test builds to build/
+- `d5778b4` — feat: LuaJIT in-process hooks with block/rewrite over the provider layer
+  (7 files, 632 insertions: lua.nim + hooks.nim + provider wiring + tp_lua.nim)
+- Independent verification (gentle-ai-verify): dispatcher run verbatim
+  "[Summary] 17 tests run (2.80s): 17 OK, 0 FAILED, 0 SKIPPED" — including the
+  live OpenRouter streaming check ("neopi provider works",
+  inclusionai/ling-3.0-flash-vl, 2.41s); hooks.nim stack discipline (pcall +
+  pops, containment, verdict contract) and the provider wiring nil-path
+  byte-identity verified by reading.
+- Writer (gentle-ai-worker) notes: 7 mechanical defect classes fixed in
+  lua.nim (written inline without compiling — the parent's lesson: compile as
+  you write); Lua 5.1's lua_pop/pushcfunction/getglobal/setglobal are
+  macro-only (no exported symbols — nm-verified), wrapped Nim-side over
+  lua_settop/lua_pushcclosure/getfield/setfield with luaGlobalsIndex -10002;
+  relative idx + lua_pushnil segfaults (ctypes-probed) — normalized to
+  absolute. Design deviations documented in code: the verdict reads the FIRST
+  return value (reason second); neopi.on exposed as both the global and a
+  table; hasKey guards fall back to the original payload.
+- Known limits: package.loadlib reachable from scripts (slice-2 confinement
+  candidate); Lua states never closed (process exit reclaims); the
+  invalid-registration path is implemented but untested.
