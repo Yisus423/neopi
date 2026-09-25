@@ -52,14 +52,33 @@ primitives.
 
 ## Tasks
 
-- [ ] 1. `src/neopi/fs.nim`: confined primitives + exposeFs
-- [ ] 2. `src/neopi/process.nim`: spawn-per-call + process_run hook + exposeProcess
-- [ ] 3. `src/neopi/hooks.nim`: public state; `src/neopi/extensibility.nim`: assembly
-- [ ] 4. `src/neopi/lua.nim`: harden (loadlib nil, C loader removed)
-- [ ] 5. Tests: confinement rejects escapes, fs round-trip, list/exists,
+- [x] 1. `src/neopi/fs.nim`: confined primitives + exposeFs
+- [x] 2. `src/neopi/process.nim`: spawn-per-call + process_run hook + exposeProcess
+- [x] 3. `src/neopi/hooks.nim`: public state; `src/neopi/extensibility.nim`: assembly
+- [x] 4. `src/neopi/lua.nim`: harden (loadlib nil, C loader removed)
+- [x] 5. Tests: confinement rejects escapes, fs round-trip, list/exists,
       process run echo, process_run hook blocks, loadlib closed + loaders count
-- [ ] 6. Work-unit commit(s) on main; record evidence here
+- [x] 6. Work-unit commit(s) on main; record evidence here
 
 ## Evidence
 
-(recorded as tasks close)
+- `ecbd716` — feat: confined fs/process primitives and the loadlib closure
+  (8 files, 538 insertions: fs.nim + process.nim + extensibility.nim + the
+  hardening + the luaUpvalueIndex fix + tp_fs.nim)
+- Independent verification (gentle-ai-verify): dispatcher verbatim
+  "[Summary] 25 tests run (2.24s): 25 OK, 0 FAILED, 0 SKIPPED"; confinedPath
+  rejects escapes, the root upvalue resolves to -10003, all ops confine
+  before filesystem access, the hook fires before execution with block/
+  rewrite, execCmdEx runs in the workspace, the hardening removes the C
+  loader and nils loadlib, and newExtensibility assembles everything on one
+  interpreter.
+- Two real defects fixed during the slice (both gdb/nm-verified):
+  luaUpvalueIndex computed registry - i (-10001, an invalid pseudo-index in
+  5.1) instead of the real macro LUA_GLOBALSINDEX - i (-10003) — reading it
+  segfaulted; and lua_error longjmps out of Nim C-callback frames with frames
+  on, skipping frame pops and corrupting the runtime frame stack — the bridge
+  modules now compile with stacktrace: off.
+- Known limits: confinement is lexical (symlinks inside the workspace pointing
+  outside are followed); with no emit wired, process.run executes freely
+  (trusted-code model); the persistent jobstart-style primitive is a later
+  slice.
