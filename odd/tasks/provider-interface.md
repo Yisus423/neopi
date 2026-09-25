@@ -34,7 +34,7 @@ of our own. Swap-friendly: if nimgent stalls (solo dev, no releases), fork it
 
 ## Evidence
 
-- `90dc242` — feat: provider primitives with anti-corruption layer over nimgent
+- `4abd12e` — feat: provider primitives with anti-corruption layer over nimgent
   (10 files, 432 insertions: src/neopi/provider.nim, scripted + real tests,
   skeleton, task doc)
 - Tests: 10 run, 10 OK, 0 FAILED (scripted suite; the live OpenRouter check

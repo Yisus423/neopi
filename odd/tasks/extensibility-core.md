@@ -51,11 +51,11 @@ model: the core exposes primitives, Lua composes.
 
 ## Evidence
 
-- `90dc242` — feat: provider primitives with anti-corruption layer over nimgent
-- `c3fc62e` — docs: record provider-interface evidence
-- `4ba5923` — test: read live-check credentials from .env, fix the default free model
-- `0ab8197` — fix: untrack compiled test binary, route test builds to build/
-- `d5778b4` — feat: LuaJIT in-process hooks with block/rewrite over the provider layer
+- `4abd12e` — feat: provider primitives with anti-corruption layer over nimgent
+- `e3cdf27` — docs: record provider-interface evidence
+- `41214e2` — test: read live-check credentials from .env, fix the default free model
+- `b1b0362` — fix: untrack compiled test binary, route test builds to build/
+- `4ab9640` — feat: LuaJIT in-process hooks with block/rewrite over the provider layer
   (7 files, 632 insertions: lua.nim + hooks.nim + provider wiring + tp_lua.nim)
 - Independent verification (gentle-ai-verify): dispatcher run verbatim
   "[Summary] 17 tests run (2.80s): 17 OK, 0 FAILED, 0 SKIPPED" — including the

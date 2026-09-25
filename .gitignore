@@ -10,3 +10,7 @@ nimcache/
 tests/tp_all
 tests/tp_provider
 tests/tp_real
+
+# Compiled binaries
+*.out
+*.exe
