@@ -81,6 +81,11 @@ proc lua_getglobal*(L: ptr lua_State, name: cstring) {.inline.} =
 proc lua_setglobal*(L: ptr lua_State, name: cstring) {.inline.} =
   ## lua_setglobal is a macro in Lua 5.1's lua.h: setfield on the globals.
   lua_setfield(L, luaGlobalsIndex, name)
+template luaUpvalueIndex*(i: cint): cint =
+  ## lua_upvalueindex is a macro in Lua 5.1's lua.h: a pseudo-index below
+  ## the globals addressing the running C function's i-th upvalue
+  ## (LUA_UPVALUEINDEX(i) = LUA_GLOBALSINDEX - i = -10002 - i).
+  luaGlobalsIndex - i
 proc lua_settable*(L: ptr lua_State, idx: cint) {.importc.}
 proc lua_createtable*(L: ptr lua_State, narr: cint, nrec: cint) {.importc.}
 proc lua_rawgeti*(L: ptr lua_State, idx: cint, n: cint) {.importc.}
@@ -116,10 +121,32 @@ proc luaStackMessage(L: ptr lua_State): string =
   else:
     "lua error (non-string object on stack)"
 
+proc harden(L: LuaState) =
+  ## Close the native-code escape hatches: remove the C (dlopen) package
+  ## loader and nil the direct loadlib API, so scripts compute in Lua only —
+  ## no native-code escape hatch. Declared before newLuaState (which calls
+  ## it) and uses loadbuffer+pcall directly, which precede it: the chunk runs
+  ## under pcall containment, so a Lua error becomes a LuaError, never an
+  ## unwinding longjmp with no setjmp point.
+  const chunk = """
+table.remove(package.loaders, 3)
+package.loadlib = nil
+"""
+  if luaL_loadbuffer(L, chunk, csize_t(chunk.len), "harden") != 0:
+    let message = luaStackMessage(L)
+    lua_pop(L, 1)
+    raise LuaError.newException(message)
+  if lua_pcall(L, 0, 0, 0) != 0:
+    let message = luaStackMessage(L)
+    lua_pop(L, 1)
+    raise LuaError.newException(message)
+
 proc newLuaState*(): LuaState =
   ## Create an interpreter with the safe standard libs open: base, package,
   ## table, string, math, bit. ffi, io, os, debug, and jit stay closed, so
   ## scripts have no FFI, filesystem, process, or debug access by default.
+  ## harden also removes the C package loader and nils loadlib, so scripts
+  ## have no native-code escape hatch.
   result = luaL_newstate()
   if result.isNil:
     raise LuaError.newException("could not create the lua state")
@@ -129,6 +156,7 @@ proc newLuaState*(): LuaState =
   openLib(result, "string", luaopen_string)
   openLib(result, "math", luaopen_math)
   openLib(result, "bit", luaopen_bit)
+  harden(result)
 
 proc loadScript*(L: LuaState, code: string, name = "script"): bool =
   ## Compile a script chunk. False when compilation fails; the message stays

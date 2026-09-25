@@ -14,6 +14,12 @@ import neopi/lua
 # and hooks.nim's C code references the opaque state type too.
 {.emit: """/*TYPESECTION*/ typedef struct lua_State lua_State;""".}
 
+# stacktrace off: lua_error longjmps out of the Nim C-callback frames below;
+# with frames on it skips the frame pops and corrupts the runtime frame
+# stack (the next nimFrame call segfaults). These bridge modules are thin —
+# the loss of in-module stack traces is the price of the containment.
+{.push stacktrace: off.}
+
 proc lua_error*(L: LuaState): cint {.importc, cdecl.}
   ## Raise a Lua error from a Nim C function; never returns (it longjmps to
   ## the enclosing pcall). Declared here because lua.nim's frozen binding
@@ -28,7 +34,9 @@ proc raiseLuaError(L: LuaState, message: string) {.noreturn.} =
 type
   HookBus* = ref object
     ## Owns the embedded Lua interpreter and the registered handler count.
-    L: LuaState
+    ## `state` is the runtime handle: the assembly uses it to expose the fs
+    ## and process primitives on the same interpreter.
+    state*: LuaState
     handlers: int
 
   HookOutcome* = object
@@ -58,15 +66,15 @@ proc newHookBus*(): HookBus =
   ## Create a hook bus with its own embedded Lua interpreter, store the bus
   ## pointer in the Lua registry so the Nim-implemented `neopi_on` can reach
   ## its owner, and expose `neopi.on(event, handler)` to extension scripts.
-  result = HookBus(L: newLuaState(), handlers: 0)
-  setRegistryPointer(result.L, busRegistryKey, cast[pointer](result))
-  registerFunction(result.L, "neopi_on", luaOn)
+  result = HookBus(state: newLuaState(), handlers: 0)
+  setRegistryPointer(result.state, busRegistryKey, cast[pointer](result))
+  registerFunction(result.state, "neopi_on", luaOn)
   # Also expose the documented Lua API: a `neopi` table whose `on` field is
   # the same registration handler, so scripts call neopi.on(event, fn).
-  lua_createtable(result.L, 0, 1)
-  lua_pushcfunction(result.L, luaOn)
-  lua_setfield(result.L, -2, "on")
-  lua_setglobal(result.L, "neopi")
+  lua_createtable(result.state, 0, 1)
+  lua_pushcfunction(result.state, luaOn)
+  lua_setfield(result.state, -2, "on")
+  lua_setglobal(result.state, "neopi")
 
 proc emit*(bus: HookBus, event: string, payload: JsonNode): HookOutcome =
   ## Fire every handler registered for `event` in registration order. The
@@ -78,7 +86,7 @@ proc emit*(bus: HookBus, event: string, payload: JsonNode): HookOutcome =
   result = HookOutcome(allowed: true)
   if bus.handlers == 0:
     return
-  let L = bus.L
+  let L = bus.state
   # Registration refs are dense 1..handlers: `neopi_on` refs handlers
   # without ever unref'ing, so luaL_ref handed out exactly that many refs.
   for i in 1 .. bus.handlers:
@@ -106,4 +114,5 @@ proc emit*(bus: HookBus, event: string, payload: JsonNode): HookOutcome =
 proc loadExtension*(bus: HookBus, code: string) =
   ## Run an extension script in the bus's interpreter; its `neopi_on` calls
   ## register handlers. A LuaError here means the extension failed to load.
-  runScript(bus.L, code, "extension")
+  runScript(bus.state, code, "extension")
+{.pop.}
