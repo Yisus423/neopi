@@ -49,12 +49,28 @@ Continuing from an earlier entry creates another branch in the same file.
 
 ## Tasks
 
-- [ ] 1. `src/neopi/session.nim`: entry types + Session + newSession/append + JSONL round-trip
-- [ ] 2. navigateTo + history (the active path)
-- [ ] 3. Tests: append/load round-trip, navigate + branch, history = the active
+- [x] 1. `src/neopi/session.nim`: entry types + Session + newSession/append + JSONL round-trip
+- [x] 2. navigateTo + history (the active path)
+- [x] 3. Tests: append/load round-trip, navigate + branch, history = the active
       path, multi-branch in one file, persistence across reopen
-- [ ] 4. Work-unit commit(s) on main; record evidence here
+- [x] 4. Work-unit commit(s) on main; record evidence here
 
 ## Evidence
 
-(recorded as tasks close)
+- `7674da8` — feat: session tree - entries + JSONL + active branch
+  (session.nim + tp_session.nim + the dispatcher + the pending agent-tools
+  evidence doc)
+- Dispatcher verbatim: "[Summary] 48 tests run (5.78s): 48 OK, 0 FAILED,
+  0 SKIPPED" — session tree 7/7 among them (round-trip, line format,
+  history-as-path, branch in place, multi-branch persistence, unknown-id
+  error, malformed-line error).
+- Two real defects fixed during the slice: (1) Nim 2.2's splitLines yields a
+  TRAILING EMPTY string for a newline-terminated file — the load parsed ""
+  and failed the round-trip; fixed by stripping trailing newlines before
+  splitting. (2) The malformed-line test expected "model" while the
+  implementation reports the FIRST missing required field ("text") — the
+  test aligned to the first-missing-field contract.
+- The writer (gentle-ai-worker) left the module complete but stalled before
+  validating; the parent validated and fixed. Design deviations: the
+  call shape is a single append(variant) with id/parent/timestamp assigned by
+  the append itself; parentId is Option[int] (none for the root).
