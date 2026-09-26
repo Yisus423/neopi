@@ -1,12 +1,15 @@
-## Confined filesystem primitives for neopi's extensibility.
+## Confined filesystem primitives for neopi's extensibility, plus the shared
+## confinement the model-callable agent tools resolve against.
 ##
-## The `neopi.fs` table gives extension scripts read, write, exists, and list
-## access inside the workspace root, and nothing outside it. The workspace
-## root travels as a closure upvalue, so every operation resolves the
-## requested path against it; absolute requests outside the root and `..`
-## escapes are rejected with a Lua error. Known limit: confinement is lexical
-## (`normalizedPath` does not resolve symlinks), so a symlink inside the
-## workspace pointing outside it is followed.
+## `resolveConfined` is the one source of truth: the Lua ops in this module
+## translate its FsError into a Lua error, and the agent tools in
+## `neopi/tools` call it directly. The `neopi.fs` table gives extension
+## scripts read, write, exists, and list access inside the workspace root,
+## and nothing outside it. The workspace root travels as a closure upvalue,
+## so every operation resolves the requested path against it; absolute
+## requests outside the root and `..` escapes are rejected. Known limit:
+## confinement is lexical (`normalizedPath` does not resolve symlinks), so a
+## symlink inside the workspace pointing outside it is followed.
 
 import std/os
 from std/strutils import startsWith
@@ -17,6 +20,31 @@ from neopi/hooks import lua_error
 # calls into the Lua state directly, and no C headers exist to declare the
 # opaque state type.
 {.emit: """/*TYPESECTION*/ typedef struct lua_State lua_State;""".}
+
+type
+  FsError* = object of CatchableError
+    ## Raised when a requested path escapes the workspace root. The message is
+    ## model-facing: the Lua ops translate it into a Lua error, and the agent
+    ## tools let it propagate as a tool failure.
+
+proc resolveConfined*(root, requested: string): string =
+  ## Resolve `requested` against the workspace root `root`: a relative request
+  ## joins the root and an absolute request stands alone, both normalized. An
+  ## escape — an absolute request outside the root or a `..` that leaves it —
+  ## raises FsError. Confinement is lexical: normalizedPath does not resolve
+  ## symlinks.
+  let normalizedRoot = normalizedPath(root)
+  let joined =
+    if isAbsolute(requested): requested
+    else: normalizedRoot / requested
+  let normalized = normalizedPath(joined)
+  let sep = $DirSep
+  let prefix =
+    if normalizedRoot == sep: normalizedRoot
+    else: normalizedRoot & sep
+  if normalized != normalizedRoot and not normalized.startsWith(prefix):
+    raise newException(FsError, "path escapes the workspace root: " & requested)
+  result = normalized
 
 # stacktrace off: lua_error longjmps out of the Nim C-callback frames below;
 # with frames on it skips the frame pops and corrupts the runtime frame
@@ -42,21 +70,13 @@ proc pathArg(L: LuaState): string =
 
 proc confinedPath(L: LuaState, root, requested: string): string =
   ## Resolve `requested` against the workspace root `root`; an escape — an
-  ## absolute request outside the root or a `..` that leaves it — pushes the
-  ## message and raises it as a Lua error (never returns). Confinement is
-  ## lexical: normalizedPath does not resolve symlinks.
-  let normalizedRoot = normalizedPath(root)
-  let joined =
-    if isAbsolute(requested): requested
-    else: normalizedRoot / requested
-  let normalized = normalizedPath(joined)
-  let sep = $DirSep
-  let prefix =
-    if normalizedRoot == sep: normalizedRoot
-    else: normalizedRoot & sep
-  if normalized != normalizedRoot and not normalized.startsWith(prefix):
-    raiseLuaError(L, "path escapes the workspace root: " & requested)
-  result = normalized
+  ## absolute request outside the root or a `..` that leaves it — raises a
+  ## Lua error (never returns). The confinement lives in `resolveConfined`;
+  ## this wrapper translates the FsError into the same Lua-facing message.
+  try:
+    result = resolveConfined(root, requested)
+  except FsError as e:
+    raiseLuaError(L, e.msg)
 
 proc luaFsRead(L: LuaState): cint {.cdecl.} =
   ## Lua-side `neopi.fs.read(path)`: the file content as a string, or a Lua
