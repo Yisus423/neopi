@@ -56,13 +56,32 @@ existing toolCall primitive. This is the layer pi keeps in
 
 ## Tasks
 
-- [ ] 1. Shared confinement: `resolveConfined` + FsError in fs.nim, the Lua ops translated
-- [ ] 2. `src/neopi/tools.nim`: readTool + writeTool
-- [ ] 3. editTool (exact match, the three error paths) + bashTool
-- [ ] 4. Tests: happy paths + escape + not found + duplicate + no change +
+- [x] 1. Shared confinement: `resolveConfined` + FsError in fs.nim, the Lua ops translated
+- [x] 2. `src/neopi/tools.nim`: readTool + writeTool
+- [x] 3. editTool (exact match, the three error paths) + bashTool
+- [x] 4. Tests: happy paths + escape + not found + duplicate + no change +
       truncation + an end-to-end mini agent workflow (read → edit)
-- [ ] 5. Work-unit commit(s) on main; record evidence here
+- [x] 5. Work-unit commit(s) on main; record evidence here
 
 ## Evidence
 
-(recorded as tasks close)
+- `93fc832` — feat: agent tools - bash, read, edit, write as model tool calls
+  (5 files, 571 insertions: tools.nim + the fs.nim confinement refactor +
+  tp_tools.nim)
+- Independent verification (gentle-ai-verify): dispatcher verbatim
+  "[Summary] 41 tests run (2.33s): 41 OK, 0 FAILED, 0 SKIPPED" — the
+  confinement shared source confirmed, the read pipeline (number →
+  offset/limit → truncate with pi's notes), the edit error order (empty →
+  not found → duplicate → no change → replace), writeTool's parent-dir
+  creation, and the end-to-end read → edit workflow asserting the file
+  changed.
+- Verified finding: pi's MODEL-FACING read is NOT line-numbered (the
+  numbering is TUI-only, renderers/read.ts); neopi's read numbers per the
+  slice design — a one-line change if the user prefers pi's plain format.
+- Verified nuance: bashTool does NOT fs-confine its command (cwd only) — by
+  design and pi-canonical: bash's gate is the approval layer (the
+  process_run hook / a future harness approval), not the cwd.
+- Known limits: confinement is lexical (no symlink resolution); edit is
+  exact-match only (no fuzzy, no CRLF normalization); no mutation queue
+  (tools run sequentially); bash appends the exit-code note only when
+  non-zero.
