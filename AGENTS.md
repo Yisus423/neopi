@@ -3,11 +3,18 @@
 Project instructions for AI agents working in this repository. Alpha status,
 private project: the public API is frozen until real consumers exist.
 
-## CodeGraph
+## CodeGraph and the Nim language server
 
-This repo has no `.codegraph/` index yet — use `grep`/`find` or read files
-directly (offer to index it). When an index exists, reach for it BEFORE
-grep/find or reading files when you need to understand or locate code.
+The `.codegraph/` index exists and indexes ONLY the Lua layer (it has no
+parser for Nim — verified: "Files by Language: lua 4" of ~20 repo files).
+Use it BEFORE grep for the runtime Lua code:
+
+- **CodeGraph (Lua)**: `codegraph explore "<question>"` or the MCP tool —
+  the symbols and call paths of runtime/*.lua and tests/spec/*.lua.
+- **nimlangserver MCP (Nim)**: the nimFindSymbols/nimFindReferences tools for
+  symbol search and references, nimCheckProject/nimCheckFile for diagnostics —
+  configured in .mcp.json (load it by restarting the pi session).
+- **grep/find**: the fallback when the two above cannot answer.
 
 ## The build recipe (exact)
 
