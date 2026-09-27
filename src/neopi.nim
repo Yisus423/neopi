@@ -1,11 +1,9 @@
-## The neopi CLI entry: the print mode and the busted spec mode.
+## The neopi CLI entry: the print mode.
 ##
 ## `neopi "prompt"` assembles the extensibility runtime against the current
 ## directory, loads the Lua runtime, runs the agent loop with the prompt, and
 ## prints the final text to stdout. The provider key comes from the
-## environment or the local .env file. `neopi --spec <file>` runs a busted
-## spec inside the live Lua state with the core exposed (the nvim pattern:
-## the specs run in the host) and exits with busted's exit code.
+## environment or the local .env file.
 ##
 ## Errors (no key, provider failure, Lua failure) print a clear message to
 ## stderr and exit non-zero. Compile always with -o:build/neopi (never
@@ -25,7 +23,6 @@ const DefaultModel = "inclusionai/ling-3.0-flash-vl"
 
 const Usage = """Usage:
   neopi "prompt" [--provider openai|openrouter] [--model <id>]
-  neopi --spec <file>
 """
 
 proc fatal(msg: string) {.noreturn.} =
