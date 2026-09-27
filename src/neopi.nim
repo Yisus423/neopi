@@ -133,58 +133,10 @@ proc runPrint(prompt, providerName: string, modelId: string) =
   if response{"stopReason"}.getStr == "stepLimit":
     stderr.writeLine("neopi: the loop hit its step cap before the model finished")
 
-proc runSpec(specFile: string) =
-  ## The busted spec mode: run the spec inside a live Lua state with the core
-  ## exposed (the nvim pattern: the specs run in the host), then exit with
-  ## busted's exit code. busted's runner requires io, os, debug, lfs, and the
-  ## ffi preload, so the state assembles unhardened (the test/spec baseline).
-  ## The spec runs against a fresh temp workspace and a fresh temp session.
-  let stamp = ($epochTime()).replace(".", "-")
-  let workspace = getTempDir() / ("neopi-spec-" & stamp)
-  try:
-    createDir(workspace)
-  except OSError, IOError:
-    fatal("cannot create the spec workspace: " & getCurrentExceptionMsg())
-  let sessionPath = workspace / "session.jsonl"
-  let s = try: newSession(sessionPath)
-    except CatchableError as e:
-      fatal("cannot open the spec session: " & e.msg)
-  let ext = newExtensibility(workspace, none(Provider), s, hardened = false)
-  let L = ext.bus.state
-  # Extend package.path/cpath with the runtime directory and the luarocks
-  # local tree (the standard luarock layout: pure-Lua modules under
-  # ~/.luarocks/share/lua/5.1, C modules under ~/.luarocks/lib/lua/5.1).
-  let share = getHomeDir() / ".luarocks" / "share" / "lua" / "5.1"
-  let lib = getHomeDir() / ".luarocks" / "lib" / "lua" / "5.1"
-  let pathChunk = "package.path = '" &
-    escapeLua(runtimeDir() / "?.lua;" & runtimeDir() / "?/init.lua" & ";" &
-      share / "?.lua;" & share / "?/init.lua") & ";' .. package.path"
-  let cpathChunk = "package.cpath = '" &
-    escapeLua(lib / "?.so") & ";' .. package.cpath"
-  try:
-    runScript(L, pathChunk, "runtime-path")
-    runScript(L, cpathChunk, "runtime-cpath")
-    runScript(L, "arg = {'" & escapeLua(specFile) & "'}", "spec-args")
-  except LuaError as e:
-    fatal("cannot prepare the spec environment: " & e.msg)
-  loadRuntime(L)
-  # Run the spec inside the live state; busted exits the process with its
-  # own code (failures + errors), so control only returns on success.
-  try:
-    runScript(L, "require('busted.runner')({ standalone = false })", "spec-runner")
-  except LuaError as e:
-    fatal("the spec runner failed: " & e.msg)
-  try:
-    removeDir(workspace)
-  except OSError:
-    discard
-  quit(0)
-
 proc main() =
   var prompt = ""
   var providerName = "openrouter"
   var modelId = ""
-  var specFile = ""
   var sawPrompt = false
   var p = initOptParser()
   for kind, key, val in p.getopt():
@@ -193,7 +145,6 @@ proc main() =
       case key
       of "provider": providerName = val
       of "model": modelId = val
-      of "spec": specFile = val
       of "h", "help":
         stdout.writeLine(Usage)
         quit(0)
@@ -205,8 +156,6 @@ proc main() =
       prompt = key
       sawPrompt = true
     of cmdEnd: discard
-  if specFile.len > 0:
-    runSpec(specFile)
   if not sawPrompt:
     stderr.writeLine(Usage)
     quit(1)
