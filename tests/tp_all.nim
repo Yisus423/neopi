@@ -5,5 +5,6 @@ import tp_provider
 import tp_lua
 import tp_fs
 import tp_tools
+import tp_expose
 import tp_session
 import tp_real

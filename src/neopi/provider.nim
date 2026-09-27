@@ -62,12 +62,14 @@ type
     frStepLimit
 
   Response* = object
-    ## One generated answer with its usage metadata.
+    ## One generated answer with its usage metadata and the tool calls the
+    ## model requested (empty when the model answered without tools).
     text*: string
     finishReason*: FinishReason
     inputTokens*: int
     outputTokens*: int
     requestId*: string
+    toolCalls*: seq[tuple[id: string, name: string, args: JsonNode]]
 
   Tool* = object
     ## A model-callable tool: JSON Schema in, callback result back. A callback
@@ -188,10 +190,14 @@ proc toFinishReason(reason: ng.FinishReason): FinishReason =
   of ng.frUnknown: frUnknown
 
 proc toResponse(r: ng.ProviderResponse): Response =
-  ## Map a nimgent response onto the neopi response shape.
-  Response(text: ng.text(r), finishReason: toFinishReason(r.finishReason),
+  ## Map a nimgent response onto the neopi response shape, including the tool
+  ## calls the model requested (the local toolUse blocks).
+  result = Response(text: ng.text(r),
+    finishReason: toFinishReason(r.finishReason),
     inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens,
     requestId: r.requestId)
+  for call in r.toolCalls:
+    result.toolCalls.add (id: call.id, name: call.name, args: call.input)
 
 proc adaptStream(cb: StreamCallback): ng.StreamCallback =
   ## Map nimgent stream events onto the neopi callback. Thinking deltas and

@@ -91,6 +91,9 @@ proc lua_createtable*(L: ptr lua_State, narr: cint, nrec: cint) {.importc.}
 proc lua_rawgeti*(L: ptr lua_State, idx: cint, n: cint) {.importc.}
 proc lua_rawseti*(L: ptr lua_State, idx: cint, n: cint) {.importc.}
 proc lua_next*(L: ptr lua_State, idx: cint): cint {.importc.}
+proc lua_objlen*(L: ptr lua_State, idx: cint): csize_t {.importc.}
+  ## The length of the value at `idx` (5.1's name for what 5.2 calls
+  ## lua_rawlen).
 proc lua_call*(L: ptr lua_State, nargs: cint, nresults: cint) {.importc.}
 proc luaL_ref*(L: ptr lua_State, t: cint): cint {.importc.}
 proc luaL_unref*(L: ptr lua_State, t: cint, refIndex: cint) {.importc.}
@@ -114,8 +117,10 @@ proc openLib(L: ptr lua_State, name: string, opener: lua_CFunction) =
   lua_pushstring(L, name)
   lua_call(L, 1, 0)
 
-proc luaStackMessage(L: ptr lua_State): string =
+proc luaStackMessage*(L: LuaState): string =
   ## The error string on top of the stack, for a failed load or pcall.
+  ## Exported for the exposure and the CLI: every caller that pops a failed
+  ## load or pcall reads the message through this helper.
   if lua_type(L, -1) == luaTString:
     $lua_tolstring(L, -1, nil)
   else:
@@ -141,12 +146,16 @@ package.loadlib = nil
     lua_pop(L, 1)
     raise LuaError.newException(message)
 
-proc newLuaState*(): LuaState =
-  ## Create an interpreter with the safe standard libs open: base, package,
-  ## table, string, math, bit. ffi, io, os, debug, and jit stay closed, so
-  ## scripts have no FFI, filesystem, process, or debug access by default.
-  ## harden also removes the C package loader and nils loadlib, so scripts
-  ## have no native-code escape hatch.
+proc newLuaState*(hardened = true): LuaState =
+  ## Create an interpreter. With `hardened` (the default), the safe standard
+  ## libs open and the native-code escape hatches close: ffi, io, os, debug,
+  ## and jit stay closed, and the C package loader is removed, so scripts
+  ## have no FFI, filesystem, process, or native-code access. With
+  ## `hardened = false` (the test/spec baseline), the full 5.1 standard
+  ## library set opens the way luaL_openlibs does — io, os, debug, jit, and
+  ## ffi included, the C package loader intact — because the busted runner
+  ## requires io, os, debug, lfs, and the ffi preload (busted.luajit detects
+  ## any C-function runtime as LuaJIT), so the spec mode needs this baseline.
   result = luaL_newstate()
   if result.isNil:
     raise LuaError.newException("could not create the lua state")
@@ -156,7 +165,14 @@ proc newLuaState*(): LuaState =
   openLib(result, "string", luaopen_string)
   openLib(result, "math", luaopen_math)
   openLib(result, "bit", luaopen_bit)
-  harden(result)
+  if hardened:
+    harden(result)
+  else:
+    openLib(result, "io", luaopen_io)
+    openLib(result, "os", luaopen_os)
+    openLib(result, "debug", luaopen_debug)
+    openLib(result, "jit", luaopen_jit)
+    openLib(result, "ffi", luaopen_ffi)
 
 proc loadScript*(L: LuaState, code: string, name = "script"): bool =
   ## Compile a script chunk. False when compilation fails; the message stays
@@ -289,3 +305,18 @@ proc jsonOfStack*(L: LuaState, idx: cint): JsonNode =
         result[p.key] = p.value
   else:
     result = newJNull()
+
+proc evalJson*(L: LuaState, code: string): JsonNode =
+  ## Run `code` and return its result as a JSON value. Raises LuaError when
+  ## the chunk fails to compile or run. Completes the pushJson/jsonOfStack
+  ## pair for callers that need a structured result back from a chunk.
+  if not loadScript(L, code, "eval-json"):
+    let message = luaStackMessage(L)
+    lua_pop(L, 1)
+    raise LuaError.newException(message)
+  if lua_pcall(L, 0, 1, 0) != 0:
+    let message = luaStackMessage(L)
+    lua_pop(L, 1)
+    raise LuaError.newException(message)
+  result = jsonOfStack(L, -1)
+  lua_pop(L, 1)

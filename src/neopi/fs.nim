@@ -112,6 +112,20 @@ proc luaFsWrite(L: LuaState): cint {.cdecl.} =
   lua_pushnil(L)
   result = 1
 
+proc luaFsMkdir(L: LuaState): cint {.cdecl.} =
+  ## Lua-side `neopi.fs.mkdir(path)`: create a directory and its parents,
+  ## confined. A Lua error when the path escapes or the creation fails.
+  let path = confinedPath(L, rootOf(L), pathArg(L))
+  var failure = ""
+  try:
+    createDir(path)
+  except OSError, IOError:
+    failure = "fs.mkdir failed: " & getCurrentExceptionMsg()
+  if failure.len > 0:
+    raiseLuaError(L, failure)
+  lua_pushnil(L)
+  result = 1
+
 proc luaFsExists(L: LuaState): cint {.cdecl.} =
   ## Lua-side `neopi.fs.exists(path)`: true for an existing file or
   ## directory inside the workspace, false otherwise.
@@ -154,9 +168,10 @@ proc exposeFs*(L: LuaState, workspaceRoot: string) =
     lua_pop(L, 1)
     raise LuaError.newException(
       "exposeFs requires the neopi table (call newHookBus first)")
-  lua_createtable(L, 0, 4)
+  lua_createtable(L, 0, 5)
   exposeOp(L, "read", luaFsRead, workspaceRoot)
   exposeOp(L, "write", luaFsWrite, workspaceRoot)
+  exposeOp(L, "mkdir", luaFsMkdir, workspaceRoot)
   exposeOp(L, "exists", luaFsExists, workspaceRoot)
   exposeOp(L, "list", luaFsList, workspaceRoot)
   lua_setfield(L, -2, "fs")

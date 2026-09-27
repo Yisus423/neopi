@@ -146,6 +146,7 @@ suite "session tree":
       writeFile(path,
         """{"type":"user","id":1,"parentId":null,"timestamp":"t1","text":"hi"}
 not json
+{"type":"assistant","id":2,"parentId":1,"timestamp":"t2","model":"m1","provider":"p1","usageInput":1,"usageOutput":2,"stopReason":"end_turn"}
 """)
       var message = ""
       try:
@@ -157,6 +158,7 @@ not json
       writeFile(path,
         """{"type":"user","id":1,"parentId":null,"timestamp":"t1","text":"hi"}
 {"type":"assistant","id":2,"parentId":1,"timestamp":"t2"}
+{"type":"toolResult","id":3,"parentId":2,"timestamp":"t3","toolCallId":"call-1","toolName":"read","output":"x","isError":false}
 """)
       message = ""
       try:
@@ -165,5 +167,49 @@ not json
         message = e.msg
       check "line 2" in message
       check "text" in message
+    finally:
+      removeFile(path)
+
+  test "torn tail is discarded and truncated on the next append":
+    let path = freshPath("torn")
+    try:
+      writeFile(path,
+        """{"type":"user","id":1,"parentId":null,"timestamp":"t1","text":"hi"}
+{"type":"user","id":2,"parentId":1,"timestamp":"t2","text":"torn
+""")
+      let s = newSession(path)
+      check s.entries.len == 1
+      check s.currentId == 1
+      check s.tornTail
+      # The torn bytes are still on disk until the first append admits
+      # new writes.
+      check "torn" in readFile(path)
+      s.append(SessionEntry(kind: ekUser, text: "next"))
+      check not s.tornTail
+      let reopened = newSession(path)
+      check reopened.entries.len == 2
+      check reopened.entries[1].id == 2
+      check reopened.entries[1].parentId == some(1)
+      check reopened.entries[1].text == "next"
+      check not reopened.tornTail
+      check "torn" notin readFile(path)
+    finally:
+      removeFile(path)
+
+  test "a torn-only file starts fresh and truncates on the first append":
+    let path = freshPath("torn-only")
+    try:
+      writeFile(path, "{\"type\":\"user\",\"id\":1")
+      let s = newSession(path)
+      check s.entries.len == 0
+      check s.currentId == 0
+      check s.tornTail
+      s.append(SessionEntry(kind: ekUser, text: "first"))
+      check not s.tornTail
+      let reopened = newSession(path)
+      check reopened.entries.len == 1
+      check reopened.entries[0].id == 1
+      check reopened.entries[0].parentId.isNone
+      check reopened.entries[0].text == "first"
     finally:
       removeFile(path)

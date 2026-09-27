@@ -62,11 +62,13 @@ proc luaOn(L: LuaState): cint {.cdecl.} =
   inc bus.handlers
   result = 0
 
-proc newHookBus*(): HookBus =
-  ## Create a hook bus with its own embedded Lua interpreter, store the bus
-  ## pointer in the Lua registry so the Nim-implemented `neopi_on` can reach
-  ## its owner, and expose `neopi.on(event, handler)` to extension scripts.
-  result = HookBus(state: newLuaState(), handlers: 0)
+proc newHookBus*(hardened = true): HookBus =
+  ## Create a hook bus with its own embedded Lua interpreter (hardened by
+  ## default; `hardened = false` opens the full standard library set — the
+  ## test/spec baseline), store the bus pointer in the Lua registry so the
+  ## Nim-implemented `neopi_on` can reach its owner, and expose
+  ## `neopi.on(event, handler)` to extension scripts.
+  result = HookBus(state: newLuaState(hardened), handlers: 0)
   setRegistryPointer(result.state, busRegistryKey, cast[pointer](result))
   registerFunction(result.state, "neopi_on", luaOn)
   # Also expose the documented Lua API: a `neopi` table whose `on` field is

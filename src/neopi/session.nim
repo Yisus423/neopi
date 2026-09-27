@@ -16,6 +16,11 @@
 ## - `text` is a base field shared by user and assistant entries: Nim variant
 ##   branches cannot reuse a field name across branches.
 ##
+## A torn final line (a crashed process mid-append) is discarded whole at
+## load and truncated before new writes are admitted: the first append after
+## a torn tail rewrites the file without the torn bytes. Interior
+## malformation stays corruption (SessionError with the line number).
+##
 ## Known limits: the file is not locked, so concurrent writers are out of
 ## scope; load validation is per line (JSON validity, 1-based strictly
 ## increasing ids, parents that appear earlier in the file), so a file that
@@ -57,10 +62,13 @@ type
   Session* = ref object
     ## A session tree: the loaded entries in file order, the JSONL file they
     ## persist to, and the active branch's tip. `currentId` is 0 only while
-    ## the session is empty; the first append becomes the root.
+    ## the session is empty; the first append becomes the root. `tornTail`
+    ## records a discarded torn final line; the first append rewrites the
+    ## file without the torn bytes and clears it.
     entries*: seq[SessionEntry]
     path*: string
     currentId*: int
+    tornTail*: bool
 
 proc missingField(line: int, key: string) {.noinline, noreturn.} =
   ## One private helper for load failures: a required field is missing or has
@@ -94,9 +102,10 @@ proc reqParent(node: JsonNode, key: string, line: int): Option[int] =
     return some(node[key].getInt)
   missingField(line, key)
 
-proc entryToJson(entry: SessionEntry): JsonNode =
+proc entryToJson*(entry: SessionEntry): JsonNode =
   ## One entry as its JSONL object: type, id, parentId, timestamp, then the
-  ## kind-specific payload fields.
+  ## kind-specific payload fields. Exported for the exposure: the session
+  ## table's history() serializes each entry in this shape.
   result = newJObject()
   result["type"] = newJString($entry.kind)
   result["id"] = newJInt(entry.id)
@@ -169,12 +178,20 @@ proc newSession*(path: string): Session =
   let lines = content.strip(chars = {'\n', '\r'}).splitLines()
   var entries: seq[SessionEntry]
   var seen: HashSet[int]
+  var tornTail = false
   for i, line in lines:
     let lineNumber = i + 1
-    let node = try: parseJson(line)
-      except JsonParsingError as e:
-        raise newException(SessionError,
-          "line " & $lineNumber & ": invalid JSON: " & e.msg)
+    var node: JsonNode
+    try:
+      node = parseJson(line)
+    except JsonParsingError as e:
+      # A torn final line (a crashed process mid-append) is discarded whole;
+      # an interior failure is corruption with its line number.
+      if lineNumber == lines.len:
+        tornTail = true
+        break
+      raise newException(SessionError,
+        "line " & $lineNumber & ": invalid JSON: " & e.msg)
     let entry = entryFromJson(node, lineNumber)
     if entry.id < 1:
       raise newException(SessionError,
@@ -189,14 +206,18 @@ proc newSession*(path: string): Session =
     seen.incl entry.id
     entries.add entry
   let currentId = if entries.len > 0: entries[^1].id else: 0
-  result = Session(path: path, entries: entries, currentId: currentId)
+  result = Session(path: path, entries: entries, currentId: currentId,
+    tornTail: tornTail)
 
 proc append*(s: Session, entry: SessionEntry) =
   ## Append `entry` to the session: the id (last id + 1), the parent (the
   ## active branch's tip — none for the root), and the ISO 8601 timestamp are
   ## assigned here and overwrite what the caller set for those fields. One
   ## JSONL line is appended (existing lines are never rewritten) and
-  ## `currentId` moves to the new entry. A write failure raises SessionError.
+  ## `currentId` moves to the new entry. After a torn tail, the first append
+  ## rewrites the file without the torn bytes (truncating them before new
+  ## writes are admitted) and clears `tornTail`. A write failure raises
+  ## SessionError and leaves `tornTail` set, so the next append retries.
   let id = (if s.entries.len > 0: s.entries[^1].id else: 0) + 1
   var stored = entry
   stored.id = id
@@ -208,11 +229,24 @@ proc append*(s: Session, entry: SessionEntry) =
   toUgly(line, entryToJson(stored))
   line.add '\n'
   try:
-    var file = open(s.path, fmAppend)
-    try:
-      file.write(line)
-    finally:
-      file.close()
+    if s.tornTail:
+      var content = ""
+      for existing in s.entries:
+        toUgly(content, entryToJson(existing))
+        content.add '\n'
+      content.add line
+      var file = open(s.path, fmWrite)
+      try:
+        file.write(content)
+      finally:
+        file.close()
+      s.tornTail = false
+    else:
+      var file = open(s.path, fmAppend)
+      try:
+        file.write(line)
+      finally:
+        file.close()
   except IOError:
     raise newException(SessionError,
       "cannot append to session file: " & getCurrentExceptionMsg())

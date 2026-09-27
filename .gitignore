@@ -14,3 +14,6 @@ tests/tp_real
 # Compiled binaries
 *.out
 *.exe
+
+# neopi runtime state (sessions)
+.neopi/

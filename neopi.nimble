@@ -3,6 +3,7 @@ author        = "jesus"
 description   = "Minimal coding agent core: provider primitives + Lua extensibility"
 license       = "MIT"
 srcDir        = "src"
+bin           = @["neopi"]
 
 requires "nim >= 2.0.0"
 requires "https://github.com/martineastwood/nimgent"
