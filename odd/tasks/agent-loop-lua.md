@@ -87,13 +87,31 @@ drives, the runtime composes.
 
 ## Tasks
 
-- [ ] 1. Torn-line fix in session.nim (discard + truncate-on-next-append)
-- [ ] 2. The exposure: neopi.provider + neopi.session (Lua-callable)
-- [ ] 3. runtime/: init.lua + tools.lua + agent.lua (LuaCATS-annotated)
-- [ ] 4. The print mode: src/neopi.nim + bin target
-- [ ] 5. The busted spec mode + tests/spec/agent_spec.lua
-- [ ] 6. Work-unit commit(s) on main; record evidence here
+- [x] 1. Torn-line fix in session.nim (discard + truncate-on-next-append)
+- [x] 2. The exposure: neopi.provider + neopi.session (Lua-callable)
+- [x] 3. runtime/: init.lua + tools.lua + agent.lua (LuaCATS-annotated)
+- [x] 4. The print mode: src/neopi.nim + bin target
+- [x] 5. The busted spec mode + tests/spec/agent_spec.lua
+- [x] 6. Work-unit commit(s) on main; record evidence here
 
 ## Evidence
 
-(recorded as tasks close)
+- `03947ea` — feat: agent loop in Lua with the print mode and busted specs
+  (expose.nim + runtime/{init,tools,agent}.lua + src/neopi.nim + the torn-line
+  fix + the spec mode + tests)
+- Independent verification (gentle-ai-verify), verbatim:
+  - Nim: "[Summary] 57 tests run (2.38s): 57 OK, 0 FAILED, 0 SKIPPED"
+  - Busted: "2 successes / 0 failures / 0 errors / 0 pending"
+  - The torn-tail handling, the luaL_ref/pcall Lua-tool mapping, and the loop's
+    turn orchestration confirmed by reading.
+- THE FIRST REAL NEOPI RUN: `neopi "Say 'neopi print mode works'..."` printed
+  "neopi print mode works" — prompt → session → the Lua loop → generate live →
+  stdout.
+- Real bugs fixed during the slice: (1) parseopt puts cmdArgument in `key`,
+  not `val` — the prompt always arrived empty (the session file proved it:
+  "text": ""); (2) neopi.fs.write did not create parent directories — the
+  confined neopi.fs.mkdir op was added and the runtime's write calls it (pi's
+  write semantics); (3) the torn-line rule from pi's harness.md.
+- Known limits: the spec mode runs UNHARDENED (busted needs io/os/ffi);
+  steering/follow-up/abort are the interactive layer; compaction is 4c; the
+  runtime/ ships with the binary later (packaging).
