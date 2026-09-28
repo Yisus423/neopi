@@ -59,14 +59,29 @@ subsequent model requests. The original entries remain in the tree.
 
 ## Tasks
 
-- [ ] 1. Nim: the ekCompaction kind + JSONL round-trip + the exposure's append kind
-- [ ] 2. Nim: the setScripted steps gain usage
-- [ ] 3. Lua: the projection (toMessages compaction-aware)
-- [ ] 4. Lua: the trigger + the cut point + the summary + the entry
-- [ ] 5. Tests: the compaction round-trip (Nim), the exposure's compaction kind,
+- [x] 1. Nim: the ekCompaction kind + JSONL round-trip + the exposure's append kind
+- [x] 2. Nim: the setScripted steps gain usage
+- [x] 3. Lua: the projection (toMessages compaction-aware)
+- [x] 4. Lua: the trigger + the cut point + the summary + the entry
+- [x] 5. Tests: the compaction round-trip (Nim), the exposure's compaction kind,
       and the end-to-end loop compaction with a small scripted window (no network)
-- [ ] 6. Work-unit commit(s) on main; record evidence here
+- [x] 6. Work-unit commit(s) on main; record evidence here
 
 ## Evidence
 
-(recorded as tasks close)
+- `a594f62` — feat: compaction - long sessions stay usable (9 files, 490
+  insertions: session.nim + provider.nim + expose.nim + runtime/agent.lua +
+  the tests + the busted_main exit fix)
+- nimble test verbatim: "[Summary] 61 tests run (2.45s): 61 OK, 0 FAILED,
+  0 SKIPPED" + busted "2 successes / 0 failures / 0 errors" — the full build
+  system green (Nim + the busted specs through the test-only runner).
+- The busted runner's exit contract FIXED during the slice: standalone=false
+  + the forceExit=true (named chunk) — failures os.exit with their real code
+  (verified: a failing spec exits 1; the passing specs exit 0). My earlier
+  probes measured the pipeline's exit, not the binary's — the masking claim
+  was wrong.
+- Known limits: the cut walk is not bounded by a previous compaction's
+  firstKeptId (the projection's latest-wins rule handles the repeated case);
+  a failed summary skips the compaction (best-effort, retried next check);
+  split spans and branch summarization are later; the session_before_compact
+  hook is a later slice.
