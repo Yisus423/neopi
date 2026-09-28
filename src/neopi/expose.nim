@@ -117,6 +117,7 @@ proc makeLuaToolExecute(L: LuaState,
   ## generate luaL_unref's it after the response is built, and the closure
   ## dies with the tools seq.
   return proc (args: JsonNode): string =
+    lua_rawgeti(L, luaRegistryIndex, fnRef)
     pushJson(L, args)
     if lua_pcall(L, 1, 1, 0) != 0:
       let message = luaStackMessage(L)
@@ -195,6 +196,86 @@ proc registeredToolsOf(L: LuaState, fnRefs: var seq[cint]): seq[Tool] =
     lua_pop(L, 4)
   lua_pop(L, 2)
 
+type ProviderCallParts = tuple[model: string, messages: seq[Message],
+  tools: seq[Tool]]
+
+proc parseProviderConfig(L: LuaState, fnRefs: var seq[cint]): ProviderCallParts =
+  ## Parse the exposed provider config table (at stack index 1) into the
+  ## model, the messages, and the tools; the Lua tool execute refs join
+  ## `fnRefs` (the caller unref's them when the call completes). The config
+  ## is {model = string, messages = [{role, text}],
+  ## tools = [{name, description, schema, execute = function}] (optional)};
+  ## the tool list the model sees merges the config's tools with the runtime
+  ## registry's registered ones. Shared by generate and stream — one source
+  ## of truth for the config parsing.
+  let base = lua_gettop(L)
+  lua_getfield(L, 1, "model")
+  if lua_type(L, -1) != luaTString:
+    raiseLuaError(L, "neopi.provider: config.model must be a string")
+  result.model = $lua_tolstring(L, -1, nil)
+  lua_getfield(L, 1, "messages")
+  if lua_type(L, -1) != luaTTable:
+    raiseLuaError(L,
+      "neopi.provider: config.messages must be an array of {role, text}")
+  let messagesJson = jsonOfStack(L, -1)
+  if messagesJson.kind != JArray:
+    raiseLuaError(L,
+      "neopi.provider: config.messages must be an array of {role, text}")
+  for msg in messagesJson:
+    if msg.kind != JObject or not msg.hasKey("role") or not msg.hasKey("text"):
+      raiseLuaError(L,
+        "neopi.provider: each message needs {role, text}")
+    let role = msg["role"].getStr
+    case role
+    of "system":
+      result.messages.add Message(role: roleSystem, text: msg["text"].getStr)
+    of "user":
+      result.messages.add Message(role: roleUser, text: msg["text"].getStr)
+    of "assistant":
+      result.messages.add Message(role: roleAssistant, text: msg["text"].getStr)
+    else:
+      raiseLuaError(L,
+        "neopi.provider: unknown message role \"" & role & "\"")
+  lua_getfield(L, 1, "tools")
+  if lua_type(L, -1) != luaTNil:
+    if lua_type(L, -1) != luaTTable:
+      raiseLuaError(L,
+        "neopi.provider: config.tools must be an array of tool tables")
+    let toolsIdx = lua_gettop(L)
+    let count = int(lua_objlen(L, toolsIdx))
+    for i in 1 .. count:
+      lua_rawgeti(L, toolsIdx, cint(i))
+      let toolIdx = lua_gettop(L)
+      if lua_type(L, toolIdx) != luaTTable:
+        raiseLuaError(L,
+          "neopi.provider: config.tools entries must be tables")
+      lua_getfield(L, toolIdx, "name")
+      if lua_type(L, -1) != luaTString:
+        raiseLuaError(L,
+          "neopi.provider: each tool needs a name string")
+      let name = $lua_tolstring(L, -1, nil)
+      lua_getfield(L, toolIdx, "description")
+      let description =
+        if lua_type(L, -1) == luaTString: $lua_tolstring(L, -1, nil)
+        else: ""
+      lua_getfield(L, toolIdx, "schema")
+      let schema = jsonOfStack(L, -1)
+      lua_getfield(L, toolIdx, "execute")
+      if lua_type(L, -1) != luaTFunction:
+        raiseLuaError(L,
+          "neopi.provider: tool \"" & name &
+          "\" needs an execute function")
+      # luaL_ref pops the execute function and stores it in the registry;
+      # the Tool's execute closure calls it back through pcall.
+      let fnRef = luaL_ref(L, luaRegistryIndex)
+      fnRefs.add fnRef
+      result.tools.add Tool(name: name, description: description,
+        inputSchema: schema, execute: makeLuaToolExecute(L, fnRef))
+  lua_settop(L, base)
+  # The registered tools merge after the config's tools, with or without a
+  # config tools key: the model sees both.
+  result.tools.add registeredToolsOf(L, fnRefs)
+
 proc luaProviderGenerate(L: LuaState): cint {.cdecl.} =
   ## Lua-side `neopi.provider.generate(config)`: one model turn over the
   ## current backing provider. The config is
@@ -210,84 +291,16 @@ proc luaProviderGenerate(L: LuaState): cint {.cdecl.} =
   let context = cast[ptr ProviderContext](lua_touserdata(L, luaUpvalueIndex(1)))
   if lua_gettop(L) != 1 or lua_type(L, 1) != luaTTable:
     raiseLuaError(L, "neopi.provider.generate expects a config table")
-  let base = lua_gettop(L)
-  lua_getfield(L, 1, "model")
-  if lua_type(L, -1) != luaTString:
-    raiseLuaError(L, "neopi.provider.generate: config.model must be a string")
-  let modelId = $lua_tolstring(L, -1, nil)
-  lua_getfield(L, 1, "messages")
-  if lua_type(L, -1) != luaTTable:
-    raiseLuaError(L,
-      "neopi.provider.generate: config.messages must be an array of {role, text}")
-  let messagesJson = jsonOfStack(L, -1)
-  if messagesJson.kind != JArray:
-    raiseLuaError(L,
-      "neopi.provider.generate: config.messages must be an array of {role, text}")
-  var messages: seq[Message]
-  for msg in messagesJson:
-    if msg.kind != JObject or not msg.hasKey("role") or not msg.hasKey("text"):
-      raiseLuaError(L,
-        "neopi.provider.generate: each message needs {role, text}")
-    let role = msg["role"].getStr
-    case role
-    of "system":
-      messages.add Message(role: roleSystem, text: msg["text"].getStr)
-    of "user":
-      messages.add Message(role: roleUser, text: msg["text"].getStr)
-    of "assistant":
-      messages.add Message(role: roleAssistant, text: msg["text"].getStr)
-    else:
-      raiseLuaError(L,
-        "neopi.provider.generate: unknown message role \"" & role & "\"")
-  var tools: seq[Tool]
   var fnRefs: seq[cint]
-  lua_getfield(L, 1, "tools")
-  if lua_type(L, -1) != luaTNil:
-    if lua_type(L, -1) != luaTTable:
-      raiseLuaError(L,
-        "neopi.provider.generate: config.tools must be an array of tool tables")
-    let toolsIdx = lua_gettop(L)
-    let count = int(lua_objlen(L, toolsIdx))
-    for i in 1 .. count:
-      lua_rawgeti(L, toolsIdx, cint(i))
-      let toolIdx = lua_gettop(L)
-      if lua_type(L, toolIdx) != luaTTable:
-        raiseLuaError(L,
-          "neopi.provider.generate: config.tools entries must be tables")
-      lua_getfield(L, toolIdx, "name")
-      if lua_type(L, -1) != luaTString:
-        raiseLuaError(L,
-          "neopi.provider.generate: each tool needs a name string")
-      let name = $lua_tolstring(L, -1, nil)
-      lua_getfield(L, toolIdx, "description")
-      let description =
-        if lua_type(L, -1) == luaTString: $lua_tolstring(L, -1, nil)
-        else: ""
-      lua_getfield(L, toolIdx, "schema")
-      let schema = jsonOfStack(L, -1)
-      lua_getfield(L, toolIdx, "execute")
-      if lua_type(L, -1) != luaTFunction:
-        raiseLuaError(L,
-          "neopi.provider.generate: tool \"" & name &
-          "\" needs an execute function")
-      # luaL_ref pops the execute function and stores it in the registry;
-      # the Tool's execute closure calls it back through pcall.
-      let fnRef = luaL_ref(L, luaRegistryIndex)
-      fnRefs.add fnRef
-      tools.add Tool(name: name, description: description,
-        inputSchema: schema, execute: makeLuaToolExecute(L, fnRef))
-  lua_settop(L, base)
-  # The registered tools merge after the config's tools, with or without a
-  # config tools key: the model sees both.
-  tools.add registeredToolsOf(L, fnRefs)
+  let parts = parseProviderConfig(L, fnRefs)
   if context.provider.isNone:
     raiseLuaError(L,
       "no provider configured: set the API key in the environment or " &
       "call neopi.provider.setScripted")
   var r: Response
   try:
-    r = generate(model(context.provider.get, modelId), messages, tools,
-      maxSteps = 1)
+    r = generate(model(context.provider.get, parts.model), parts.messages,
+      parts.tools, maxSteps = 1)
   except CatchableError as e:
     for refIndex in fnRefs:
       luaL_unref(L, luaRegistryIndex, refIndex)
@@ -358,11 +371,87 @@ proc luaProviderSetScripted(L: LuaState): cint {.cdecl.} =
   lua_pushnil(L)
   result = 1
 
+proc makeLuaStreamEvent(L: LuaState,
+    fnRef: cint): StreamCallback =
+  ## The StreamCallback bridging to a Lua onEvent function: push the
+  ## {text = delta} table on text deltas and call the stored function through
+  ## pcall, returning its bool (false cancels the stream). A Lua error in the
+  ## handler raises Nim-side, where the stream's containment reports it.
+  return proc (ev: StreamEvent): bool =
+    if ev.kind != seTextDelta:
+      return true
+    lua_rawgeti(L, luaRegistryIndex, fnRef)
+    pushJson(L, %*{"text": ev.text})
+    if lua_pcall(L, 1, 1, 0) != 0:
+      let message = luaStackMessage(L)
+      lua_pop(L, 1)
+      raise newException(LuaError, message)
+    let keep = lua_type(L, -1) != luaTBoolean or lua_toboolean(L, -1) != 0
+    lua_pop(L, 1)
+    keep
+
+proc luaProviderStream(L: LuaState): cint {.cdecl.} =
+  ## Lua-side `neopi.provider.stream(config, onEvent)`: one model turn with
+  ## the text deltas streamed to the Lua onEvent (receiving {text = delta};
+  ## returning false cancels). The config and the response have the same
+  ## shape as generate's. The onEvent's fn ref is released when the call
+  ## completes; a Lua error in the handler surfaces as a provider failure.
+  let context = cast[ptr ProviderContext](lua_touserdata(L, luaUpvalueIndex(1)))
+  if lua_gettop(L) != 2 or lua_type(L, 1) != luaTTable or
+      lua_type(L, 2) != luaTFunction:
+    raiseLuaError(L,
+      "neopi.provider.stream expects (config: table, onEvent: function)")
+  var fnRefs: seq[cint]
+  let parts = parseProviderConfig(L, fnRefs)
+  let onEventRef = luaL_ref(L, luaRegistryIndex)
+  fnRefs.add onEventRef
+  if context.provider.isNone:
+    for refIndex in fnRefs:
+      luaL_unref(L, luaRegistryIndex, refIndex)
+    raiseLuaError(L,
+      "no provider configured: set the API key in the environment or " &
+      "call neopi.provider.setScripted")
+  var r: Response
+  try:
+    r = stream(model(context.provider.get, parts.model), parts.messages,
+      makeLuaStreamEvent(L, onEventRef), parts.tools, maxSteps = 1)
+  except CatchableError as e:
+    for refIndex in fnRefs:
+      luaL_unref(L, luaRegistryIndex, refIndex)
+    raiseLuaError(L, "neopi.provider.stream failed: " & e.msg)
+  lua_createtable(L, 0, 5)
+  pushString(L, r.text)
+  lua_setfield(L, -2, "text")
+  pushString(L, stopReasonOf(r))
+  lua_setfield(L, -2, "stopReason")
+  lua_createtable(L, 0, 2)
+  lua_pushinteger(L, r.inputTokens.lua_Integer)
+  lua_setfield(L, -2, "input")
+  lua_pushinteger(L, r.outputTokens.lua_Integer)
+  lua_setfield(L, -2, "output")
+  lua_setfield(L, -2, "usage")
+  lua_createtable(L, cint(r.toolCalls.len), 0)
+  for i, call in r.toolCalls:
+    lua_createtable(L, 0, 3)
+    pushString(L, call.id)
+    lua_setfield(L, -2, "id")
+    pushString(L, call.name)
+    lua_setfield(L, -2, "name")
+    pushJson(L, call.args)
+    lua_setfield(L, -2, "args")
+    lua_rawseti(L, -2, cint(i + 1))
+  lua_setfield(L, -2, "toolCalls")
+  pushString(L, context.provider.get.name)
+  lua_setfield(L, -2, "provider")
+  for refIndex in fnRefs:
+    luaL_unref(L, luaRegistryIndex, refIndex)
+  result = 1
+
 proc exposeProvider*(L: LuaState, backing: Option[Provider]) =
   ## Expose the `neopi.provider` table inside the existing `neopi` table:
-  ## generate(config) and setScripted(steps), both closures carrying the
-  ## provider context as their first upvalue. Requires `neopi` to exist
-  ## (newHookBus creates it).
+  ## generate(config), stream(config, onEvent), and setScripted(steps), all
+  ## closures carrying the provider context as their first upvalue. Requires
+  ## `neopi` to exist (newHookBus creates it).
   let context = create(ProviderContext)
   context.provider = backing
   lua_getfield(L, luaGlobalsIndex, "neopi")
@@ -370,10 +459,13 @@ proc exposeProvider*(L: LuaState, backing: Option[Provider]) =
     lua_pop(L, 1)
     raise LuaError.newException(
       "exposeProvider requires the neopi table (call newHookBus first)")
-  lua_createtable(L, 0, 2)
+  lua_createtable(L, 0, 3)
   lua_pushlightuserdata(L, cast[pointer](context))
   lua_pushcclosure(L, luaProviderGenerate, 1)
   lua_setfield(L, -2, "generate")
+  lua_pushlightuserdata(L, cast[pointer](context))
+  lua_pushcclosure(L, luaProviderStream, 1)
+  lua_setfield(L, -2, "stream")
   lua_pushlightuserdata(L, cast[pointer](context))
   lua_pushcclosure(L, luaProviderSetScripted, 1)
   lua_setfield(L, -2, "setScripted")

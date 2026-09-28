@@ -327,3 +327,45 @@ suite "exposure session":
     finally:
       removeDir(root)
       removeFile(path)
+
+  test "stream surfaces the deltas and the response":
+    let root = freshWorkspace("neopi-tp-expose-stream")
+    let path = freshSessionPath("stream")
+    try:
+      let ext = newExtensibility(root, none(Provider), newSession(path))
+      let L = ext.bus.state
+      runScript(L, "deltas = {}")
+      runScript(L,
+        "onEvent = function(e) deltas[#deltas + 1] = e.text; return true end")
+      runScript(L, "neopi.provider.setScripted({{text = 'streamed answer'}})")
+      let response = evalJson(L, """
+        return neopi.provider.stream({
+          model = "scripted",
+          messages = {{role = "user", text = "go"}},
+        }, onEvent)
+      """)
+      check response["text"].getStr == "streamed answer"
+      let landed = evalJson(L, "return deltas")
+      check landed.len == 1
+      check landed[0].getStr == "streamed answer"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "stream without onEvent behaves like generate":
+    let root = freshWorkspace("neopi-tp-expose-stream2")
+    let path = freshSessionPath("stream2")
+    try:
+      let ext = newExtensibility(root, none(Provider), newSession(path))
+      let L = ext.bus.state
+      runScript(L, "neopi.provider.setScripted({{text = 'plain answer'}})")
+      let response = evalJson(L, """
+        return neopi.provider.stream({
+          model = "scripted",
+          messages = {{role = "user", text = "go"}},
+        }, function(e) return true end)
+      """)
+      check response["text"].getStr == "plain answer"
+    finally:
+      removeDir(root)
+      removeFile(path)

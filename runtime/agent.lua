@@ -284,7 +284,11 @@ function agent.run(session, config)
     if config.system then
       request.system = config.system
     end
-    response = neopi.provider.generate(request)
+    if type(config.onEvent) == "function" then
+      response = neopi.provider.stream(request, config.onEvent)
+    else
+      response = neopi.provider.generate(request)
+    end
     session:append("assistant", {
       text = response.text or "",
       model = config.model,
