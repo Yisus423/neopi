@@ -129,6 +129,34 @@ suite "session tree":
     finally:
       removeFile(path)
 
+  test "compaction entry round-trip":
+    let path = freshPath("compaction")
+    try:
+      let s = newSession(path)
+      s.append(SessionEntry(kind: ekUser, text: "go"))
+      s.append(SessionEntry(kind: ekCompaction, summary: "did stuff",
+        firstKeptId: 1, tokensBefore: 900))
+      s.append(SessionEntry(kind: ekUser, text: "next"))
+      # The ids keep increasing after a compaction append.
+      check s.entries.len == 3
+      check s.entries[1].id == 2
+      check s.entries[2].id == 3
+      check s.currentId == 3
+      let reopened = newSession(path)
+      check reopened.entries.len == 3
+      check reopened.entries[1].kind == ekCompaction
+      check reopened.entries[1].id == 2
+      check reopened.entries[1].parentId == some(1)
+      check reopened.entries[1].summary == "did stuff"
+      check reopened.entries[1].firstKeptId == 1
+      check reopened.entries[1].tokensBefore == 900
+      check reopened.entries[2].kind == ekUser
+      check reopened.entries[2].id == 3
+      check reopened.entries[2].text == "next"
+      check reopened.history().len == 3
+    finally:
+      removeFile(path)
+
   test "navigateTo to an unknown id raises":
     let path = freshPath("unknown")
     try:

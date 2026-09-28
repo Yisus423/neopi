@@ -104,7 +104,11 @@ type
   ScriptStep* = object
     ## One scripted provider reply for application tests. A step with `text`
     ## replies with that text; otherwise it replies with its tool calls.
+    ## `usageInput` overrides the reply's reported input tokens (0 keeps the
+    ## default zero), so the agent loop's compaction trigger sees a real
+    ## token estimate in tests.
     text*: string
+    usageInput*: int
     toolCalls*: seq[tuple[id: string, name: string, args: JsonNode]]
 
 proc openAI*(apiKey: string, baseUrl = ""): Provider =
@@ -122,13 +126,15 @@ proc scriptedProvider*(steps: seq[ScriptStep]): Provider =
   ## Deterministic provider for tests: one scripted reply per request.
   var scripted: seq[ng.ProviderResponse]
   for step in steps:
+    let usage = ng.Usage(inputTokens: step.usageInput)
     if step.text.len > 0:
-      scripted.add ngTesting.textResponse(step.text)
+      scripted.add ngTesting.textResponse(step.text, usage = usage)
     else:
       var blocks: seq[ng.ContentBlock]
       for call in step.toolCalls:
         blocks.add ng.toolUse(call.id, call.name, call.args)
-      scripted.add ng.ProviderResponse(content: blocks, finishReason: ng.frToolUse)
+      scripted.add ng.ProviderResponse(content: blocks, finishReason: ng.frToolUse,
+        usage: usage)
   Provider(name: "fake", apiKey: "", baseUrl: "",
     impl: ngTestIng.FakeProvider(name: "fake", responses: scripted))
 

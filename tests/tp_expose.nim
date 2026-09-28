@@ -19,6 +19,31 @@ proc freshSessionPath(name: string): string =
   result = getTempDir() / ("neopi-tp-expose-" & name & ".jsonl")
   removeFile(result)
 
+proc escapeLua(s: string): string =
+  ## Escape a string for a single-quoted Lua literal: only the quote and the
+  ## backslash need escaping there.
+  result = ""
+  for c in s:
+    case c
+    of '\'', '\\': result.add "\\" & c
+    else: result.add c
+
+proc runtimeDir(): string =
+  ## The Lua runtime directory: <binary dir>/../runtime (a build from the
+  ## repo), else ./runtime.
+  let fromBinary = getAppDir() / ".." / "runtime"
+  if dirExists(fromBinary):
+    return fromBinary
+  result = "runtime"
+
+proc loadAgentLoop(L: LuaState) =
+  ## Extend package.path with the runtime directory and load the agent loop
+  ## into the global `agent` (the runtime layer's loop-in-Lua pattern).
+  let dir = runtimeDir()
+  runScript(L, "package.path = '" &
+    escapeLua(dir / "?.lua;" & dir / "?/init.lua") & ";' .. package.path")
+  runScript(L, "agent = require('agent')")
+
 suite "exposure provider":
   test "generate surfaces the scripted response and the tool calls":
     let root = freshWorkspace("neopi-tp-expose-provider")
@@ -120,6 +145,42 @@ suite "exposure provider":
       removeDir(root)
       removeFile(path)
 
+  test "setScripted steps carry usage for the compaction trigger":
+    let root = freshWorkspace("neopi-tp-expose-usage")
+    let path = freshSessionPath("usage")
+    try:
+      let ext = newExtensibility(root, none(Provider), newSession(path))
+      let L = ext.bus.state
+      runScript(L, """
+        neopi.provider.setScripted({
+          {text = "big reply", usageInput = 900},
+          {toolCalls = {{id = "call-1", name = "echo", args = {a = 1}}},
+           usageInput = 500},
+          {text = "plain"},
+        })
+      """)
+      let first = evalJson(L, """
+        return neopi.provider.generate({model = "scripted",
+          messages = {{role = "user", text = "go"}}})
+      """)
+      check first["text"].getStr == "big reply"
+      check first["usage"]["input"].getInt == 900
+      let second = evalJson(L, """
+        return neopi.provider.generate({model = "scripted",
+          messages = {{role = "user", text = "go"}}})
+      """)
+      check second["stopReason"].getStr == "toolUse"
+      check second["usage"]["input"].getInt == 500
+      let third = evalJson(L, """
+        return neopi.provider.generate({model = "scripted",
+          messages = {{role = "user", text = "go"}}})
+      """)
+      check third["text"].getStr == "plain"
+      check third["usage"]["input"].getInt == 0
+    finally:
+      removeDir(root)
+      removeFile(path)
+
 suite "exposure session":
   test "session wrap: append, history, and navigate":
     let root = freshWorkspace("neopi-tp-expose-session")
@@ -178,6 +239,78 @@ suite "exposure session":
       check history.len == 1
       check history[0]["type"].getStr == "toolResult"
       check history[0]["isError"].getBool
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "session append compaction kind lands and persists":
+    let root = freshWorkspace("neopi-tp-expose-compaction")
+    let path = freshSessionPath("compaction")
+    try:
+      let ext = newExtensibility(root, none(Provider), newSession(path))
+      let L = ext.bus.state
+      # The first-missing contract: a partial payload is rejected.
+      expect LuaError:
+        runScript(L, "neopi.session:append('compaction', {summary = 's'})")
+      runScript(L, """
+        neopi.session:append("compaction", {summary = "did stuff",
+          firstKeptId = 1, tokensBefore = 900})
+      """)
+      let history = evalJson(L, "return neopi.session:history()")
+      check history.len == 1
+      check history[0]["type"].getStr == "compaction"
+      check history[0]["summary"].getStr == "did stuff"
+      check history[0]["firstKeptId"].getInt == 1
+      check history[0]["tokensBefore"].getInt == 900
+      # The wrapped session persists: the file reloads with the entry intact.
+      let reopened = newSession(path)
+      check reopened.entries.len == 1
+      check reopened.entries[0].kind == ekCompaction
+      check reopened.entries[0].summary == "did stuff"
+      check reopened.entries[0].firstKeptId == 1
+      check reopened.entries[0].tokensBefore == 900
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "the agent loop compacts with a small scripted window":
+    let root = freshWorkspace("neopi-tp-expose-loopcompact")
+    let path = freshSessionPath("loopcompact")
+    try:
+      let ext = newExtensibility(root, none(Provider), newSession(path))
+      let L = ext.bus.state
+      loadAgentLoop(L)
+      # The scripted window: the echo tool call reports a large input, so the
+      # trigger fires after the first turn's tool results; the summary request
+      # consumes the second step and the final turn the third.
+      runScript(L, """
+        neopi.provider.setScripted({
+          {toolCalls = {{id = "call-1", name = "echo", args = {text = "x"}}},
+           usageInput = 950},
+          {text = "Summary: the user said go; an echo call failed."},
+          {text = "done"},
+        })
+      """)
+      runScript(L, "neopi.session:append('user', {text = 'go'})")
+      let response = evalJson(L, """
+        return agent.run(neopi.session, {model = "scripted",
+          contextWindow = 1000, reserveTokens = 100, keepRecentTokens = 200})
+      """)
+      check response["text"].getStr == "done"
+      check response["stopReason"].getStr == "stop"
+      # The compaction entry landed after the first turn's tool results: the
+      # history holds user, assistant (toolUse), toolResult, compaction,
+      # assistant (final text).
+      let history = evalJson(L, "return neopi.session:history()")
+      check history.len == 5
+      check history[3]["type"].getStr == "compaction"
+      check history[3]["summary"].getStr ==
+        "Summary: the user said go; an echo call failed."
+      check history[3]["tokensBefore"].getInt == 950
+      # firstKeptId points at a kept entry: the toolUse assistant (id 2).
+      check history[3]["firstKeptId"].getInt == 2
+      check history[1]["id"].getInt == 2
+      check history[1]["type"].getStr == "assistant"
     finally:
       removeDir(root)
       removeFile(path)

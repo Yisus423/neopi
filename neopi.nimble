@@ -19,3 +19,7 @@ task test, "Run the test suite":
   if dirExists(libDir) and not existsEnv("LD_LIBRARY_PATH"):
     putEnv("LD_LIBRARY_PATH", libDir)
   exec "nim c -r --hints:off --threads:on --mm:orc -o:build/tp_all tests/tp_all.nim"
+  # The busted specs for the Lua layer, through the test-only runner (never
+  # shipped; a failing spec exits non-zero and fails this task).
+  exec "nim c --hints:off --threads:on --mm:orc -o:build/busted_main tests/busted_main.nim"
+  exec "./build/busted_main tests/spec"

@@ -60,6 +60,26 @@ type
 const providerRegistryKey = "neopi.provider.context"
 const sessionRegistryKey = "neopi.session"
 
+func payloadInt(payload: JsonNode, key: string): int =
+  ## An optional integer field of the payload: 0 when absent or not a number.
+  if payload.hasKey(key) and payload[key].kind in {JInt, JFloat}:
+    if payload[key].kind == JInt: payload[key].getInt
+    else: int(payload[key].getFloat)
+  else:
+    0
+
+func payloadString(payload: JsonNode, key: string): string =
+  ## An optional string field of the payload: "" when absent or not a string.
+  if payload.hasKey(key) and payload[key].kind == JString:
+    payload[key].getStr
+  else:
+    ""
+
+func payloadBool(payload: JsonNode, key: string): bool =
+  ## An optional boolean field of the payload: false when absent or not a
+  ## boolean.
+  payload.hasKey(key) and payload[key].kind == JBool and payload[key].getBool
+
 func stopReasonOf(r: Response): string =
   ## The response's stop reason in the Lua layer's spelling: a response that
   ## stopped for tool use reports "toolUse" (nimgent spells the step-limit
@@ -213,8 +233,10 @@ proc luaProviderSetScripted(L: LuaState): cint {.cdecl.} =
   ## for a deterministic scripted one (the nimgent scriptedModel pattern) —
   ## the test surface for in-process specs without network. A step with
   ## `text` replies with that text; otherwise it replies with its
-  ## `toolCalls` ({id, name, args}). The swap lasts for the process
-  ## lifetime; there is no unswap.
+  ## `toolCalls` ({id, name, args}). An optional `usageInput` number sets the
+  ## reply's reported input tokens (the compaction trigger's token estimate
+  ## in tests); without it the reply's usage is zero. The swap lasts for the
+  ## process lifetime; there is no unswap.
   let context = cast[ptr ProviderContext](lua_touserdata(L, luaUpvalueIndex(1)))
   if lua_gettop(L) != 1 or lua_type(L, 1) != luaTTable:
     raiseLuaError(L, "neopi.provider.setScripted expects an array of steps")
@@ -228,6 +250,7 @@ proc luaProviderSetScripted(L: LuaState): cint {.cdecl.} =
     var parsed = ScriptStep()
     if step.hasKey("text") and step["text"].kind == JString:
       parsed.text = step["text"].getStr
+    parsed.usageInput = payloadInt(step, "usageInput")
     if step.hasKey("toolCalls") and step["toolCalls"].kind == JArray:
       for call in step["toolCalls"]:
         if call.kind != JObject or not call.hasKey("id") or
@@ -263,32 +286,13 @@ proc exposeProvider*(L: LuaState, backing: Option[Provider]) =
   lua_setfield(L, -2, "provider")
   lua_pop(L, 1)
 
-func payloadInt(payload: JsonNode, key: string): int =
-  ## An optional integer field of the payload: 0 when absent or not a number.
-  if payload.hasKey(key) and payload[key].kind in {JInt, JFloat}:
-    if payload[key].kind == JInt: payload[key].getInt
-    else: int(payload[key].getFloat)
-  else:
-    0
-
-func payloadString(payload: JsonNode, key: string): string =
-  ## An optional string field of the payload: "" when absent or not a string.
-  if payload.hasKey(key) and payload[key].kind == JString:
-    payload[key].getStr
-  else:
-    ""
-
-func payloadBool(payload: JsonNode, key: string): bool =
-  ## An optional boolean field of the payload: false when absent or not a
-  ## boolean.
-  payload.hasKey(key) and payload[key].kind == JBool and payload[key].getBool
-
 proc luaSessionAppend(L: LuaState): cint {.cdecl.} =
   ## Lua-side `neopi.session:append(kind, payload)`: build the SessionEntry
   ## from the kind and the payload table and append it. The id, the parent,
   ## and the timestamp are assigned by the Nim append; the payload carries
   ## the kind-specific fields (text; text, model, provider, usageInput,
-  ## usageOutput, stopReason; toolCallId, toolName, output, isError).
+  ## usageOutput, stopReason; toolCallId, toolName, output, isError; summary,
+  ## firstKeptId, tokensBefore).
   let s = cast[Session](getRegistryPointer(L, sessionRegistryKey))
   if s.isNil or lua_gettop(L) != 3 or lua_type(L, 1) != luaTTable or
       lua_type(L, 2) != luaTString or lua_type(L, 3) != luaTTable:
@@ -324,9 +328,19 @@ proc luaSessionAppend(L: LuaState): cint {.cdecl.} =
       toolCallId: payload["toolCallId"].getStr,
       toolName: payload["toolName"].getStr, output: payload["output"].getStr,
       isError: payloadBool(payload, "isError"))
+  of "compaction":
+    if not payload.hasKey("summary") or not payload.hasKey("firstKeptId") or
+        not payload.hasKey("tokensBefore"):
+      raiseLuaError(L,
+        "the compaction payload needs summary, firstKeptId, and tokensBefore")
+    entry = SessionEntry(kind: ekCompaction,
+      summary: payloadString(payload, "summary"),
+      firstKeptId: payloadInt(payload, "firstKeptId"),
+      tokensBefore: payloadInt(payload, "tokensBefore"))
   else:
     raiseLuaError(L,
-      "unknown entry kind \"" & kind & "\" (user, assistant, or toolResult)")
+      "unknown entry kind \"" & kind & "\" (user, assistant, toolResult, " &
+      "or compaction)")
   try:
     s.append(entry)
   except CatchableError as e:

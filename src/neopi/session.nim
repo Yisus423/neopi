@@ -33,11 +33,15 @@ type
     ## Raised for session load, parse, validation, and append failures.
 
   EntryKind* = enum
-    ## The MVP entry kinds persisted in a session file. The strings are the
-    ## JSONL `"type"` spelling, so `$` and the file round-trip directly.
+    ## The entry kinds persisted in a session file. The strings are the JSONL
+    ## `"type"` spelling, so `$` and the file round-trip directly. Compaction
+    ## entries record a summarization of the conversation that precedes them:
+    ## the original entries stay in the tree, and the projection (the loop's
+    ## toMessages) replaces them with the summary.
     ekUser = "user"
     ekAssistant = "assistant"
     ekToolResult = "toolResult"
+    ekCompaction = "compaction"
 
   SessionEntry* = object
     ## One entry in the session tree. Base fields: `id` (1-based, increasing
@@ -58,6 +62,9 @@ type
     of ekToolResult:
       toolCallId*, toolName*, output*: string
       isError*: bool
+    of ekCompaction:
+      summary*: string
+      firstKeptId*, tokensBefore*: int
 
   Session* = ref object
     ## A session tree: the loaded entries in file order, the JSONL file they
@@ -128,6 +135,10 @@ proc entryToJson*(entry: SessionEntry): JsonNode =
     result["toolName"] = newJString(entry.toolName)
     result["output"] = newJString(entry.output)
     result["isError"] = newJBool(entry.isError)
+  of ekCompaction:
+    result["summary"] = newJString(entry.summary)
+    result["firstKeptId"] = newJInt(entry.firstKeptId)
+    result["tokensBefore"] = newJInt(entry.tokensBefore)
 
 proc entryFromJson(node: JsonNode, line: int): SessionEntry =
   ## Rebuild one entry from a parsed JSONL line. The `"type"` discriminator
@@ -155,6 +166,11 @@ proc entryFromJson(node: JsonNode, line: int): SessionEntry =
       toolName: reqString(node, "toolName", line),
       output: reqString(node, "output", line),
       isError: reqBool(node, "isError", line))
+  of "compaction":
+    result = SessionEntry(kind: ekCompaction, id: id, parentId: parentId,
+      timestamp: timestamp, summary: reqString(node, "summary", line),
+      firstKeptId: reqInt(node, "firstKeptId", line),
+      tokensBefore: reqInt(node, "tokensBefore", line))
   else:
     raise newException(SessionError,
       "line " & $line & ": unknown entry type \"" & typeStr & "\"")

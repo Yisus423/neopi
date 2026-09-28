@@ -95,17 +95,19 @@ proc main() =
   try:
     runScript(L, pathChunk, "runtime-path")
     runScript(L, cpathChunk, "runtime-cpath")
-    runScript(L, "arg = {'busted', '" & escapeLua(specs) & "'}", "spec-args")
+    # One element: the specs path lands at arg[0], which cliargs' splat
+    # (registered only in non-standalone mode) absorbs.
+    runScript(L, "arg = {'" & escapeLua(specs) & "'}", "spec-args")
   except LuaError as e:
     stderr.writeLine("busted_main: cannot prepare the spec environment: " & e.msg)
     quit(1)
   loadRuntime(L)
-  # busted's standalone runner exits the process with its own code —
-  # standalone = false would raise a Lua error instead (Lua 5.1's os.exit
-  # cannot force), which the containment catches and a success exit would
-  # mask spec failures.
+  # standalone = false: busted's CLI registers the positional ROOT splat only
+  # in this mode (the specs cannot load positionally otherwise). The exit code
+  # is still correct: the runner's forceExit is true when called from a named
+  # chunk (not a file), so failures os.exit with their real code.
   try:
-    runScript(L, "require('busted.runner')({ standalone = true })", "spec-runner")
+    runScript(L, "require('busted.runner')({ standalone = false })", "spec-runner")
   except LuaError as e:
     stderr.writeLine("busted_main: the spec runner failed: " & e.msg)
     quit(1)
