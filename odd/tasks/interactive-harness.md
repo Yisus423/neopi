@@ -51,8 +51,8 @@ it and renders the session.
 
 ## Tasks
 
-- [ ] 1. The exposure: neopi.provider.stream (the onEvent variant)
-- [ ] 2. The loop (runtime/agent.lua): stream when the config has onEvent
+- [x] 1. The exposure: neopi.provider.stream (the onEvent variant)
+- [x] 2. The loop (runtime/agent.lua): stream when the config has onEvent
 - [ ] 3. The TUI: illwill + the component model (requestRender)
 - [ ] 4. The three components: transcript + composer + footer
 - [ ] 5. The keys + the flow (no prompt → the TUI; the session persists)
@@ -60,4 +60,16 @@ it and renders the session.
 
 ## Evidence
 
-(recorded as tasks close)
+- `12ebb39` — feat: the streaming exposure - neopi.provider.stream with live
+  deltas (4 files, 239 insertions: the parseProviderConfig refactor + the
+  stream entry + the loop's stream + the tests)
+- nimble test verbatim: "[Summary] 68 tests run (2.04s): 68 OK, 0 FAILED,
+  0 SKIPPED" + busted "4 successes" — the streaming tests (the deltas land +
+  the response returns + the no-onEvent path) pass.
+- A real bug fixed: the Lua-callback bridges did not load the stored fn via
+  lua_rawgeti before pcall — the tool bridge worked by the call stack's
+  accident; the stream bridge exposed it ("attempt to call a table value").
+  Both bridges load the fn now.
+- Re-sliced: 5a-1 (the streaming, done) + 5a-2 (the TUI, remaining) — the
+  writer stalled on the big reads; the parent implemented the small slice
+  inline.
