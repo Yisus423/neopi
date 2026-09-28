@@ -14,7 +14,7 @@ surface is frozen until real consumers exist; expect churn before then.
 1. Build and test (Nim 2.2; the suite is self-contained):
 
    ```bash
-   nimble test                          # 57 tests; the live check self-skips without a key
+   nimble test                          # 68 Nim tests + 4 busted specs; the live check needs a key
    nim c -o:build/neopi src/neopi.nim   # the print-mode binary
    ```
 
