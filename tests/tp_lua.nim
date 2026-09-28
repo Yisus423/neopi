@@ -46,6 +46,23 @@ suite "hooks":
     check unregistered.allowed
     check not unregistered.patched
 
+  test "emit only fires handlers registered for the event":
+    let bus = newHookBus()
+    loadExtension(bus, """
+      neopi.on("tool_call", function(p)
+        return {tool = p.tool, saw = "tool_call handler"}
+      end)
+      neopi.on("tool_result", function(p)
+        return {tool = p.tool, saw = "tool_result handler"}
+      end)
+    """)
+    let call = bus.emit("tool_call", %*{"tool": "x"})
+    check call.patched
+    check call.payload["saw"].getStr == "tool_call handler"
+    let result = bus.emit("tool_result", %*{"tool": "x", "output": "y"})
+    check result.patched
+    check result.payload["saw"].getStr == "tool_result handler"
+
   test "tool_call rewrite":
     let bus = newHookBus()
     loadExtension(bus, """

@@ -7,7 +7,7 @@
 ## composes, and a handler error aborts only that handler's contribution,
 ## never the host.
 
-import std/json
+import std/[json, tables]
 import neopi/lua
 
 # Same file-scope typedef as lua.nim: each module generates its own C file,
@@ -33,11 +33,12 @@ proc raiseLuaError(L: LuaState, message: string) {.noreturn.} =
 
 type
   HookBus* = ref object
-    ## Owns the embedded Lua interpreter and the registered handler count.
-    ## `state` is the runtime handle: the assembly uses it to expose the fs
-    ## and process primitives on the same interpreter.
+    ## Owns the embedded Lua interpreter and the registered handlers per
+    ## event, in registration order. `state` is the runtime handle: the
+    ## assembly uses it to expose the fs and process primitives on the same
+    ## interpreter.
     state*: LuaState
-    handlers: int
+    handlers: Table[string, seq[cint]]
 
   HookOutcome* = object
     ## Result of one emit pass: whether the event is allowed, why it was
@@ -60,8 +61,9 @@ proc luaOn(L: LuaState): cint {.cdecl.} =
   if bus.isNil or lua_gettop(L) != 2 or lua_type(L, 1) != luaTString or
       lua_type(L, 2) != luaTFunction:
     raiseLuaError(L, "neopi.on expects (event: string, handler: function)")
-  discard luaL_ref(L, luaRegistryIndex)
-  inc bus.handlers
+  let event = $lua_tolstring(L, 1, nil)
+  let refIdx = luaL_ref(L, luaRegistryIndex)
+  bus.handlers.mgetOrPut(event, @[]).add refIdx
   result = 0
 
 proc newHookBus*(hardened = true): HookBus =
@@ -70,7 +72,8 @@ proc newHookBus*(hardened = true): HookBus =
   ## test/spec baseline), store the bus pointer in the Lua registry so the
   ## Nim-implemented `neopi_on` can reach its owner, and expose
   ## `neopi.on(event, handler)` to extension scripts.
-  result = HookBus(state: newLuaState(hardened), handlers: 0)
+  result = HookBus(state: newLuaState(hardened),
+    handlers: initTable[string, seq[cint]]())
   setRegistryPointer(result.state, busRegistryKey, cast[pointer](result))
   registerFunction(result.state, "neopi_on", luaOn)
   # Also expose the documented Lua API: a `neopi` table whose `on` field is
@@ -88,13 +91,14 @@ proc emit*(bus: HookBus, event: string, payload: JsonNode): HookOutcome =
   ## Any blocked outcome stops the pass immediately. A Lua error inside a
   ## handler aborts only that handler's contribution.
   result = HookOutcome(allowed: true)
-  if bus.handlers == 0:
+  let registered = bus.handlers.getOrDefault(event)
+  if registered.len == 0:
     return
   let L = bus.state
-  # Registration refs are dense 1..handlers: `neopi_on` refs handlers
-  # without ever unref'ing, so luaL_ref handed out exactly that many refs.
-  for i in 1 .. bus.handlers:
-    lua_rawgeti(L, luaRegistryIndex, cint(i))
+  # The refs registered for THIS event, in registration order. Handlers are
+  # never unref'ed (unregistering is a later slice), so each ref stays live.
+  for refIdx in registered:
+    lua_rawgeti(L, luaRegistryIndex, refIdx)
     pushJson(L, payload)
     if lua_pcall(L, 1, 2, 0) != 0:
       lua_pop(L, 1)  # containment: skip this handler's contribution
