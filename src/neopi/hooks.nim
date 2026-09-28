@@ -47,7 +47,9 @@ type
     patched*: bool
     payload*: JsonNode
 
-const busRegistryKey = "neopi.bus"
+const busRegistryKey* = "neopi.bus"
+  ## The Lua registry key under which the bus pointer travels, so the
+  ## Nim-implemented neopi_on and neopi.emit reach their owner.
 
 proc luaOn(L: LuaState): cint {.cdecl.} =
   ## Lua-side `neopi.on(event, fn)`: validate the registration, store the

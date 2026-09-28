@@ -1,12 +1,12 @@
 ## Assembly of neopi's extensibility surface: the hook bus, the provider and
-## session exposures, the confined fs primitives, and the spawn-per-call
-## process primitive on one embedded Lua interpreter.
+## session exposures, the confined fs primitives, the spawn-per-call
+## process primitive, and the hook emit on one embedded Lua interpreter.
 ##
 ## `newExtensibility` owns the interpreter: extension scripts register
-## handlers with `neopi.on`, compute in Lua only, and reach side effects
-## exclusively through the confined `neopi.fs` and `neopi.process` tables;
-## the runtime layer reaches the provider and the session through
-## `neopi.provider` and `neopi.session`.
+## handlers with `neopi.on`, publish events with `neopi.emit`, compute in
+## Lua only, and reach side effects exclusively through the confined
+## `neopi.fs` and `neopi.process` tables; the runtime layer reaches the
+## provider and the session through `neopi.provider` and `neopi.session`.
 
 import std/[json, options]
 import neopi/lua
@@ -46,6 +46,7 @@ proc newExtensibility*(workspaceRoot: string, provider = none(Provider),
   if not session.isNil:
     exposeSession(result.bus.state, session)
   exposeProvider(result.bus.state, provider)
+  exposeEmit(result.bus.state)
   if workspaceRoot.len == 0:
     return
   let bus = result.bus

@@ -1,9 +1,10 @@
 --- The agent loop: turn orchestration over the exposed core primitives.
 --- Each turn builds the request from the session history and the runtime
---- tools, calls neopi.provider.generate (one model turn per call), appends
---- the assistant entry, executes the tool calls when the model requested
---- them, and records the tool results in the session. The loop returns the
---- final response table.
+--- tools (the generate merges the runtime registry's registered ones into
+--- the tool list the model sees), calls neopi.provider.generate (one model
+--- turn per call), appends the assistant entry, executes the tool calls
+--- when the model requested them, and records the tool results in the
+--- session. The loop returns the final response table.
 --- @module runtime.agent
 
 local toolset = require("tools")
@@ -187,9 +188,19 @@ local function compact(session, model, keepRecentTokens, contextTokens)
   return true
 end
 
---- Execute one tool call with the runtime tools, returning the output and
---- the error flag. A tool error becomes a failed tool result for the model
---- (the core's tool protocol), never a loop abort.
+--- Execute one tool call with the runtime tools and the registered tools,
+--- returning the output and the error flag. The lookup checks the runtime
+--- toolset first and falls back to neopi.registeredTools() (the registry's
+--- entries, whose execute is a Lua function called directly); the fallback
+--- is skipped when the runtime entry is not loaded (no registeredTools in
+--- the state). Every execution fires the tool_call hook before it and the
+--- tool_result hook after it through neopi.emit (the mappedTools pattern,
+--- applied uniformly to the runtime and the registered tools): a block
+--- keeps the tool from running (the reason is the failed result), a patched
+--- payload's args replace the model's arguments, and a patched tool_result
+--- payload's output rewrites the output the model sees. A tool or hook
+--- error becomes a failed tool result for the model (the core's tool
+--- protocol), never a loop abort.
 --- @param name string -- the tool name the model called
 --- @param args table -- the call's arguments
 --- @return string, boolean -- the output and whether it is an error
@@ -202,13 +213,47 @@ local function executeCall(name, args)
     end
   end
   if not tool then
+    local registered = {}
+    if type(neopi.registeredTools) == "function" then
+      registered = neopi.registeredTools()
+    end
+    for _, t in ipairs(registered) do
+      if t.name == name then
+        tool = t
+        break
+      end
+    end
+  end
+  if not tool then
     return "unknown tool: " .. tostring(name), true
   end
-  local ok, result = pcall(tool.execute, args)
+  local effective = args
+  local ok, verdict = pcall(neopi.emit, "tool_call", {tool = name, args = args})
   if not ok then
+    return "hook error: " .. tostring(verdict), true
+  end
+  if not verdict.allowed then
+    if verdict.reason and verdict.reason ~= "" then
+      return verdict.reason, true
+    end
+    return "tool blocked", true
+  end
+  if verdict.patched and type(verdict.payload) == "table" and
+      verdict.payload.args ~= nil then
+    effective = verdict.payload.args
+  end
+  local ran, result = pcall(tool.execute, effective)
+  if not ran then
     return tostring(result), true
   end
-  return tostring(result), false
+  local output = tostring(result)
+  local sent, outcome = pcall(neopi.emit, "tool_result",
+    {tool = name, output = output})
+  if sent and type(outcome) == "table" and outcome.patched and
+      type(outcome.payload) == "table" and outcome.payload.output ~= nil then
+    output = tostring(outcome.payload.output)
+  end
+  return output, false
 end
 
 --- Run the agent loop: build the request from the session history and the

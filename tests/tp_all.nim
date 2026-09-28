@@ -7,4 +7,5 @@ import tp_fs
 import tp_tools
 import tp_expose
 import tp_session
+import tp_register
 import tp_real

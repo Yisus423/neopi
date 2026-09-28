@@ -4,13 +4,18 @@
 ## `neopi.provider.generate(config)` runs ONE model turn (maxSteps 1): the
 ## config carries the model, the message list, and the optional Lua-defined
 ## tools; the response surfaces the text, the stop reason, the usage, and the
-## tool calls the model requested. The Lua loop in the runtime layer owns the
-## turn orchestration and the tool executions, so nimgent never runs its tool
-## loop here — the ref-based execute closures are the Tool-type plumbing that
-## makes Lua tools callable through the provider protocol (the hooks pattern
-## reversed: Lua tool, Nim glue). A Lua error in a tool raises Nim-side,
-## where nimgent's execOne catches it and reports a tool failure to the
-## model.
+## tool calls the model requested. The tool list the model sees merges the
+## config's tools with the runtime registry's registered ones (the
+## neopi.registerTool entries, read through neopi.registeredTools() at the
+## start of every generate); the execute function refs are luaL_ref'd for
+## the call and luaL_unref'd after the response is built, so the registry
+## does not grow per generate call. The Lua loop in the runtime layer owns
+## the turn orchestration and the tool executions, so nimgent never runs its
+## tool loop here — the ref-based execute closures are the Tool-type
+## plumbing that makes Lua tools callable through the provider protocol (the
+## hooks pattern reversed: Lua tool, Nim glue). A Lua error in a tool raises
+## Nim-side, where nimgent's execOne catches it and reports a tool failure to
+## the model.
 ##
 ## `neopi.provider.setScripted(steps)` swaps the backing provider for a
 ## deterministic scripted one (the nimgent scriptedModel pattern) — the test
@@ -23,6 +28,13 @@
 ## lightuserdata; the extensibility holds the Nim reference, so the pointer
 ## stays valid for the extensibility's lifetime (the Nim binary owns it for
 ## the process lifetime).
+##
+## `neopi.emit(event, payload)` completes the hook API: extensions register
+## handlers with `neopi.on` and can emit events through `neopi.emit` — the
+## pi pattern of extensions publishing events. The emit reads the HookBus
+## from the registry (the same pattern as neopi.on's handler) and returns
+## the outcome as a table; the agent loop fires the tool_call/tool_result
+## hooks through it for every tool execution.
 
 import std/[json, options]
 import neopi/lua
@@ -101,8 +113,9 @@ proc makeLuaToolExecute(L: LuaState,
   ## Lua function through pcall with the args JSON pushed and return its
   ## string result. A Lua error (or a non-string result) raises Nim-side,
   ## where nimgent's execOne catches it and reports a tool failure to the
-  ## model. The ref stays in the registry for the process lifetime; refs
-  ## accumulate one slot per tool per generate call.
+  ## model. The ref is only valid for the generate call that created it: the
+  ## generate luaL_unref's it after the response is built, and the closure
+  ## dies with the tools seq.
   return proc (args: JsonNode): string =
     pushJson(L, args)
     if lua_pcall(L, 1, 1, 0) != 0:
@@ -116,14 +129,84 @@ proc makeLuaToolExecute(L: LuaState,
     result = $lua_tolstring(L, -1, nil)
     lua_pop(L, 1)
 
+proc registeredToolsOf(L: LuaState, fnRefs: var seq[cint]): seq[Tool] =
+  ## The runtime registry's registered tools: call `neopi.registeredTools()`
+  ## (the runtime entry registers it on the neopi table) and map each
+  ## {name, description, schema, execute} entry onto a Tool — the execute
+  ## function ref via luaL_ref, collected into `fnRefs` for the
+  ## post-response unref, and the closure through makeLuaToolExecute. The
+  ## merge appends in registration order after the config's tools, so the
+  ## model sees both. Returns the empty seq when the runtime is not loaded
+  ## (no `neopi.registeredTools` in the state): the registry does not exist
+  ## yet. A non-table result from an existing function is a broken registry
+  ## and raises.
+  lua_getfield(L, luaGlobalsIndex, "neopi")
+  if lua_type(L, -1) != luaTTable:
+    lua_pop(L, 1)
+    return
+  lua_getfield(L, -1, "registeredTools")
+  if lua_type(L, -1) != luaTFunction:
+    lua_pop(L, 2)
+    return
+  # lua_call pops the function and pushes its result; the neopi table stays
+  # below and the final pop releases it with the array.
+  if lua_pcall(L, 0, 1, 0) != 0:
+    let message = luaStackMessage(L)
+    lua_pop(L, 1)
+    raiseLuaError(L, "neopi.registeredTools failed: " & message)
+  if lua_type(L, -1) != luaTTable:
+    lua_pop(L, 1)
+    raiseLuaError(L,
+      "neopi.registeredTools must return an array of tool tables")
+  let arrIdx = lua_gettop(L)
+  let count = int(lua_objlen(L, arrIdx))
+  for i in 1 .. count:
+    lua_rawgeti(L, arrIdx, cint(i))
+    let toolIdx = lua_gettop(L)
+    if lua_type(L, toolIdx) != luaTTable:
+      lua_pop(L, 1)
+      raiseLuaError(L,
+        "neopi.registeredTools: each entry must be {name, description, " &
+        "schema, execute}")
+    lua_getfield(L, toolIdx, "name")
+    if lua_type(L, -1) != luaTString:
+      lua_pop(L, 2)
+      raiseLuaError(L,
+        "neopi.registeredTools: each tool needs a name string")
+    let name = $lua_tolstring(L, -1, nil)
+    lua_getfield(L, toolIdx, "description")
+    let description =
+      if lua_type(L, -1) == luaTString: $lua_tolstring(L, -1, nil)
+      else: ""
+    lua_getfield(L, toolIdx, "schema")
+    let schema = jsonOfStack(L, -1)
+    lua_getfield(L, toolIdx, "execute")
+    if lua_type(L, -1) != luaTFunction:
+      lua_pop(L, 5)
+      raiseLuaError(L,
+        "neopi.registeredTools: tool \"" & name &
+        "\" needs an execute function")
+    # luaL_ref pops the execute function and stores it in the registry for
+    # the generate call; the unref below releases it after the response.
+    let fnRef = luaL_ref(L, luaRegistryIndex)
+    fnRefs.add fnRef
+    result.add Tool(name: name, description: description,
+      inputSchema: schema, execute: makeLuaToolExecute(L, fnRef))
+    lua_pop(L, 4)
+  lua_pop(L, 2)
+
 proc luaProviderGenerate(L: LuaState): cint {.cdecl.} =
   ## Lua-side `neopi.provider.generate(config)`: one model turn over the
   ## current backing provider. The config is
   ## {model = string, messages = [{role, text}], system = string (optional),
   ## tools = [{name, description, schema, execute = function}] (optional)};
-  ## the response is {text, stopReason, usage = {input, output},
-  ## toolCalls = [{id, name, args}], provider}. A Lua error surfaces for an
-  ## invalid config, a missing backing, or a provider failure.
+  ## the tool list the model sees merges the config's tools with the runtime
+  ## registry's registered ones; the response is {text, stopReason,
+  ## usage = {input, output}, toolCalls = [{id, name, args}], provider}. A
+  ## Lua error surfaces for an invalid config, a missing backing, or a
+  ## provider failure. The execute function refs are released after the
+  ## response is built; a validation error longjmps out of this callback and
+  ## leaks the refs created so far (they live until the state closes).
   let context = cast[ptr ProviderContext](lua_touserdata(L, luaUpvalueIndex(1)))
   if lua_gettop(L) != 1 or lua_type(L, 1) != luaTTable:
     raiseLuaError(L, "neopi.provider.generate expects a config table")
@@ -157,6 +240,7 @@ proc luaProviderGenerate(L: LuaState): cint {.cdecl.} =
       raiseLuaError(L,
         "neopi.provider.generate: unknown message role \"" & role & "\"")
   var tools: seq[Tool]
+  var fnRefs: seq[cint]
   lua_getfield(L, 1, "tools")
   if lua_type(L, -1) != luaTNil:
     if lua_type(L, -1) != luaTTable:
@@ -189,9 +273,13 @@ proc luaProviderGenerate(L: LuaState): cint {.cdecl.} =
       # luaL_ref pops the execute function and stores it in the registry;
       # the Tool's execute closure calls it back through pcall.
       let fnRef = luaL_ref(L, luaRegistryIndex)
+      fnRefs.add fnRef
       tools.add Tool(name: name, description: description,
         inputSchema: schema, execute: makeLuaToolExecute(L, fnRef))
   lua_settop(L, base)
+  # The registered tools merge after the config's tools, with or without a
+  # config tools key: the model sees both.
+  tools.add registeredToolsOf(L, fnRefs)
   if context.provider.isNone:
     raiseLuaError(L,
       "no provider configured: set the API key in the environment or " &
@@ -201,6 +289,8 @@ proc luaProviderGenerate(L: LuaState): cint {.cdecl.} =
     r = generate(model(context.provider.get, modelId), messages, tools,
       maxSteps = 1)
   except CatchableError as e:
+    for refIndex in fnRefs:
+      luaL_unref(L, luaRegistryIndex, refIndex)
     raiseLuaError(L, "neopi.provider.generate failed: " & e.msg)
   lua_createtable(L, 0, 5)
   pushString(L, r.text)
@@ -226,6 +316,10 @@ proc luaProviderGenerate(L: LuaState): cint {.cdecl.} =
   lua_setfield(L, -2, "toolCalls")
   pushString(L, context.provider.get.name)
   lua_setfield(L, -2, "provider")
+  # The generate completed: release every execute function ref (the config's
+  # tools' and the registered ones') so the registry does not grow per call.
+  for refIndex in fnRefs:
+    luaL_unref(L, luaRegistryIndex, refIndex)
   result = 1
 
 proc luaProviderSetScripted(L: LuaState): cint {.cdecl.} =
@@ -284,6 +378,46 @@ proc exposeProvider*(L: LuaState, backing: Option[Provider]) =
   lua_pushcclosure(L, luaProviderSetScripted, 1)
   lua_setfield(L, -2, "setScripted")
   lua_setfield(L, -2, "provider")
+  lua_pop(L, 1)
+
+proc luaEmit(L: LuaState): cint {.cdecl.} =
+  ## Lua-side `neopi.emit(event, payload)`: fire the hook bus's handlers for
+  ## `event` through the Nim emit (the same containment as every core-side
+  ## emit: a handler error aborts only that handler's contribution) and
+  ## return the outcome as {allowed = bool, reason = string, patched = bool,
+  ## payload = table (present when a handler patched)}. The loop and
+  ## extension scripts publish events through it. A Lua error surfaces for
+  ## an invalid call or a missing bus.
+  let bus = cast[HookBus](getRegistryPointer(L, busRegistryKey))
+  if bus.isNil or lua_gettop(L) != 2 or lua_type(L, 1) != luaTString or
+      lua_type(L, 2) != luaTTable:
+    raiseLuaError(L, "neopi.emit expects (event: string, payload: table)")
+  let event = $lua_tolstring(L, 1, nil)
+  let outcome = bus.emit(event, jsonOfStack(L, 2))
+  lua_createtable(L, 0, 4)
+  lua_pushboolean(L, cint(outcome.allowed))
+  lua_setfield(L, -2, "allowed")
+  pushString(L, outcome.reason)
+  lua_setfield(L, -2, "reason")
+  lua_pushboolean(L, cint(outcome.patched))
+  lua_setfield(L, -2, "patched")
+  if outcome.patched and not outcome.payload.isNil:
+    pushJson(L, outcome.payload)
+    lua_setfield(L, -2, "payload")
+  result = 1
+
+proc exposeEmit*(L: LuaState) =
+  ## Expose `neopi.emit(event, payload)` on the existing `neopi` table: fire
+  ## the hook bus's handlers for the event and return the outcome table.
+  ## Requires `neopi` to exist (newHookBus creates it) and the bus pointer
+  ## in the registry.
+  lua_getfield(L, luaGlobalsIndex, "neopi")
+  if lua_type(L, -1) != luaTTable:
+    lua_pop(L, 1)
+    raise LuaError.newException(
+      "exposeEmit requires the neopi table (call newHookBus first)")
+  lua_pushcfunction(L, luaEmit)
+  lua_setfield(L, -2, "emit")
   lua_pop(L, 1)
 
 proc luaSessionAppend(L: LuaState): cint {.cdecl.} =
