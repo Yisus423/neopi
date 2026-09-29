@@ -1,16 +1,17 @@
-## The neopi CLI entry: the print mode.
+## The neopi CLI entry: the print mode and the interactive TUI.
 ##
 ## `neopi "prompt"` assembles the extensibility runtime against the current
 ## directory, loads the Lua runtime, runs the agent loop with the prompt, and
-## prints the final text to stdout. The provider key comes from the
-## environment or the local .env file.
+## prints the final text to stdout. With no prompt argument, the interactive
+## TUI opens instead and drives the same engine. The provider key comes from
+## the environment or the local .env file.
 ##
 ## Errors (no key, provider failure, Lua failure) print a clear message to
 ## stderr and exit non-zero. Compile always with -o:build/neopi (never
 ## next-to-source).
 
 import std/[envvars, json, options, os, parseopt, strutils, syncio, times]
-import neopi/[extensibility, lua, provider, session]
+import neopi/[extensibility, lua, provider, session, tui]
 
 # Same file-scope typedef as lua.nim and the bridge modules: no C headers
 # exist to declare the opaque state type, and this file's generated C
@@ -23,6 +24,7 @@ const DefaultModel = "inclusionai/ling-3.0-flash-vl"
 
 const Usage = """Usage:
   neopi "prompt" [--provider openai|openrouter] [--model <id>]
+  neopi [--provider openai|openrouter] [--model <id>]
 """
 
 proc fatal(msg: string) {.noreturn.} =
@@ -130,6 +132,38 @@ proc runPrint(prompt, providerName: string, modelId: string) =
   if response{"stopReason"}.getStr == "stepLimit":
     stderr.writeLine("neopi: the loop hit its step cap before the model finished")
 
+proc runTui(providerName, modelId: string) =
+  ## The TUI mode: no prompt argument; the interactive loop drives the
+  ## engine (the same agent.run chunk with the stream sink — the deltas
+  ## render live) and the session persists through the same JSONL tree.
+  loadDotEnv()
+  let upper = providerName.toUpperAscii
+  case providerName
+  of "openai", "openrouter": discard
+  else: fatal("unknown provider \"" & providerName & "\" (openai or openrouter)")
+  let key = getEnv(upper & "_API_KEY")
+  if key.len == 0:
+    fatal("no " & upper & "_API_KEY in the environment or .env; export it " &
+      "or pass --provider/--model")
+  let p = if providerName == "openai": openAI(key) else: openRouter(key)
+  let root = getCurrentDir()
+  let sessionsDir = root / ".neopi" / "sessions"
+  try:
+    createDir(sessionsDir)
+  except OSError, IOError:
+    fatal("cannot create " & sessionsDir & ": " & getCurrentExceptionMsg())
+  let sessionPath = sessionsDir /
+    ("run-" & ($epochTime()).replace(".", "-") & ".jsonl")
+  let s = try: newSession(sessionPath)
+    except CatchableError as e:
+      fatal("cannot open the session: " & e.msg)
+  # No prompt enters the session here: the composer's sends do.
+  let ext = newExtensibility(root, some(p), s)
+  loadRuntime(ext.bus.state)
+  let error = tuiLoop(s, ext.bus.state, providerName, modelId)
+  if error.len > 0:
+    fatal("the agent loop failed: " & error)
+
 proc main() =
   var prompt = ""
   var providerName = "openrouter"
@@ -153,11 +187,13 @@ proc main() =
       prompt = key
       sawPrompt = true
     of cmdEnd: discard
-  if not sawPrompt:
-    stderr.writeLine(Usage)
-    quit(1)
   if modelId.len == 0:
     modelId = getEnv(providerName.toUpperAscii & "_MODEL", DefaultModel)
+  if not sawPrompt:
+    # The TUI mode: no prompt argument; the interactive loop drives the
+    # engine. A clean exit returns here; a loop failure fatals inside.
+    runTui(providerName, modelId)
+    quit(0)
   runPrint(prompt, providerName, modelId)
 
 when isMainModule:
