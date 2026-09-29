@@ -53,10 +53,10 @@ it and renders the session.
 
 - [x] 1. The exposure: neopi.provider.stream (the onEvent variant)
 - [x] 2. The loop (runtime/agent.lua): stream when the config has onEvent
-- [ ] 3. The TUI: illwill + the component model (requestRender)
-- [ ] 4. The three components: transcript + composer + footer
-- [ ] 5. The keys + the flow (no prompt → the TUI; the session persists)
-- [ ] 6. Work-unit commit(s) on main; record evidence here
+- [x] 3. The TUI: illwill + the component model (requestRender)
+- [x] 4. The three components: transcript + composer + footer
+- [x] 5. The keys + the flow (no prompt → the TUI; the session persists)
+- [x] 6. Work-unit commit(s) on main; record evidence here
 
 ## Evidence
 
@@ -73,3 +73,29 @@ it and renders the session.
 - Re-sliced: 5a-1 (the streaming, done) + 5a-2 (the TUI, remaining) — the
   writer stalled on the big reads; the parent implemented the small slice
   inline.
+
+## 5a-2 evidence (the TUI, done)
+
+- `8d12040` — feat: the interactive TUI - the transcript, composer, and
+  footer over a thin illwill loop (5 files, 560 insertions: tui.nim + the
+  main's TUI wiring + tp_tui.nim + the dispatcher + the illwill requires)
+- nimble test verbatim: "[Summary] 92 tests run (2.01s): 92 OK, 0 FAILED,
+  0 SKIPPED" + busted "4 successes" — 24 new pure-layer TUI tests (the wrap,
+  the transcript lines, the usage totals, the footer, the visible range, the
+  composer state, the key dispatch) pass.
+- nimlangserver nimCheckFile: 0 diagnostics on tui.nim and neopi.nim; the
+  production binary builds clean (3.4M) and --help shows the TUI mode.
+- The delegation: the writer wrote tui.nim (347 lines) then stalled (4 min
+  after one edit — the same flaky runtime as 5a-1); the parent finished the
+  slice inline (the wiring, the tests, the nimble) with the writer's tui.nim
+  kept verbatim plus one export (pageStep).
+- The architecture: the pure render layer (wrapLine, transcriptLines,
+  streamingLines, usageTotals, footerLine, visibleRange, the composer
+  state) separated from the thin illwill loop (init + key dispatch + the
+  send path) — the pure layer tests without a terminal.
+- The stream sink: the TUI exposes `_tuiOnEvent` (a Lua closure carrying the
+  TUI state pointer as its first upvalue, the luaProviderStream pattern) +
+  `_tuiModel` on the neopi table; the loop's chunk references them — the
+  deltas render live during the stream, and no duplication: the sink fires
+  before the assistant entry lands, and sendTurn clears the streaming text
+  after evalJson returns.
