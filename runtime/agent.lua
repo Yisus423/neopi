@@ -266,7 +266,24 @@ end
 --- summarized into a compaction entry (at most once per check).
 --- @param session table -- the neopi.session handle (append/history/navigate)
 --- @param config table -- {model = string, system = string?, maxSteps = number?,
----   contextWindow = number?, reserveTokens = number?, keepRecentTokens = number?}
+--- Drain the steering queue (pi's model): the messages typed during the
+--- run enter after the current assistant turn. Returns whether any
+--- message was appended. Defensive: the queue never exists in print mode
+--- (the TUI creates it), where the drain is a no-op.
+--- @param session table -- the neopi session
+--- @return boolean -- whether any steering message was appended
+local function drainSteering(session)
+  if type(neopi.steeringQueue) ~= "table" or #neopi.steeringQueue == 0 then
+    return false
+  end
+  for _, msg in ipairs(neopi.steeringQueue) do
+    session:append("user", {text = tostring(msg)})
+  end
+  neopi.steeringQueue = {}
+  return true
+end
+
+---   contextWindow = number?, reserveTokens = number?, keepRecentTokens = number?}}
 --- @return table -- the final response
 ---   {text, stopReason, usage = {input, output}, toolCalls, provider}
 function agent.run(session, config)
@@ -297,7 +314,10 @@ function agent.run(session, config)
       usageOutput = (response.usage and response.usage.output) or 0,
       stopReason = response.stopReason or "unknown",
     })
-    if response.stopReason ~= "toolUse" then
+    -- The steering queue (pi's model): the messages typed during the run
+    -- enter after the current assistant turn; they ask for another turn.
+    local hadQueued = drainSteering(session)
+    if response.stopReason ~= "toolUse" and not hadQueued then
       return response
     end
     for _, call in ipairs(response.toolCalls or {}) do

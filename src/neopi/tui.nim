@@ -30,8 +30,9 @@ type
   TuiState* = object
     ## The mutable TUI state the key loop and the stream sink drive: the
     ## footer labels, the session (borrowed from the caller), the composer,
-    ## the transcript's scroll offset, the in-flight stream text, and the
-    ## exit flag.
+    ## the transcript's scroll offset, the in-flight stream text, the exit
+    ## flag, and the injected key poller (the tests swap it; the sink polls
+    ## the stream-time keys through it).
     provider*: string
     model*: string
     sess*: Session
@@ -39,12 +40,14 @@ type
     scrollOffset*: int
     streaming*: string
     quit*: bool
+    keyPoller*: proc (): Key {.closure.}
 
 proc initTuiState*(provider, model: string, sess: Session): TuiState =
   ## Constructor: a fresh TUI state — the composer empty, the view following
-  ## the bottom, nothing in flight.
+  ## the bottom, nothing in flight, the key poller on illwill's getKey.
   TuiState(provider: provider, model: model, sess: sess,
-    composer: ComposerState(), scrollOffset: 0, streaming: "", quit: false)
+    composer: ComposerState(), scrollOffset: 0, streaming: "", quit: false,
+    keyPoller: proc (): Key = getKey())
 
 proc wrapLine*(s: string, width: int): seq[string] =
   ## Word-wrap `s` so each returned line is at most `width` columns: the
@@ -174,9 +177,11 @@ proc drawScreen(state: ptr TuiState) =
   ## Render the whole frame into a fresh buffer and flush it: the transcript
   ## (the scroll window over the wrapped lines), the in-flight stream text,
   ## the composer, and the footer. A fresh buffer per frame is the component
-  ## model's invalidate step.
-  let width = int(terminalWidth())
-  let height = int(terminalHeight())
+  ## model's invalidate step. The dimensions clamp to at least 1: a 0-sized
+  ## terminal (a non-tty, as in the tests) would defect inside illwill's
+  ## clear.
+  let width = max(1, int(terminalWidth()))
+  let height = max(1, int(terminalHeight()))
   var tb = newTerminalBuffer(width, height)
   var entries: seq[SessionEntry] = @[]
   if not state[].sess.isNil:
@@ -209,40 +214,13 @@ proc requestRender*(state: ptr TuiState) =
   ## The component model's invalidate + re-render + flush: rebuild the whole
   ## frame from the current state and flush it. The key loop and the stream
   ## sink drive it on the input change, the stream deltas, the new entries,
-  ## and the resize.
-  drawScreen(state)
-
-proc tuiOnEventCB(L: LuaState): cint {.cdecl.} =
-  ## The stream sink's C callback: the first upvalue is the TUI state
-  ## pointer; read the {text = delta} event table, append the delta to the
-  ## in-flight text, render the frame live, and return true (the MVP never
-  ## cancels the stream).
-  let state = cast[ptr TuiState](lua_touserdata(L, luaUpvalueIndex(1)))
-  let event = jsonOfStack(L, 1)
-  if event.kind == JObject and event.hasKey("text"):
-    state[].streaming.add event["text"].getStr("")
-  requestRender(state)
-  lua_pushboolean(L, 1)
-  result = 1
-
-proc exposeTuiSink*(L: LuaState, state: ptr TuiState, model: string) =
-  ## Expose the TUI's stream sink and the model on the `neopi` table, where
-  ## the loop's chunk references them: `_tuiOnEvent` is the Lua function
-  ## carrying the TUI state pointer as its first upvalue (the
-  ## luaProviderStream pattern — it appends the deltas and renders live) and
-  ## `_tuiModel` is the model as a Lua string (so the chunk needs no
-  ## escaping). Requires `neopi` to exist (newHookBus creates it).
-  lua_getfield(L, luaGlobalsIndex, "neopi")
-  if lua_type(L, -1) != luaTTable:
-    lua_pop(L, 1)
-    raise LuaError.newException(
-      "the TUI sink requires the neopi table (call newHookBus first)")
-  lua_pushlightuserdata(L, cast[pointer](state))
-  lua_pushcclosure(L, tuiOnEventCB, 1)
-  lua_setfield(L, -2, "_tuiOnEvent")
-  pushString(L, model)
-  lua_setfield(L, -2, "_tuiModel")
-  lua_pop(L, 1)
+  ## and the resize. An IllwillError (the terminal unavailable — the module
+  ## not initialised, as in the tests) is swallowed: the sink runs inside
+  ## the Lua boundary and must never raise across it.
+  try:
+    drawScreen(state)
+  except IllwillError:
+    discard
 
 proc pageStep*(height: int): int =
   ## Half the transcript area: the PgUp/PgDn scroll step.
@@ -275,6 +253,69 @@ proc handleKey*(state: var TuiState, key: Key, height: int) =
     let code = ord(key)
     if code >= 32 and code <= 126:
       composerInsert(state.composer, $chr(code))
+
+proc queueSteering(L: LuaState, text: string) =
+  ## Append the draft text to neopi.steeringQueue (the Lua array table the
+  ## loop drains between turns — pi's model). Requires neopi and the queue
+  ## to exist (exposeTuiSink creates both).
+  lua_getfield(L, luaGlobalsIndex, "neopi")
+  lua_getfield(L, -1, "steeringQueue")
+  let n = cint(lua_objlen(L, -1))
+  pushString(L, text)
+  lua_rawseti(L, -2, n + 1)
+  lua_pop(L, 2)
+
+proc tuiOnEventCB(L: LuaState): cint {.cdecl.} =
+  ## The stream sink's C callback: the first upvalue is the TUI state
+  ## pointer; read the {text = delta} event table, append the delta to the
+  ## in-flight text, poll the stream-time keys (the steering draft, Enter
+  ## queues it, Ctrl+C aborts), render the frame live, and return false only
+  ## when the user aborted (the stream's cancel).
+  let state = cast[ptr TuiState](lua_touserdata(L, luaUpvalueIndex(1)))
+  let event = jsonOfStack(L, 1)
+  if event.kind == JObject and event.hasKey("text"):
+    state[].streaming.add event["text"].getStr("")
+  var cancel = false
+  while true:
+    let key = state[].keyPoller()
+    if key == Key.None:
+      break
+    if key == Key.CtrlC:
+      cancel = true
+    elif key == Key.Enter:
+      let draft = state[].composer.text
+      if draft.len > 0:
+        queueSteering(L, draft)
+        composerClear(state[].composer)
+    else:
+      handleKey(state[], key, terminalHeight())
+  requestRender(state)
+  lua_pushboolean(L, cint(ord(not cancel)))
+  result = 1
+
+proc exposeTuiSink*(L: LuaState, state: ptr TuiState, model: string) =
+  ## Expose the TUI's stream sink and the model on the `neopi` table, where
+  ## the loop's chunk references them: `_tuiOnEvent` is the Lua function
+  ## carrying the TUI state pointer as its first upvalue (the
+  ## luaProviderStream pattern — it appends the deltas and renders live) and
+  ## `_tuiModel` is the model as a Lua string (so the chunk needs no
+  ## escaping). Requires `neopi` to exist (newHookBus creates it).
+  lua_getfield(L, luaGlobalsIndex, "neopi")
+  if lua_type(L, -1) != luaTTable:
+    lua_pop(L, 1)
+    raise LuaError.newException(
+      "the TUI sink requires the neopi table (call newHookBus first)")
+  lua_pushlightuserdata(L, cast[pointer](state))
+  lua_pushcclosure(L, tuiOnEventCB, 1)
+  lua_setfield(L, -2, "_tuiOnEvent")
+  pushString(L, model)
+  lua_setfield(L, -2, "_tuiModel")
+  # The steering queue: the Lua array table the sink fills (Enter during a
+  # run) and the loop drains between turns (pi's model).
+  lua_createtable(L, 0, 0)
+  lua_setfield(L, -2, "steeringQueue")
+  lua_pop(L, 1)
+
 
 proc sendTurn(state: ptr TuiState, L: LuaState, loopError: var string) =
   ## Send the composer's text as a user entry and run the loop's chunk with

@@ -369,3 +369,31 @@ suite "exposure session":
     finally:
       removeDir(root)
       removeFile(path)
+
+  test "stream cancel returns the partial response":
+    let root = freshWorkspace("neopi-tp-expose-abort")
+    let path = freshSessionPath("abort")
+    try:
+      let ext = newExtensibility(root, none(Provider), newSession(path))
+      let L = ext.bus.state
+      runScript(L, "deltas = {}")
+      runScript(L,
+        "onEvent = function(e) deltas[#deltas + 1] = e.text; return false end")
+      runScript(L, "neopi.provider.setScripted({{text = 'streamed answer'}})")
+      # The onEvent returns false on the first delta: the cancel surfaces as
+      # a partial response (the accumulated delta with the aborted stop
+      # reason), not as a Lua error.
+      let response = evalJson(L, """
+        return neopi.provider.stream({
+          model = "scripted",
+          messages = {{role = "user", text = "go"}},
+        }, onEvent)
+      """)
+      check response["text"].getStr == "streamed answer"
+      check response["stopReason"].getStr == "aborted"
+      let landed = evalJson(L, "return deltas")
+      check landed.len == 1
+      check landed[0].getStr == "streamed answer"
+    finally:
+      removeDir(root)
+      removeFile(path)

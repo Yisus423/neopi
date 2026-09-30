@@ -58,4 +58,41 @@ describe("agent loop", function()
     -- The loop hit its step cap while the model still asked for tools.
     assert.are.equal("stepLimit", response.stopReason)
   end)
+
+  it("the steering queue enters after the current assistant turn", function()
+    -- The steering queue (pi's model): the messages typed during the run
+    -- enter after the current assistant turn and ask for another turn.
+    neopi.provider.setScripted({
+      {text = "first answer"},
+      {text = "steered answer"},
+    })
+
+    local session = neopi.session
+    local agent = require("agent")
+    neopi.steeringQueue = {"check the file"}
+    session:append("user", {text = "go"})
+    local response = agent.run(session, {model = "scripted", maxSteps = 4})
+
+    -- The first answer landed; the steering message entered after it and
+    -- asked for another turn, which produced the steered answer.
+    assert.are.equal("steered answer", response.text)
+
+    -- The session recorded the steering user entry between the answers.
+    -- The busted specs share one live session, so the check is tail-based:
+    -- the last four entries are this test's.
+    local history = session:history()
+    local n = #history
+    assert.are.equal("assistant", history[n].type)
+    assert.are.equal("steered answer", history[n].text)
+    assert.are.equal("user", history[n - 1].type)
+    assert.are.equal("check the file", history[n - 1].text)
+    assert.are.equal("assistant", history[n - 2].type)
+    assert.are.equal("first answer", history[n - 2].text)
+    assert.are.equal("user", history[n - 3].type)
+
+    -- The queue is empty after the run (drained each turn); cleanup so the
+    -- queue does not leak into the other specs.
+    assert.are.equal(0, #neopi.steeringQueue)
+    neopi.steeringQueue = nil
+  end)
 end)

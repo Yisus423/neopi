@@ -60,6 +60,7 @@ type
     frMaxTokens
     frStop
     frStepLimit
+    frCancelled
 
   Response* = object
     ## One generated answer with its usage metadata and the tool calls the

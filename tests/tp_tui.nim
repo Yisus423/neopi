@@ -1,10 +1,16 @@
 ## Tests for the TUI's pure render layer: the transcript's line building,
 ## text wrapping, the composer's editing state, the footer, and the scroll
 ## window — all without a terminal.
+import std/[json, options, os]
 import illwill
-import neopi/session
+import neopi/[extensibility, lua, provider, session]
 import neopi/tui
 import unittest2
+
+# Same file-scope typedef as lua.nim and the bridge modules: this module's
+# generated C calls into the Lua state directly (the sink tests), and no C
+# headers exist to declare the type.
+{.emit: """/*TYPESECTION*/ typedef struct lua_State lua_State;""".}
 
 suite "wrapLine":
   test "short lines pass through":
@@ -166,3 +172,100 @@ suite "handleKey":
     handleKey(st, Key.CtrlC, 24)
     check st.composer.text == ""
     check st.scrollOffset == 0
+
+proc freshWorkspace(name: string): string =
+  ## A fresh subdirectory of the temp dir as a workspace root (the sink
+  ## tests need the extensibility's Lua state).
+  result = getTempDir() / name
+  createDir(result)
+
+proc freshSessionPath(name: string): string =
+  ## A fresh temp session file path per test.
+  result = getTempDir() / ("neopi-tp-tui-" & name & ".jsonl")
+  removeFile(result)
+
+suite "the stream sink":
+  test "queues the steering draft on Enter":
+    let root = freshWorkspace("neopi-tp-tui-sink")
+    let path = freshSessionPath("sink1")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess)
+      st.composer = ComposerState(text: "check the file", cursor: 14)
+      var polls = 0
+      st.keyPoller = proc (): Key =
+        inc polls
+        if polls == 1: Key.Enter else: Key.None
+      exposeTuiSink(L, addr st, "scripted")
+      runScript(L, "neopi.provider.setScripted({{text = 'x'}})")
+      discard evalJson(L, """
+        return neopi.provider.stream({
+          model = "scripted",
+          messages = {{role = "user", text = "go"}},
+        }, neopi._tuiOnEvent)
+      """)
+      # Enter queued the draft into the steering queue and cleared the
+      # composer.
+      let queued = evalJson(L, "return neopi.steeringQueue")
+      check queued.len == 1
+      check queued[0].getStr == "check the file"
+      check st.composer.text == ""
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "aborts on Ctrl+C":
+    let root = freshWorkspace("neopi-tp-tui-sink2")
+    let path = freshSessionPath("sink2")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess)
+      var polls = 0
+      st.keyPoller = proc (): Key =
+        inc polls
+        if polls == 1: Key.CtrlC else: Key.None
+      exposeTuiSink(L, addr st, "scripted")
+      runScript(L, "neopi.provider.setScripted({{text = 'partial text'}})")
+      let response = evalJson(L, """
+        return neopi.provider.stream({
+          model = "scripted",
+          messages = {{role = "user", text = "go"}},
+        }, neopi._tuiOnEvent)
+      """)
+      # Ctrl+C aborted the stream: the partial response with the delta the
+      # sink had already rendered; no Lua error.
+      check response["text"].getStr == "partial text"
+      check response["stopReason"].getStr == "aborted"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "edits the draft on printable keys":
+    let root = freshWorkspace("neopi-tp-tui-sink3")
+    let path = freshSessionPath("sink3")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess)
+      var polls = 0
+      st.keyPoller = proc (): Key =
+        inc polls
+        if polls == 1: Key(104) else: Key.None
+      exposeTuiSink(L, addr st, "scripted")
+      runScript(L, "neopi.provider.setScripted({{text = 'x'}})")
+      discard evalJson(L, """
+        return neopi.provider.stream({
+          model = "scripted",
+          messages = {{role = "user", text = "go"}},
+        }, neopi._tuiOnEvent)
+      """)
+      # The printable key edited the draft (the composer).
+      check st.composer.text == "h"
+    finally:
+      removeDir(root)
+      removeFile(path)

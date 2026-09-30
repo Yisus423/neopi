@@ -69,7 +69,6 @@ type
     ## lifetime.
     provider: Option[Provider]
 
-const providerRegistryKey = "neopi.provider.context"
 const sessionRegistryKey = "neopi.session"
 
 func payloadInt(payload: JsonNode, key: string): int =
@@ -105,6 +104,7 @@ func stopReasonOf(r: Response): string =
   of frMaxTokens: "maxTokens"
   of frStop: "stop"
   of frStepLimit: "stepLimit"
+  of frCancelled: "aborted"
   of frUnknown: "unknown"
 
 proc makeLuaToolExecute(L: LuaState,
@@ -411,10 +411,23 @@ proc luaProviderStream(L: LuaState): cint {.cdecl.} =
     raiseLuaError(L,
       "no provider configured: set the API key in the environment or " &
       "call neopi.provider.setScripted")
+  var acc = ""
+  let sink = makeLuaStreamEvent(L, onEventRef)
+  let wrapped = proc (ev: StreamEvent): bool =
+    if ev.kind == seTextDelta:
+      acc.add ev.text
+    sink(ev)
   var r: Response
   try:
     r = stream(model(context.provider.get, parts.model), parts.messages,
-      makeLuaStreamEvent(L, onEventRef), parts.tools, maxSteps = 1)
+      wrapped, parts.tools, maxSteps = 1)
+  except CancelledError:
+    # The caller cancelled (the onEvent returned false): a partial response
+    # with the text accumulated so far — the loop ends the turn gracefully
+    # and the TUI regains control.
+    for refIndex in fnRefs:
+      luaL_unref(L, luaRegistryIndex, refIndex)
+    r = Response(text: acc, finishReason: frCancelled)
   except CatchableError as e:
     for refIndex in fnRefs:
       luaL_unref(L, luaRegistryIndex, refIndex)
