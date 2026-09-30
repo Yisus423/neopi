@@ -94,10 +94,10 @@ the user's call, 2026-09-29).
       deltas) + tp_tui (the sink's key paths with the injected poller) +
       the busted spec (the drain)
 - [x] 5. Work-unit commit (5b-1) on main; record evidence here
-- [ ] 6. neopi.ui.status + neopi.ui.widget: the primitives + the TUI's
+- [x] 6. neopi.ui.status + neopi.ui.widget: the primitives + the TUI's
       render (the widgets above the footer)
-- [ ] 7. The ui tests + the busted spec
-- [ ] 8. Work-unit commit (5b-2) on main; record evidence here
+- [x] 7. The ui tests + the busted spec
+- [x] 8. Work-unit commit (5b-2) on main; record evidence here
 
 ## Evidence
 
@@ -134,3 +134,39 @@ the user's call, 2026-09-29).
   interrupts the stream (the tool calls block briefly; the deltas are the
   long part); no abort marker in the transcript (polish); the key polling
   during the stream happens per text delta (a thinking pause delays it).
+
+### 5b-2 evidence (neopi.ui.*, done)
+
+- `7f1bc9a` — feat: neopi.ui.status and neopi.ui.widget - extensions drive
+  the TUI's status and widget lines (5 files, 198 insertions: the ui
+  primitives + the TUI's render (the widgets above the footer, the status
+  line above them) + the tp_tui ui suite + the busted ui_spec + the
+  busted_main's exposeUi)
+- nimble test verbatim: "[Summary] 100 tests run (2.48s): 100 OK, 0 FAILED,
+  0 SKIPPED" + busted "7 successes" — the ui suite (status sets + re-renders,
+  widget sets and updates by name, no-ops without the TUI, the type-check
+  errors) and the busted ui_spec (the no-ops + the type errors) pass.
+- nimlangserver nimCheckFile: 0 diagnostics on tui.nim, neopi.nim, and
+  busted_main.nim; the production binary builds clean (3.4M).
+- A SEGFAULT found and fixed (gdb backtrace): the ui callbacks' type-check
+  errors longjmp (lua_error) out of their Nim frames — with stacktrace ON
+  the abandoned frames corrupt the runtime frame stack and the next
+  auxWriteStackTrace segfaults (exit 139, consistent). The four existing
+  bridge modules already carry `{.push stacktrace: off.}` for exactly this
+  (their comment documents the segfault); tui.nim was missing it. Fixed with
+  the pragma scoped to the bridge procs only (raiseLuaError + the ui
+  callbacks) — tui.nim is not thin like the others, so the TUI's own procs
+  keep their stack traces.
+- The exposure: neopi.ui exists ALWAYS (exposed at extensibility time —
+  runPrint/runTui/busted_main call exposeUi after newExtensibility); the
+  callbacks read the TUI state pointer from the registry ("neopi.tui.state"
+  — the session's pattern; nil without the TUI → no-ops); exposeTuiSink
+  binds the pointer when the TUI runs. First test attempt: ui1/ui2 forgot
+  exposeUi ("attempt to index field 'ui' (a nil value)") — the extensibility
+  tests must call exposeUi explicitly (they do not go through neopi.nim).
+- The render: the layout is transcript, widgets (one line each, first-set
+  order), status line, composer, footer; the transcript height accounts for
+  the bottom lines; the scroll step stays approximate (pageStep unchanged).
+- Known limits: no widget removal primitive (set-only); the widgets are
+  plain text lines (no colors — polish); the full component API (the
+  extensions ADD components) is post-MVP.
