@@ -423,14 +423,42 @@ proc exposeUi*(L: LuaState) =
 {.pop.}
 
 
-proc sendTurn(state: ptr TuiState, L: LuaState, loopError: var string) =
+proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
+  ## Dispatch a /-prefixed composer input to the runtime's command registry
+  ## (the nvim model — the runtime owns the registry and the dispatch): the
+  ## input travels on the neopi table (no escaping needed), and the
+  ## returned output renders as the status line. A command failure (an
+  ## unknown command, a command error) is FEEDBACK, not a fatal loop error:
+  ## it renders in the status line too — the TUI survives a typo /unknown.
+  composerClear(state[].composer)
+  lua_getfield(L, luaGlobalsIndex, "neopi")
+  pushString(L, text)
+  lua_setfield(L, -2, "_tuiCommandInput")
+  lua_pop(L, 1)
+  try:
+    let output = evalJson(L,
+      "return neopi.runCommand(neopi._tuiCommandInput)")
+    if output.kind == JString and output.getStr.len > 0:
+      state[].statusLine = output.getStr
+    else:
+      state[].statusLine = ""
+  except LuaError as e:
+    state[].statusLine = e.msg
+  requestRender(state)
+
+proc sendTurn*(state: ptr TuiState, L: LuaState, loopError: var string) =
   ## Send the composer's text as a user entry and run the loop's chunk with
   ## the stream sink: the assistant entry lands through the engine's append
-  ## path and the deltas rendered live through the sink. A failure (append
-  ## or Lua) records the message in `loopError` and exits the loop; the
-  ## terminal restores through the caller's deinit.
+  ## path and the deltas rendered live through the sink. A composer input
+  ## starting with "/" dispatches to the runtime's command registry instead
+  ## (pi's model: the command runs immediately, its input never enters the
+  ## session). A failure (append or Lua) records the message in `loopError`
+  ## and exits the loop; the terminal restores through the caller's deinit.
   let text = state[].composer.text
   if text.len == 0:
+    return
+  if text.startsWith("/"):
+    runCommand(state, L, text)
     return
   try:
     state[].sess.append(SessionEntry(kind: ekUser, text: text))

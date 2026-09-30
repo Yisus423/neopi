@@ -1,7 +1,7 @@
 ## Tests for the TUI's pure render layer: the transcript's line building,
 ## text wrapping, the composer's editing state, the footer, and the scroll
 ## window — all without a terminal.
-import std/[json, options, os]
+import std/[json, options, os, strutils]
 import illwill
 import neopi/[extensibility, lua, provider, session]
 import neopi/tui
@@ -184,6 +184,33 @@ proc freshSessionPath(name: string): string =
   result = getTempDir() / ("neopi-tp-tui-" & name & ".jsonl")
   removeFile(result)
 
+proc escapeLua(s: string): string =
+  ## Escape a string for a single-quoted Lua literal: only the quote and the
+  ## backslash need escaping there (the tp_register pattern).
+  result = ""
+  for c in s:
+    case c
+    of '\'', '\\': result.add "\\" & c
+    else: result.add c
+
+proc runtimeDir(): string =
+  ## The Lua runtime directory: <binary dir>/../runtime (a build from the
+  ## repo), else ./runtime.
+  let fromBinary = getAppDir() / ".." / "runtime"
+  if dirExists(fromBinary):
+    return fromBinary
+  result = "runtime"
+
+proc loadRuntime(L: LuaState) =
+  ## Extend package.path with the runtime directory and load the runtime
+  ## entry (init.lua), which registers the command registry on the neopi
+  ## table (the tp_register pattern).
+  let dir = runtimeDir()
+  runScript(L, "package.path = '" &
+    escapeLua(dir / "?.lua;" & dir / "?/init.lua") & ";' .. package.path")
+  runScript(L, "agent = require('agent')")
+  runScript(L, "require('init')")
+
 suite "the stream sink":
   test "queues the steering draft on Enter":
     let root = freshWorkspace("neopi-tp-tui-sink")
@@ -360,6 +387,61 @@ suite "the neopi.ui primitives":
         discard evalJson(L, "return neopi.ui.status(123)")
       expect LuaError:
         discard evalJson(L, "return neopi.ui.widget('w')")
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+suite "the composer's / dispatch":
+  test "a /-prefixed input runs the command and renders the status":
+    let root = freshWorkspace("neopi-tp-tui-cmd")
+    let path = freshSessionPath("cmd")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess)
+      exposeUi(L)
+      exposeTuiSink(L, addr st, "scripted")
+      loadRuntime(L)
+      runScript(L, """
+        neopi.registerCommand('echo', 'echo the args', function(args)
+          return 'echoed: ' .. args
+        end)
+      """)
+      st.composer = ComposerState(text: "/echo hi", cursor: 8)
+      var loopError = ""
+      sendTurn(addr st, L, loopError)
+      # The command ran: the output renders as the status line, the
+      # composer cleared, and NO user entry entered the session (the
+      # command's input never becomes a prompt).
+      check loopError == ""
+      check st.statusLine == "echoed: hi"
+      check st.composer.text == ""
+      check sess.history().len == 0
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "an unknown command renders the error as the status":
+    let root = freshWorkspace("neopi-tp-tui-cmd2")
+    let path = freshSessionPath("cmd2")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess)
+      exposeUi(L)
+      exposeTuiSink(L, addr st, "scripted")
+      loadRuntime(L)
+      st.composer = ComposerState(text: "/nosuch", cursor: 7)
+      var loopError = ""
+      sendTurn(addr st, L, loopError)
+      # A command failure is feedback, not a fatal loop error: the TUI
+      # survives, the status carries the message, no user entry landed.
+      check loopError == ""
+      check st.quit == false
+      check st.statusLine == "unknown command /nosuch"
+      check sess.history().len == 0
     finally:
       removeDir(root)
       removeFile(path)
