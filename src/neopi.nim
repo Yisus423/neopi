@@ -120,6 +120,7 @@ proc runPrint(prompt, providerName: string, modelId: string) =
   # the session history.
   s.append(SessionEntry(kind: ekUser, text: prompt))
   let ext = newExtensibility(root, some(p), s)
+  exposeUi(ext.bus.state)
   loadRuntime(ext.bus.state)
   # The loop: agent.run(neopi.session, {model = ...}) — the response is a
   # Lua table; evalJson converts it.
@@ -159,6 +160,7 @@ proc runTui(providerName, modelId: string) =
       fatal("cannot open the session: " & e.msg)
   # No prompt enters the session here: the composer's sends do.
   let ext = newExtensibility(root, some(p), s)
+  exposeUi(ext.bus.state)
   loadRuntime(ext.bus.state)
   let error = tuiLoop(s, ext.bus.state, providerName, modelId)
   if error.len > 0:

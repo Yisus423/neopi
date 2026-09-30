@@ -6,7 +6,7 @@
 ## and the ffi preload; the production posture stays hardened.
 ## Usage: ./build/busted_main <spec file or directory>
 import std/[options, os, strutils, times]
-import neopi/[extensibility, lua, provider, session]
+import neopi/[extensibility, lua, provider, session, tui]
 
 # Same file-scope typedef as lua.nim and the bridge modules: no C headers
 # exist to declare the opaque state type, and this file's generated C
@@ -82,6 +82,9 @@ proc main() =
       quit(1)
   let ext = newExtensibility(workspace, none(Provider), s, hardened = false)
   let L = ext.bus.state
+  # The neopi.ui primitives for the specs: without the TUI they are no-ops
+  # (the registry pointer stays nil), which is the headless contract.
+  exposeUi(L)
   # Extend package.path/cpath with the runtime directory and the luarocks
   # local tree (the standard luarock layout: pure-Lua modules under
   # ~/.luarocks/share/lua/5.1, C modules under ~/.luarocks/lib/lua/5.1).

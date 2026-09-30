@@ -14,11 +14,27 @@ import std/[json, os, strutils]
 import illwill
 import neopi/lua
 import neopi/session
+from neopi/hooks import lua_error
 
 # Same file-scope typedef as lua.nim and the bridge modules: no C headers
 # exist to declare the opaque state type, and this file's generated C
 # prototypes take it (the stream sink's C callback).
 {.emit: """/*TYPESECTION*/ typedef struct lua_State lua_State;""".}
+
+# stacktrace off around the bridge procs whose frames a lua_error longjmp
+# abandons: with frames on it skips the frame pops and corrupts the runtime
+# frame stack (the next nimFrame call segfaults). The TUI's own procs keep
+# their stack traces — only the bridge procs pay the containment's price.
+{.push stacktrace: off.}
+
+proc raiseLuaError(L: LuaState, message: string) {.noreturn.} =
+  ## Push `message` and raise it as a Lua error; lua_error longjmps to the
+  ## enclosing pcall, so control never returns here. The file-scope copy the
+  ## other bridge modules carry (fs, process, hooks, expose).
+  lua_pushstring(L, message)
+  discard lua_error(L)
+
+{.pop.}
 
 type
   ComposerState* = object
@@ -31,8 +47,9 @@ type
     ## The mutable TUI state the key loop and the stream sink drive: the
     ## footer labels, the session (borrowed from the caller), the composer,
     ## the transcript's scroll offset, the in-flight stream text, the exit
-    ## flag, and the injected key poller (the tests swap it; the sink polls
-    ## the stream-time keys through it).
+    ## flag, the injected key poller (the tests swap it; the sink polls
+    ## the stream-time keys through it), and the extension UI (the status
+    ## line and the widget lines the neopi.ui primitives set).
     provider*: string
     model*: string
     sess*: Session
@@ -41,13 +58,18 @@ type
     streaming*: string
     quit*: bool
     keyPoller*: proc (): Key {.closure.}
+    statusLine*: string
+    widgets*: seq[tuple[name, text: string]]
+
+const tuiStateRegistryKey = "neopi.tui.state"
 
 proc initTuiState*(provider, model: string, sess: Session): TuiState =
   ## Constructor: a fresh TUI state — the composer empty, the view following
-  ## the bottom, nothing in flight, the key poller on illwill's getKey.
+  ## the bottom, nothing in flight, the key poller on illwill's getKey, no
+  ## extension UI.
   TuiState(provider: provider, model: model, sess: sess,
     composer: ComposerState(), scrollOffset: 0, streaming: "", quit: false,
-    keyPoller: proc (): Key = getKey())
+    keyPoller: proc (): Key = getKey(), statusLine: "", widgets: @[])
 
 proc wrapLine*(s: string, width: int): seq[string] =
   ## Word-wrap `s` so each returned line is at most `width` columns: the
@@ -196,12 +218,19 @@ proc drawScreen(state: ptr TuiState) =
   for line in logical:
     for piece in wrapLine(line, width):
       wrapped.add piece
-  let transcriptHeight = max(1, height - 2)
+  let transcriptHeight = max(1, height - 2 - state[].widgets.len -
+    (if state[].statusLine.len > 0: 1 else: 0))
   let visible = visibleRange(wrapped.len, transcriptHeight,
     state[].scrollOffset)
   var row = 0
   for i in visible:
     tb.write(0, row, wrapped[i])
+    inc row
+  for w in state[].widgets:
+    tb.write(0, row, clip(w.text, width))
+    inc row
+  if state[].statusLine.len > 0:
+    tb.write(0, row, clip(state[].statusLine, width))
     inc row
   tb.write(0, max(0, height - 2), clip("> " & state[].composer.text, width))
   let totals = usageTotals(entries)
@@ -299,7 +328,12 @@ proc exposeTuiSink*(L: LuaState, state: ptr TuiState, model: string) =
   ## carrying the TUI state pointer as its first upvalue (the
   ## luaProviderStream pattern — it appends the deltas and renders live) and
   ## `_tuiModel` is the model as a Lua string (so the chunk needs no
-  ## escaping). Requires `neopi` to exist (newHookBus creates it).
+  ## escaping). Also binds the TUI state pointer in the registry (the
+  ## "neopi.tui.state" key) so the neopi.ui primitives drive the live TUI,
+  ## and creates the steering queue: the Lua array table the sink fills
+  ## (Enter during a run) and the loop drains between turns (pi's model).
+  ## Requires `neopi` to exist (newHookBus creates it).
+  setRegistryPointer(L, tuiStateRegistryKey, cast[pointer](state))
   lua_getfield(L, luaGlobalsIndex, "neopi")
   if lua_type(L, -1) != luaTTable:
     lua_pop(L, 1)
@@ -310,11 +344,77 @@ proc exposeTuiSink*(L: LuaState, state: ptr TuiState, model: string) =
   lua_setfield(L, -2, "_tuiOnEvent")
   pushString(L, model)
   lua_setfield(L, -2, "_tuiModel")
-  # The steering queue: the Lua array table the sink fills (Enter during a
-  # run) and the loop drains between turns (pi's model).
   lua_createtable(L, 0, 0)
   lua_setfield(L, -2, "steeringQueue")
   lua_pop(L, 1)
+
+# stacktrace off: the ui callbacks' frames a lua_error longjmp abandons
+# (the type-check errors); with frames on it corrupts the runtime frame
+# stack (see the note at the file top).
+{.push stacktrace: off.}
+
+proc luaUiStatus(L: LuaState): cint {.cdecl.} =
+  ## Lua-side `neopi.ui.status(text)`: set the extension status line (one
+  ## line above the footer) and re-render. A no-op without the TUI (the
+  ## registry pointer is nil — the print mode and the headless specs).
+  let state = cast[ptr TuiState](getRegistryPointer(L, tuiStateRegistryKey))
+  if lua_gettop(L) != 1 or lua_type(L, 1) != luaTString:
+    raiseLuaError(L, "neopi.ui.status expects (text: string)")
+  if state.isNil:
+    lua_pushnil(L)
+    return 1
+  state[].statusLine = $lua_tolstring(L, 1, nil)
+  requestRender(state)
+  lua_pushnil(L)
+  result = 1
+
+proc luaUiWidget(L: LuaState): cint {.cdecl.} =
+  ## Lua-side `neopi.ui.widget(name, text)`: set or update the named widget
+  ## line (one line above the status, in first-set order) and re-render.
+  ## A no-op without the TUI.
+  let state = cast[ptr TuiState](getRegistryPointer(L, tuiStateRegistryKey))
+  if lua_gettop(L) != 2 or lua_type(L, 1) != luaTString or
+      lua_type(L, 2) != luaTString:
+    raiseLuaError(L, "neopi.ui.widget expects (name: string, text: string)")
+  if state.isNil:
+    lua_pushnil(L)
+    return 1
+  let name = $lua_tolstring(L, 1, nil)
+  let text = $lua_tolstring(L, 2, nil)
+  var idx = -1
+  for i, w in state[].widgets:
+    if w.name == name:
+      idx = i
+      break
+  if idx >= 0:
+    state[].widgets[idx].text = text
+  else:
+    state[].widgets.add (name: name, text: text)
+  requestRender(state)
+  lua_pushnil(L)
+  result = 1
+
+proc exposeUi*(L: LuaState) =
+  ## Expose the `neopi.ui` table inside the existing `neopi` table: status
+  ## and widget, the Lua UI primitives for extensions. The callbacks read
+  ## the TUI state pointer from the registry (nil without the TUI — the
+  ## print mode and the headless specs), so they are no-ops there; the TUI
+  ## binds the pointer in exposeTuiSink. Requires `neopi` to exist
+  ## (newHookBus creates it).
+  lua_getfield(L, luaGlobalsIndex, "neopi")
+  if lua_type(L, -1) != luaTTable:
+    lua_pop(L, 1)
+    raise newException(LuaError,
+      "the ui primitives require the neopi table (call newHookBus first)")
+  lua_createtable(L, 0, 2)
+  lua_pushcfunction(L, luaUiStatus)
+  lua_setfield(L, -2, "status")
+  lua_pushcfunction(L, luaUiWidget)
+  lua_setfield(L, -2, "widget")
+  lua_setfield(L, -2, "ui")
+  lua_pop(L, 1)
+
+{.pop.}
 
 
 proc sendTurn(state: ptr TuiState, L: LuaState, loopError: var string) =

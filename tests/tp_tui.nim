@@ -269,3 +269,68 @@ suite "the stream sink":
     finally:
       removeDir(root)
       removeFile(path)
+
+suite "the neopi.ui primitives":
+  test "status sets the line and re-renders":
+    let root = freshWorkspace("neopi-tp-tui-ui")
+    let path = freshSessionPath("ui1")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess)
+      exposeUi(L)
+      exposeTuiSink(L, addr st, "scripted")
+      discard evalJson(L, "return neopi.ui.status('indexing notes')")
+      check st.statusLine == "indexing notes"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "widget sets and updates by name":
+    let root = freshWorkspace("neopi-tp-tui-ui2")
+    let path = freshSessionPath("ui2")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess)
+      exposeUi(L)
+      exposeTuiSink(L, addr st, "scripted")
+      discard evalJson(L, "return neopi.ui.widget('tests', '2 passing')")
+      discard evalJson(L, "return neopi.ui.widget('tests', '3 passing')")
+      discard evalJson(L, "return neopi.ui.widget('build', 'ok')")
+      check st.widgets == @[("tests", "3 passing"), ("build", "ok")]
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "no-ops without the TUI":
+    let root = freshWorkspace("neopi-tp-tui-ui3")
+    let path = freshSessionPath("ui3")
+    try:
+      let ext = newExtensibility(root, none(Provider), newSession(path))
+      let L = ext.bus.state
+      exposeUi(L)
+      # Without exposeTuiSink the registry pointer stays nil: the
+      # primitives return nil (no-ops) and raise no error.
+      discard evalJson(L, "return neopi.ui.status('ignored')")
+      discard evalJson(L, "return neopi.ui.widget('w', 'ignored')")
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "status rejects non-string arguments":
+    let root = freshWorkspace("neopi-tp-tui-ui4")
+    let path = freshSessionPath("ui4")
+    try:
+      let ext = newExtensibility(root, none(Provider), newSession(path))
+      let L = ext.bus.state
+      exposeUi(L)
+      expect LuaError:
+        discard evalJson(L, "return neopi.ui.status(123)")
+      expect LuaError:
+        discard evalJson(L, "return neopi.ui.widget('w')")
+    finally:
+      removeDir(root)
+      removeFile(path)
