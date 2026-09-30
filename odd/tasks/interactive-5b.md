@@ -85,15 +85,15 @@ the user's call, 2026-09-29).
 
 ## Tasks
 
-- [ ] 1. The abort: the exposure's cancel handling (the accumulator + the
+- [x] 1. The abort: the exposure's cancel handling (the accumulator + the
       partial response) + frCancelled + stopReasonOf
-- [ ] 2. The steering: the sink's key polling + neopi.steeringQueue + the
+- [x] 2. The steering: the sink's key polling + neopi.steeringQueue + the
       keyPoller injection
-- [ ] 3. The loop (agent.lua): the drain between turns
-- [ ] 4. The tests: tp_expose (the abort: the partial response + the
+- [x] 3. The loop (agent.lua): the drain between turns
+- [x] 4. The tests: tp_expose (the abort: the partial response + the
       deltas) + tp_tui (the sink's key paths with the injected poller) +
       the busted spec (the drain)
-- [ ] 5. Work-unit commit (5b-1) on main; record evidence here
+- [x] 5. Work-unit commit (5b-1) on main; record evidence here
 - [ ] 6. neopi.ui.status + neopi.ui.widget: the primitives + the TUI's
       render (the widgets above the footer)
 - [ ] 7. The ui tests + the busted spec
@@ -101,4 +101,36 @@ the user's call, 2026-09-29).
 
 ## Evidence
 
-(pending)
+### 5b-1 evidence (the queues, done)
+
+- `19aa9bd` — feat: the queues - the abort returns the partial response and
+  the steering enters between turns (8 files, 393 insertions: the
+  exposure's cancel handling + frCancelled + the sink's key polling +
+  neopi.steeringQueue + the loop's drain + the tests + this task file)
+- nimble test verbatim: "[Summary] 96 tests run (2.78s): 96 OK, 0 FAILED,
+  0 SKIPPED" + busted "5 successes" — the abort test (the partial response
+  with the accumulated delta + "aborted"), the 3 sink tests (the draft
+  queues on Enter, the Ctrl+C abort, the printable edit — all with the
+  injected keyPoller), and the busted drain test (the steering enters after
+  the assistant turn and asks for another turn) pass.
+- nimlangserver nimCheckFile: 0 diagnostics on tui.nim and provider.nim; a
+  pre-existing dead const (providerRegistryKey) found and removed.
+- TWO defects caught by the tests:
+  1. The sink's requestRender defected in a non-tty (the tests):
+     terminalHeight() returns 0 without a terminal and illwill's
+     newTerminalBuffer → clear raises a RangeDefect — a Defect is NOT
+     catchable by except IllwillError. Fixed: drawScreen clamps the buffer
+     dimensions to at least 1. AND requestRender catches IllwillError: the
+     sink runs inside the Lua boundary and must never raise across it
+     (a Nim exception crossing the C boundary is undefined behavior).
+  2. The busted specs share ONE live session (neopi.session) — the drain
+     test's history check assumed a fresh session (9 previous entries + 4
+     mine = 13). Fixed: tail-based checks (the last four entries).
+- The delegation: the writer stalled (4 min after a bash, zero edits — the
+  third stall in two slices); the parent implemented 5b-1 inline from the
+  task file's contracts.
+- Known limits: the follow-up queue deferred (the steering/follow-up
+  distinction is meaningless when the tool calls are local); the abort only
+  interrupts the stream (the tool calls block briefly; the deltas are the
+  long part); no abort marker in the transcript (polish); the key polling
+  during the stream happens per text delta (a thinking pause delays it).
