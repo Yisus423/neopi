@@ -16,6 +16,9 @@ import neopi/lua
 import neopi/session
 from neopi/hooks import lua_error
 
+# setControlCHook comes from system (no import needed): the SIGINT hook is
+# the user's job — illwill does not install one.
+
 # Same file-scope typedef as lua.nim and the bridge modules: no C headers
 # exist to declare the opaque state type, and this file's generated C
 # prototypes take it (the stream sink's C callback).
@@ -309,7 +312,10 @@ proc tuiOnEventCB(L: LuaState): cint {.cdecl.} =
     let key = state[].keyPoller()
     if key == Key.None:
       break
-    if key == Key.CtrlC:
+    if key == Key.CtrlC or key == Key.Escape:
+      # Esc aborts the stream (pi's model); the draft stays for the
+      # recovered composer. Ctrl+C is the OS SIGINT path and never reaches
+      # the buffer in cooked mode — the case stays for a raw-mode future.
       cancel = true
     elif key == Key.Enter:
       let draft = state[].composer.text
@@ -451,6 +457,20 @@ proc sendTurn(state: ptr TuiState, L: LuaState, loopError: var string) =
   state[].streaming = ""
   requestRender(state)
 
+proc exitHook() {.noconv.} =
+  ## The SIGINT handler: restore the terminal and exit gracefully. Ctrl+C is
+  ## the terminal's INTR character (ISIG stays on — illwill does not enable
+  ## raw mode), so the OS delivers SIGINT and kills the process before any
+  ## key loop sees it; without this hook the death leaves the terminal in
+  ## the alternate screen and raw attributes. Tolerates the
+  ## non-initialized illwill (the SIGINT can arrive before init).
+  try:
+    illwillDeinit()
+  except IllwillError:
+    discard
+  showCursor()
+  quit(0)
+
 proc tuiLoop*(sess: Session, L: LuaState, provider, model: string): string =
   ## Run the TUI: illwill's init, the key dispatch, the send path (the
   ## agent.run chunk with the stream sink — the deltas render live through
@@ -459,6 +479,9 @@ proc tuiLoop*(sess: Session, L: LuaState, provider, model: string): string =
   ## terminal. The session persists through the same append path the engine
   ## uses.
   var state = initTuiState(provider, model, sess)
+  # The SIGINT hook before init: the Ctrl+C death restores the terminal
+  # (the illwill doc's pattern).
+  setControlCHook(exitHook)
   illwillInit(fullScreen = true)
   defer: illwillDeinit()
   exposeTuiSink(L, addr state, model)

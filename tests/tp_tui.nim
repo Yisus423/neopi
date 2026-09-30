@@ -244,6 +244,35 @@ suite "the stream sink":
       removeDir(root)
       removeFile(path)
 
+  test "aborts on Esc":
+    let root = freshWorkspace("neopi-tp-tui-sink4")
+    let path = freshSessionPath("sink4")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess)
+      var polls = 0
+      st.keyPoller = proc (): Key =
+        inc polls
+        if polls == 1: Key.Escape else: Key.None
+      exposeTuiSink(L, addr st, "scripted")
+      runScript(L, "neopi.provider.setScripted({{text = 'partial text'}})")
+      let response = evalJson(L, """
+        return neopi.provider.stream({
+          model = "scripted",
+          messages = {{role = "user", text = "go"}},
+        }, neopi._tuiOnEvent)
+      """)
+      # Esc aborted the stream: the partial response, no Lua error. The
+      # draft stays for the recovered composer.
+      check response["text"].getStr == "partial text"
+      check response["stopReason"].getStr == "aborted"
+      check st.composer.text == ""
+    finally:
+      removeDir(root)
+      removeFile(path)
+
   test "edits the draft on printable keys":
     let root = freshWorkspace("neopi-tp-tui-sink3")
     let path = freshSessionPath("sink3")

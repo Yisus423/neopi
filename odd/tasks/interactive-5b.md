@@ -170,3 +170,26 @@ the user's call, 2026-09-29).
 - Known limits: no widget removal primitive (set-only); the widgets are
   plain text lines (no colors — polish); the full component API (the
   extensions ADD components) is post-MVP.
+
+### Follow-up fix: the abort key is Esc (Ctrl+C's SIGINT reality)
+
+- The user ran the TUI for real: Ctrl+C during a run KILLED the process
+  (SIGINT traceback: the death inside asyncdispatch's epoll poll). Root
+  cause: illwillInit does NOT enable raw mode or install a SIGINT handler
+  on Linux — Ctrl+C is the terminal's INTR character (ISIG on), so the OS
+  delivers SIGINT and kills the process before any key loop sees it;
+  Key.CtrlC never reaches the buffer, and the death leaves the terminal in
+  the alternate screen and raw attributes.
+- The fix (the user's call): **Esc aborts the stream** (the sink's Esc case
+  → cancel → the partial response → the loop ends the turn → the TUI
+  recovers with the draft intact — pi's model). Ctrl+C is now the graceful
+  exit: a setControlCHook (the SIGINT handler, the illwill doc's pattern —
+  setControlCHook comes from system, not std/terminal) restores the
+  terminal (illwillDeinit + showCursor) and quits, tolerating the
+  non-initialized illwill (the SIGINT can arrive before init).
+- The keys now: Enter sends (idle) / queues the draft (during a run); Esc
+  aborts the stream (during a run) / clears the composer (idle); Ctrl+C
+  exits gracefully (the OS SIGINT path).
+- Verification: nimble test verbatim "[Summary] 101 tests run (2.64s):
+  101 OK, 0 FAILED, 0 SKIPPED" + busted "7 successes"; nimCheckFile 0
+  diagnostics on tui.nim; the production binary builds clean.
