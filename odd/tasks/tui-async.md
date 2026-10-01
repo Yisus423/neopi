@@ -108,3 +108,32 @@ threading — YAGNI held; the timer achieves the same with zero races).
   delays the cancel); the timer only fires during the waitFor streams (the
   idle loop has its own polling); no dirty tracking beyond illwill's
   displayDiff.
+
+## The one-character bug the pty harness caught (post-merge fix)
+
+- The user reported both bugs alive: "Esc no aborta" + "lo que escribo no
+  se actualiza cuando el modelo está working pero sí se detecta".
+- The pty harness (Python, openpty + TIOCSCTTY + TIOCSWINSZ + the keys on
+  the master — the TUI tested by the agent itself) reproduced and diagnosed
+  them: the timer's cb returned `true` ("keep the timer" — an inverted
+  assumption); asyncdispatch's Callback semantics are THE INVERSE: `false`
+  means the callback wants to stay alive (processBasicCallbacks' doc:
+  "until one returns false (which means callback wants to stay alive)").
+  With `true` the timer UNREGISTERED after its FIRST fire — fired during
+  waitFor: 1 (a micro-test proved it; 20 with `false`) — so neither the
+  polling nor the render ran during the stream, while the sink (per delta)
+  kept rendering: the streaming text showed, the draft didn't update, and
+  the abort never flowed.
+- The harness artifacts to distinguish from real bugs: openpty without
+  TIOCSWINSZ gives terminalHeight() = 0 → the 1-row buffer (only the
+  footer visible) — not a TUI bug; openpty without TIOCSCTTY does not
+  deliver SIGINT (Ctrl+C "didn't work") — the user's real terminal works
+  (confirmed) and the harness matched after the fix.
+- The fix: one character — the timer's cb returns `false`. Verified by the
+  pty harness end-to-end: every keystroke renders (idle and DURING the
+  stream), Esc clears the draft in idle AND aborts the stream
+  (stop=aborted in the JSONL, the streaming text stops growing), Ctrl+C
+  exits with code 0.
+- nimble test after the fix: "[Summary] 110 tests run (3.00s): 110 OK,
+  0 FAILED, 0 SKIPPED" + busted "10 successes"; nimCheckFile: 0 diagnostics
+  on tui.nim.

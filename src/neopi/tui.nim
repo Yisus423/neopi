@@ -564,10 +564,13 @@ proc tuiLoop*(sess: Session, L: LuaState, provider, model: string): string =
   # single-threaded) — no races with the sink or the key loop.
   addTimer(50, false, proc (fd: AsyncFD): bool {.gcsafe.} =
     # gcsafe: the timer fires on the main thread only (the async dispatch is
-    # single-threaded), so the TUI state access is safe in reality.
+    # single-threaded), so the TUI state access is safe in reality. FALSE
+    # means the callback wants to stay alive (asyncdispatch's Callback
+    # semantics are the inverse of what the name suggests) — the timer
+    # re-fires every 50ms during the stream's waitFor.
     discard pollTimerKeys(addr state)
     requestRender(addr state)
-    true
+    false
   )
   defer: illwillDeinit()
   exposeTuiSink(L, addr state, model)
