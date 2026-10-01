@@ -10,7 +10,7 @@
 ## deltas render live through the onEvent sink, and the session persists
 ## through the same append path.
 
-import std/[json, os, strutils]
+import std/[algorithm, json, os, strutils, times]
 import asyncdispatch
 import illwill
 import neopi/lua
@@ -47,19 +47,27 @@ type
     text*: string
     cursor*: int
 
+  SelectState* = object
+    ## The select list (pi's SelectList pattern): the items with their
+    ## labels, the cursor index into the items, and the open flag.
+    items*: seq[tuple[value, label: string]]
+    selected*: int
+    open*: bool
+
   TuiState* = object
     ## The mutable TUI state the key loop, the stream sink, and the async
     ## timer drive: the footer labels, the session (borrowed from the
     ## caller), the interpreter (the timer's steering needs it), the
-    ## composer, the transcript's scroll offset, the in-flight stream text,
-    ## the exit and abort flags, the injected key poller (the tests swap
-    ## it; the timer polls the stream-time keys through it), and the
-    ## extension UI (the status line and the widget lines the neopi.ui
-    ## primitives set).
+    ## workspace root the sessions resolve against, the composer, the
+    ## transcript's scroll offset, the in-flight stream text, the exit and
+    ## abort flags, the injected key poller (the tests swap it; the timer
+    ## polls the stream-time keys through it), and the extension UI (the
+    ## status line and the widget lines the neopi.ui primitives set).
     provider*: string
     model*: string
     sess*: Session
     lua*: LuaState
+    root*: string
     composer*: ComposerState
     scrollOffset*: int
     streaming*: string
@@ -68,18 +76,22 @@ type
     keyPoller*: proc (): Key {.closure, gcsafe.}
     statusLine*: string
     widgets*: seq[tuple[name, text: string]]
+    select*: SelectState
 
 const tuiStateRegistryKey = "neopi.tui.state"
 
-proc initTuiState*(provider, model: string, sess: Session): TuiState =
+proc initTuiState*(provider, model: string, sess: Session,
+                   root = ""): TuiState =
   ## Constructor: a fresh TUI state — the composer empty, the view following
   ## the bottom, nothing in flight, the key poller on illwill's getKey, no
-  ## extension UI. The lua field is nil until exposeTuiSink binds the
-  ## interpreter (the timer's steering needs it).
+  ## extension UI, the select closed. The lua field is nil until
+  ## exposeTuiSink binds the interpreter (the timer's steering needs it);
+  ## the root is the workspace the sessions resolve against.
   TuiState(provider: provider, model: model, sess: sess, lua: nil,
-    composer: ComposerState(), scrollOffset: 0, streaming: "", quit: false,
-    abortRequested: false, keyPoller: proc (): Key = getKey(),
-    statusLine: "", widgets: @[])
+    root: root, composer: ComposerState(), scrollOffset: 0, streaming: "",
+    quit: false, abortRequested: false, keyPoller: proc (): Key = getKey(),
+    statusLine: "", widgets: @[], select: SelectState(items: @[],
+    selected: 0, open: false))
 
 proc wrapLine*(s: string, width: int): seq[string] =
   ## Word-wrap `s` so each returned line is at most `width` columns: the
@@ -214,6 +226,79 @@ proc composerClear*(c: var ComposerState) =
   c.text = ""
   c.cursor = 0
 
+proc initSelectState*(items: seq[tuple[value, label: string]]): SelectState =
+  ## Constructor: an open select list with the items and the cursor on the
+  ## first.
+  SelectState(items: items, selected: 0, open: true)
+
+proc selectMove*(s: var SelectState, delta: int) =
+  ## Move the cursor by delta, clamped to the list's bounds.
+  if s.items.len == 0:
+    return
+  s.selected = max(0, min(s.selected + delta, s.items.len - 1))
+
+proc selectClose*(s: var SelectState) =
+  ## Close the list and reset it (the Esc behavior while the overlay is
+  ## open).
+  s.open = false
+  s.items = @[]
+  s.selected = 0
+
+proc selectLines*(s: SelectState, width: int): seq[string] =
+  ## The display lines of the select list: the header plus the window of
+  ## maxVisible items around the selection (clamped to the list), the
+  ## selected one prefixed with "> ". Pure; wrapping to the terminal width
+  ## happens at render time.
+  if not s.open or s.items.len == 0:
+    return @[]
+  result = @[]
+  result.add "resume a session:"
+  const maxVisible = 5
+  var first = max(0, s.selected - maxVisible div 2)
+  first = min(first, max(0, s.items.len - maxVisible))
+  let last = min(s.items.len - 1, first + maxVisible - 1)
+  for i in first .. last:
+    let prefix = if i == s.selected: "> " else: "  "
+    result.add prefix & s.items[i].label
+
+proc sessionLabel*(path: string): string =
+  ## The label for one session file: the first user entry's text (truncated
+  ## to 40 chars), or the file name when the session has no user entry or
+  ## cannot be read.
+  let name = path.splitFile.name
+  var firstText = ""
+  try:
+    let content = readFile(path)
+    for line in content.splitLines():
+      if line.len > 0:
+        let parsed = parseJson(line)
+        if parsed{"type"}.getStr == "user":
+          firstText = parsed{"text"}.getStr
+          break
+  except JsonParsingError, CatchableError:
+    discard
+  if firstText.len > 40:
+    firstText = firstText[0 ..< 40]
+  if firstText.len == 0:
+    return name
+  return name & " — " & firstText
+
+proc listSessions*(root: string): seq[tuple[value, label: string]] =
+  ## The session files of the workspace (the newest first): value = the
+  ## path, label = the first user entry's text (or the file name when the
+  ## session has none). An empty or missing sessions dir yields nothing.
+  let dir = root / ".neopi" / "sessions"
+  if not dirExists(dir):
+    return @[]
+  result = @[]
+  var files: seq[(string, int64)] = @[]
+  for entry in walkDir(dir):
+    if entry.kind == pcFile and entry.path.endsWith(".jsonl"):
+      files.add (entry.path, toUnix(getLastModificationTime(entry.path)))
+  files.sort(proc (a, b: (string, int64)): int = cmp(b[1], a[1]))
+  for (path, _) in files:
+    result.add (value: path, label: sessionLabel(path))
+
 proc clip(s: string, width: int): string =
   ## Truncate a single-line string to `width` columns: the composer and the
   ## footer do not wrap.
@@ -247,15 +332,22 @@ proc drawScreen(state: ptr TuiState) =
       wrapped.add piece
   let transcriptHeight = max(1, height - 2 - state[].widgets.len -
     (if state[].statusLine.len > 0: 1 else: 0))
-  let visible = visibleRange(wrapped.len, transcriptHeight,
-    state[].scrollOffset)
   var row = 0
-  for i in visible:
-    # The per-line color (pi-like): the prefix decides, each write sets its
-    # own.
-    tb.setForegroundColor(lineColor(wrapped[i]))
-    tb.write(0, row, wrapped[i])
-    inc row
+  if state[].select.open:
+    # The select overlay: the resume list replaces the transcript while
+    # open (the composer and the footer stay).
+    for line in selectLines(state[].select, width):
+      tb.write(0, row, line)
+      inc row
+  else:
+    let visible = visibleRange(wrapped.len, transcriptHeight,
+      state[].scrollOffset)
+    for i in visible:
+      # The per-line color (pi-like): the prefix decides, each write sets
+      # its own.
+      tb.setForegroundColor(lineColor(wrapped[i]))
+      tb.write(0, row, wrapped[i])
+      inc row
   tb.setForegroundColor(fgNone)
   for w in state[].widgets:
     tb.write(0, row, clip(w.text, width))
@@ -288,10 +380,23 @@ proc pageStep*(height: int): int =
   max(1, max(1, height - 2) div 2)
 
 proc handleKey*(state: var TuiState, key: Key, height: int) =
-  ## Apply one key press to the TUI state: the composer's editing (printable
+  ## Apply one key press to the TUI state. When the select overlay is open
+  ## it is the input's controller (Up/Down move the cursor, Esc closes);
+  ## the composer is inert. Otherwise: the composer's editing (printable
   ## insert, Backspace, Left/Right), Esc's clear, and the transcript's
   ## scroll (PageUp/PageDown a page, Up/Down a line). Enter and Ctrl+C are
   ## the loop's decisions (send and exit), not handled here.
+  if state.select.open:
+    case key
+    of Key.Up:
+      selectMove(state.select, -1)
+    of Key.Down:
+      selectMove(state.select, 1)
+    of Key.Escape:
+      selectClose(state.select)
+    else:
+      discard
+    return
   case key
   of Key.Escape:
     composerClear(state.composer)
@@ -314,6 +419,37 @@ proc handleKey*(state: var TuiState, key: Key, height: int) =
     let code = ord(key)
     if code >= 32 and code <= 126:
       composerInsert(state.composer, $chr(code))
+
+proc openResume*(state: ptr TuiState) =
+  ## Open the select overlay with the workspace's sessions (the /resume
+  ## builtin): the list into the state and re-render. An empty sessions dir
+  ## reports "no sessions to resume" on the status line and stays closed.
+  state[].select = initSelectState(listSessions(state[].root))
+  if state[].select.items.len == 0:
+    state[].statusLine = "no sessions to resume"
+    state[].select.selectClose()
+  requestRender(state)
+
+proc resumeSession*(state: ptr TuiState, L: LuaState, path: string) =
+  ## Load the session file the user picked (the overlay's Enter): newSession
+  ## loads the JSONL, the swap rebinds the TUI state's session and the
+  ## registry's neopi.session pointer (the session cfunctions read it
+  ## dynamically per call), and the transcript re-renders. A failure: the
+  ## status line carries it (feedback, not fatal — the command path's
+  ## model).
+  try:
+    let fresh = newSession(path)
+    state[].sess = fresh
+    setRegistryPointer(L, "neopi.session", cast[pointer](fresh))
+  except CatchableError as e:
+    state[].statusLine = "cannot resume " & path & ": " & e.msg
+    state[].select.selectClose()
+    requestRender(state)
+    return
+  state[].select.selectClose()
+  state[].streaming = ""
+  state[].scrollOffset = 0
+  requestRender(state)
 
 proc queueSteering(L: LuaState, text: string) =
   ## Append the draft text to neopi.steeringQueue (the Lua array table the
@@ -340,7 +476,17 @@ proc pollTimerKeys*(state: ptr TuiState): bool {.gcsafe.} =
     let key = state[].keyPoller()
     if key == Key.None:
       break
-    if key == Key.CtrlC or key == Key.Escape:
+    if state[].select.open:
+      # The overlay is the input's controller while open: Enter loads the
+      # picked session (via the state's interpreter), the rest goes to
+      # handleKey (Up/Down move, Esc closes — not the abort).
+      if key == Key.Enter:
+        if state[].select.items.len > 0:
+          resumeSession(state, state[].lua,
+            state[].select.items[state[].select.selected].value)
+      else:
+        handleKey(state[], key, terminalHeight())
+    elif key == Key.CtrlC or key == Key.Escape:
       abort = true
     elif key == Key.Enter:
       let draft = state[].composer.text
@@ -469,6 +615,7 @@ proc exposeUi*(L: LuaState) =
 {.pop.}
 
 
+
 proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
   ## Dispatch a /-prefixed composer input to the runtime's command registry
   ## (the nvim model — the runtime owns the registry and the dispatch): the
@@ -476,6 +623,12 @@ proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
   ## returned output renders as the status line. A command failure (an
   ## unknown command, a command error) is FEEDBACK, not a fatal loop error:
   ## it renders in the status line too — the TUI survives a typo /unknown.
+  ## The /resume builtin opens the select overlay instead (pi's SelectList
+  ## — the sessions picker); its input never enters the session.
+  if text == "/resume":
+    composerClear(state[].composer)
+    openResume(state)
+    return
   composerClear(state[].composer)
   lua_getfield(L, luaGlobalsIndex, "neopi")
   pushString(L, text)
@@ -546,14 +699,15 @@ proc exitHook() {.noconv.} =
   showCursor()
   quit(0)
 
-proc tuiLoop*(sess: Session, L: LuaState, provider, model: string): string =
+proc tuiLoop*(sess: Session, L: LuaState, provider, model: string,
+              root = ""): string =
   ## Run the TUI: illwill's init, the key dispatch, the send path (the
   ## agent.run chunk with the stream sink — the deltas render live through
   ## it), and the per-frame redraw. Returns "" on a clean exit (Ctrl+C) or
   ## the loop's failure message; illwill's deinit always restores the
   ## terminal. The session persists through the same append path the engine
   ## uses.
-  var state = initTuiState(provider, model, sess)
+  var state = initTuiState(provider, model, sess, root)
   # The SIGINT hook before init: the Ctrl+C death restores the terminal
   # (the illwill doc's pattern).
   setControlCHook(exitHook)
@@ -593,7 +747,13 @@ proc tuiLoop*(sess: Session, L: LuaState, provider, model: string): string =
     of Key.CtrlC:
       state.quit = true
     of Key.Enter:
-      sendTurn(addr state, L, loopError)
+      if state.select.open:
+        # The overlay's Enter: load the picked session.
+        if state.select.items.len > 0:
+          resumeSession(addr state, L,
+            state.select.items[state.select.selected].value)
+      else:
+        sendTurn(addr state, L, loopError)
     else:
       handleKey(state, key, terminalHeight())
       requestRender(addr state)

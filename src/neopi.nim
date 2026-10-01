@@ -170,7 +170,7 @@ proc runTui(providerName, modelId: string) =
     loadUserConfig(root, ext.bus.state)
   except LuaError as e:
     stderr.writeLine("neopi: the user config failed to load: " & e.msg)
-  let error = tuiLoop(s, ext.bus.state, providerName, modelId)
+  let error = tuiLoop(s, ext.bus.state, providerName, modelId, root)
   if error.len > 0:
     fatal("the agent loop failed: " & error)
 
