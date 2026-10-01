@@ -56,6 +56,20 @@ suite "transcriptLines":
     let entries = @[SessionEntry(kind: ekUser, text: "line one\nline two")]
     check transcriptLines(entries) == @["you: line one", "line two"]
 
+  test "aborted assistant turns mark their partial text":
+    let entries = @[SessionEntry(kind: ekAssistant, text: "partial",
+      model: "m", provider: "p", stopReason: "aborted")]
+    check transcriptLines(entries) == @["assistant: partial (aborted)"]
+
+suite "lineColor":
+  test "the prefix decides":
+    check lineColor("you: hello") == fgGreen
+    check lineColor("assistant: hi") == fgNone
+    check lineColor("tool read: content") == fgCyan
+    check lineColor("tool bash (error): boom") == fgRed
+    check lineColor("-- compaction: the summary") == fgMagenta
+    check lineColor("anything else") == fgNone
+
 suite "streamingLines":
   test "the assistant prefix with the in-flight text":
     check streamingLines("delta text") == @["assistant: delta text"]

@@ -110,6 +110,21 @@ proc wrapLine*(s: string, width: int): seq[string] =
       if pos < s.len and s[pos] == ' ':
         inc pos
 
+proc lineColor*(line: string): ForegroundColor =
+  ## The color for one transcript line, by its prefix (pi-like): the user's
+  ## lines green, the assistant's default, the tool results cyan (red when
+  ## the line carries the error marker), the compaction dim magenta.
+  if line.startsWith("you: "):
+    result = fgGreen
+  elif line.startsWith("assistant: "):
+    result = fgNone
+  elif line.startsWith("-- compaction: "):
+    result = fgMagenta
+  elif line.startsWith("tool "):
+    result = if "(error)" in line: fgRed else: fgCyan
+  else:
+    result = fgNone
+
 proc transcriptLines*(entries: seq[SessionEntry]): seq[string] =
   ## The display lines for the session entries in order: the kind prefix per
   ## entry (user, assistant, toolResult with its error marker, compaction's
@@ -121,7 +136,9 @@ proc transcriptLines*(entries: seq[SessionEntry]): seq[string] =
     of ekUser:
       prefixed.add "you: " & entry.text
     of ekAssistant:
-      prefixed.add "assistant: " & entry.text
+      # The aborted turns (the Esc cancel) mark their partial text.
+      prefixed.add "assistant: " & entry.text &
+        (if entry.stopReason == "aborted": " (aborted)" else: "")
     of ekToolResult:
       if entry.isError:
         prefixed.add "tool " & entry.toolName & " (error): " & entry.output
@@ -234,8 +251,12 @@ proc drawScreen(state: ptr TuiState) =
     state[].scrollOffset)
   var row = 0
   for i in visible:
+    # The per-line color (pi-like): the prefix decides, each write sets its
+    # own.
+    tb.setForegroundColor(lineColor(wrapped[i]))
     tb.write(0, row, wrapped[i])
     inc row
+  tb.setForegroundColor(fgNone)
   for w in state[].widgets:
     tb.write(0, row, clip(w.text, width))
     inc row
@@ -244,9 +265,10 @@ proc drawScreen(state: ptr TuiState) =
     inc row
   tb.write(0, max(0, height - 2), clip("> " & state[].composer.text, width))
   let totals = usageTotals(entries)
-  tb.write(0, max(0, height - 1),
-    clip(footerLine(state[].provider, state[].model, totals.tokensIn,
-    totals.tokensOut), width))
+  # The working indicator (pi's): the footer shows the stream's flight.
+  let footer = footerLine(state[].provider, state[].model, totals.tokensIn,
+    totals.tokensOut) & (if state[].streaming.len > 0: " | working" else: "")
+  tb.write(0, max(0, height - 1), clip(footer, width))
   tb.display()
 
 proc requestRender*(state: ptr TuiState) =
