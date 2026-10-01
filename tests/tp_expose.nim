@@ -44,6 +44,15 @@ proc loadAgentLoop(L: LuaState) =
     escapeLua(dir / "?.lua;" & dir / "?/init.lua") & ";' .. package.path")
   runScript(L, "agent = require('agent')")
 
+proc loadRuntimeEntry(L: LuaState) =
+  ## Load the runtime entry (init.lua): the command registry and the tools
+  ## land on the neopi table (the tp_register pattern). The production order
+  ## loads the runtime before the user's config.
+  let dir = runtimeDir()
+  runScript(L, "package.path = '" &
+    escapeLua(dir / "?.lua;" & dir / "?/init.lua") & ";' .. package.path")
+  runScript(L, "require('init')")
+
 suite "exposure provider":
   test "generate surfaces the scripted response and the tool calls":
     let root = freshWorkspace("neopi-tp-expose-provider")
@@ -397,3 +406,65 @@ suite "exposure session":
     finally:
       removeDir(root)
       removeFile(path)
+
+suite "user config":
+  test "loads the user config and registers a command":
+    let root = freshWorkspace("neopi-tp-expose-config")
+    try:
+      createDir(root / ".neopi")
+      writeFile(root / ".neopi" / "init.lua", """
+        neopi.registerCommand('hello', 'salutes', function(args)
+          return 'hi ' .. args
+        end)
+      """)
+      let ext = newExtensibility(root)
+      let L = ext.bus.state
+      loadRuntimeEntry(L)
+      loadUserConfig(root, L)
+      # The config loaded: the command registered, the dispatcher runs it.
+      check evalString(L,
+        "return neopi.runCommand('/hello world')") == "hi world"
+    finally:
+      removeDir(root)
+
+  test "the config's require resolves through the extended package path":
+    let root = freshWorkspace("neopi-tp-expose-config2")
+    try:
+      createDir(root / ".neopi" / "extensions")
+      writeFile(root / ".neopi" / "extensions" / "echo.lua", """
+        neopi.registerCommand('echo', 'echoes', function(args)
+          return 'echoed: ' .. args
+        end)
+      """)
+      writeFile(root / ".neopi" / "init.lua", "require('extensions.echo')")
+      let ext = newExtensibility(root)
+      let L = ext.bus.state
+      loadRuntimeEntry(L)
+      loadUserConfig(root, L)
+      # The require resolved through .neopi/?.lua: the extension's command
+      # registered.
+      check evalString(L,
+        "return neopi.runCommand('/echo x')") == "echoed: x"
+    finally:
+      removeDir(root)
+
+  test "no config is a no-op":
+    let root = freshWorkspace("neopi-tp-expose-config3")
+    try:
+      let ext = newExtensibility(root)
+      loadUserConfig(root, ext.bus.state)
+      # No .neopi/init.lua: no error, the core's table intact.
+      check evalString(ext.bus.state, "return type(neopi)") == "table"
+    finally:
+      removeDir(root)
+
+  test "a broken config raises LuaError":
+    let root = freshWorkspace("neopi-tp-expose-config4")
+    try:
+      createDir(root / ".neopi")
+      writeFile(root / ".neopi" / "init.lua", "this is not lua ]]]")
+      let ext = newExtensibility(root)
+      expect LuaError:
+        loadUserConfig(root, ext.bus.state)
+    finally:
+      removeDir(root)

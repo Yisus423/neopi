@@ -122,6 +122,10 @@ proc runPrint(prompt, providerName: string, modelId: string) =
   let ext = newExtensibility(root, some(p), s)
   exposeUi(ext.bus.state)
   loadRuntime(ext.bus.state)
+  try:
+    loadUserConfig(root, ext.bus.state)
+  except LuaError as e:
+    stderr.writeLine("neopi: the user config failed to load: " & e.msg)
   # The loop: agent.run(neopi.session, {model = ...}) — the response is a
   # Lua table; evalJson converts it.
   let chunk = "local agent = require('agent'); " &
@@ -162,6 +166,10 @@ proc runTui(providerName, modelId: string) =
   let ext = newExtensibility(root, some(p), s)
   exposeUi(ext.bus.state)
   loadRuntime(ext.bus.state)
+  try:
+    loadUserConfig(root, ext.bus.state)
+  except LuaError as e:
+    stderr.writeLine("neopi: the user config failed to load: " & e.msg)
   let error = tuiLoop(s, ext.bus.state, providerName, modelId)
   if error.len > 0:
     fatal("the agent loop failed: " & error)

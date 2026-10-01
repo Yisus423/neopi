@@ -8,7 +8,7 @@
 ## `neopi.fs` and `neopi.process` tables; the runtime layer reaches the
 ## provider and the session through `neopi.provider` and `neopi.session`.
 
-import std/[json, options]
+import std/[json, options, os]
 import neopi/lua
 import neopi/hooks
 import neopi/fs
@@ -54,3 +54,38 @@ proc newExtensibility*(workspaceRoot: string, provider = none(Provider),
     bus.emit(event, payload)
   exposeFs(bus.state, workspaceRoot)
   exposeProcess(bus.state, workspaceRoot, busEmit)
+
+func escapeLua(s: string): string =
+  ## Escape a string for a single-quoted Lua literal: only the quote and the
+  ## backslash need escaping there. The file-scope copy the other modules
+  ## carry (neopi.nim, the test helpers); the consolidation into lua.nim is
+  ## a future cleanup.
+  result = ""
+  for c in s:
+    case c
+    of '\'', '\\': result.add "\\" & c
+    else: result.add c
+
+proc loadUserConfig*(root: string, L: LuaState) =
+  ## Load the user's config: the .neopi/init.lua entrypoint (the nvim model
+  ## — ONE config file the user owns; the config requires the extensions,
+  ## and require resolves through the extended package path). Missing: a
+  ## no-op (the bare agent). A failure raises LuaError — the binary decides
+  ## the severity (the stderr warning + continue, nvim's model).
+  ##
+  ## The package.path gains .neopi/ before the config sources, so the
+  ## config's requires resolve: require('extensions.echo') loads
+  ## .neopi/extensions/echo.lua.
+  let configPath = root / ".neopi" / "init.lua"
+  if not fileExists(configPath):
+    return
+  let chunk = "package.path = '" &
+    escapeLua(root / ".neopi" / "?.lua") & ";' .. package.path"
+  runScript(L, chunk, "userconfig-path")
+  var source = ""
+  try:
+    source = readFile(configPath)
+  except OSError, IOError:
+    raise newException(LuaError, "cannot read " & configPath & ": " &
+      getCurrentExceptionMsg())
+  runScript(L, source, "userconfig/init.lua")
