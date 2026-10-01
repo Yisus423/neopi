@@ -11,6 +11,7 @@
 ## through the same append path.
 
 import std/[json, os, strutils]
+import asyncdispatch
 import illwill
 import neopi/lua
 import neopi/session
@@ -47,20 +48,24 @@ type
     cursor*: int
 
   TuiState* = object
-    ## The mutable TUI state the key loop and the stream sink drive: the
-    ## footer labels, the session (borrowed from the caller), the composer,
-    ## the transcript's scroll offset, the in-flight stream text, the exit
-    ## flag, the injected key poller (the tests swap it; the sink polls
-    ## the stream-time keys through it), and the extension UI (the status
-    ## line and the widget lines the neopi.ui primitives set).
+    ## The mutable TUI state the key loop, the stream sink, and the async
+    ## timer drive: the footer labels, the session (borrowed from the
+    ## caller), the interpreter (the timer's steering needs it), the
+    ## composer, the transcript's scroll offset, the in-flight stream text,
+    ## the exit and abort flags, the injected key poller (the tests swap
+    ## it; the timer polls the stream-time keys through it), and the
+    ## extension UI (the status line and the widget lines the neopi.ui
+    ## primitives set).
     provider*: string
     model*: string
     sess*: Session
+    lua*: LuaState
     composer*: ComposerState
     scrollOffset*: int
     streaming*: string
     quit*: bool
-    keyPoller*: proc (): Key {.closure.}
+    abortRequested*: bool
+    keyPoller*: proc (): Key {.closure, gcsafe.}
     statusLine*: string
     widgets*: seq[tuple[name, text: string]]
 
@@ -69,10 +74,12 @@ const tuiStateRegistryKey = "neopi.tui.state"
 proc initTuiState*(provider, model: string, sess: Session): TuiState =
   ## Constructor: a fresh TUI state — the composer empty, the view following
   ## the bottom, nothing in flight, the key poller on illwill's getKey, no
-  ## extension UI.
-  TuiState(provider: provider, model: model, sess: sess,
+  ## extension UI. The lua field is nil until exposeTuiSink binds the
+  ## interpreter (the timer's steering needs it).
+  TuiState(provider: provider, model: model, sess: sess, lua: nil,
     composer: ComposerState(), scrollOffset: 0, streaming: "", quit: false,
-    keyPoller: proc (): Key = getKey(), statusLine: "", widgets: @[])
+    abortRequested: false, keyPoller: proc (): Key = getKey(),
+    statusLine: "", widgets: @[])
 
 proc wrapLine*(s: string, width: int): seq[string] =
   ## Word-wrap `s` so each returned line is at most `width` columns: the
@@ -297,35 +304,51 @@ proc queueSteering(L: LuaState, text: string) =
   lua_rawseti(L, -2, n + 1)
   lua_pop(L, 2)
 
-proc tuiOnEventCB(L: LuaState): cint {.cdecl.} =
-  ## The stream sink's C callback: the first upvalue is the TUI state
-  ## pointer; read the {text = delta} event table, append the delta to the
-  ## in-flight text, poll the stream-time keys (the steering draft, Enter
-  ## queues it, Ctrl+C aborts), render the frame live, and return false only
-  ## when the user aborted (the stream's cancel).
-  let state = cast[ptr TuiState](lua_touserdata(L, luaUpvalueIndex(1)))
-  let event = jsonOfStack(L, 1)
-  if event.kind == JObject and event.hasKey("text"):
-    state[].streaming.add event["text"].getStr("")
-  var cancel = false
+proc pollTimerKeys*(state: ptr TuiState): bool {.gcsafe.} =
+  ## The async timer's key handling: drain the input buffer, apply the keys
+  ## (the composer's editing, the steering's Enter, the scroll), and set the
+  ## abort flag on Esc/Ctrl+C. Returns whether the user requested the abort.
+  ## The keyPoller is injectable (the tests swap it; the timer uses illwill's
+  ## getKey in production). The timer fires during the stream's waitFor, so
+  ## the keys poll in the gaps between deltas too. gcsafe: the timer fires
+  ## on the main thread only (the async dispatch is single-threaded), so the
+  ## indirect keyPoller call and the state access are safe in reality.
+  var abort = false
   while true:
     let key = state[].keyPoller()
     if key == Key.None:
       break
     if key == Key.CtrlC or key == Key.Escape:
-      # Esc aborts the stream (pi's model); the draft stays for the
-      # recovered composer. Ctrl+C is the OS SIGINT path and never reaches
-      # the buffer in cooked mode — the case stays for a raw-mode future.
-      cancel = true
+      abort = true
     elif key == Key.Enter:
       let draft = state[].composer.text
       if draft.len > 0:
-        queueSteering(L, draft)
+        queueSteering(state[].lua, draft)
         composerClear(state[].composer)
     else:
       handleKey(state[], key, terminalHeight())
+  if abort:
+    state[].abortRequested = true
+  result = abort
+
+proc tuiOnEventCB(L: LuaState): cint {.cdecl.} =
+  ## The stream sink's C callback: the first upvalue is the TUI state
+  ## pointer; read the {text = delta} event table, append the delta to the
+  ## in-flight text, cancel when the async timer set the abort flag, and
+  ## render the frame live. The key polling lives in the async timer now
+  ## (pollTimerKeys), which fires in the gaps between deltas too — the
+  ## thinking pauses keep the TUI alive.
+  let state = cast[ptr TuiState](lua_touserdata(L, luaUpvalueIndex(1)))
+  let event = jsonOfStack(L, 1)
+  if event.kind == JObject and event.hasKey("text"):
+    state[].streaming.add event["text"].getStr("")
+  if state[].abortRequested:
+    # The user aborted (the timer's flag): cancel the stream — the
+    # exposure returns the partial response and the loop ends the turn.
+    lua_pushboolean(L, 0)
+    return 1
   requestRender(state)
-  lua_pushboolean(L, cint(ord(not cancel)))
+  lua_pushboolean(L, 1)
   result = 1
 
 proc exposeTuiSink*(L: LuaState, state: ptr TuiState, model: string) =
@@ -340,6 +363,7 @@ proc exposeTuiSink*(L: LuaState, state: ptr TuiState, model: string) =
   ## (Enter during a run) and the loop drains between turns (pi's model).
   ## Requires `neopi` to exist (newHookBus creates it).
   setRegistryPointer(L, tuiStateRegistryKey, cast[pointer](state))
+  state[].lua = L
   lua_getfield(L, luaGlobalsIndex, "neopi")
   if lua_type(L, -1) != luaTTable:
     lua_pop(L, 1)
@@ -483,6 +507,7 @@ proc sendTurn*(state: ptr TuiState, L: LuaState, loopError: var string) =
     state[].quit = true
     return
   state[].streaming = ""
+  state[].abortRequested = false
   requestRender(state)
 
 proc exitHook() {.noconv.} =
@@ -511,6 +536,17 @@ proc tuiLoop*(sess: Session, L: LuaState, provider, model: string): string =
   # (the illwill doc's pattern).
   setControlCHook(exitHook)
   illwillInit(fullScreen = true)
+  # The async timer: the keys poll and the render runs during the stream's
+  # waitFor (the event loop pumps), so the thinking pauses keep the TUI
+  # alive. The callback runs on the main thread (the async dispatch is
+  # single-threaded) — no races with the sink or the key loop.
+  addTimer(50, false, proc (fd: AsyncFD): bool {.gcsafe.} =
+    # gcsafe: the timer fires on the main thread only (the async dispatch is
+    # single-threaded), so the TUI state access is safe in reality.
+    discard pollTimerKeys(addr state)
+    requestRender(addr state)
+    true
+  )
   defer: illwillDeinit()
   exposeTuiSink(L, addr state, model)
   var trackedWidth = int(terminalWidth())

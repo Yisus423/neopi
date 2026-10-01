@@ -212,9 +212,71 @@ proc loadRuntime(L: LuaState) =
   runScript(L, "require('init')")
 
 suite "the stream sink":
-  test "queues the steering draft on Enter":
+  test "cancels when the abort flag is set":
     let root = freshWorkspace("neopi-tp-tui-sink")
     let path = freshSessionPath("sink1")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess)
+      st.abortRequested = true
+      exposeTuiSink(L, addr st, "scripted")
+      runScript(L, "neopi.provider.setScripted({{text = 'partial text'}})")
+      let response = evalJson(L, """
+        return neopi.provider.stream({
+          model = "scripted",
+          messages = {{role = "user", text = "go"}},
+        }, neopi._tuiOnEvent)
+      """)
+      # The abort flag (the async timer set it) cancels the stream: the
+      # partial response with the delta the sink had already rendered; no
+      # Lua error. The flag survives until sendTurn resets it.
+      check response["text"].getStr == "partial text"
+      check response["stopReason"].getStr == "aborted"
+      check st.abortRequested
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+suite "the async timer's key handling":
+  test "sets the abort flag on Esc":
+    let root = freshWorkspace("neopi-tp-tui-timer")
+    let path = freshSessionPath("timer1")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      var st = initTuiState("p", "m", sess)
+      var polls = 0
+      st.keyPoller = proc (): Key =
+        inc polls
+        if polls == 1: Key.Escape else: Key.None
+      check pollTimerKeys(addr st)
+      check st.abortRequested
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "sets the abort flag on Ctrl+C":
+    let root = freshWorkspace("neopi-tp-tui-timer2")
+    let path = freshSessionPath("timer2")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      var st = initTuiState("p", "m", sess)
+      var polls = 0
+      st.keyPoller = proc (): Key =
+        inc polls
+        if polls == 1: Key.CtrlC else: Key.None
+      check pollTimerKeys(addr st)
+      check st.abortRequested
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "queues the steering draft on Enter":
+    let root = freshWorkspace("neopi-tp-tui-timer3")
+    let path = freshSessionPath("timer3")
     try:
       let sess = newSession(path)
       let ext = newExtensibility(root, none(Provider), sess)
@@ -226,102 +288,33 @@ suite "the stream sink":
         inc polls
         if polls == 1: Key.Enter else: Key.None
       exposeTuiSink(L, addr st, "scripted")
-      runScript(L, "neopi.provider.setScripted({{text = 'x'}})")
-      discard evalJson(L, """
-        return neopi.provider.stream({
-          model = "scripted",
-          messages = {{role = "user", text = "go"}},
-        }, neopi._tuiOnEvent)
-      """)
-      # Enter queued the draft into the steering queue and cleared the
-      # composer.
+      check not pollTimerKeys(addr st)
+      # Enter queued the draft into the steering queue (via the state's
+      # interpreter) and cleared the composer; no abort.
       let queued = evalJson(L, "return neopi.steeringQueue")
       check queued.len == 1
       check queued[0].getStr == "check the file"
       check st.composer.text == ""
-    finally:
-      removeDir(root)
-      removeFile(path)
-
-  test "aborts on Ctrl+C":
-    let root = freshWorkspace("neopi-tp-tui-sink2")
-    let path = freshSessionPath("sink2")
-    try:
-      let sess = newSession(path)
-      let ext = newExtensibility(root, none(Provider), sess)
-      let L = ext.bus.state
-      var st = initTuiState("p", "m", sess)
-      var polls = 0
-      st.keyPoller = proc (): Key =
-        inc polls
-        if polls == 1: Key.CtrlC else: Key.None
-      exposeTuiSink(L, addr st, "scripted")
-      runScript(L, "neopi.provider.setScripted({{text = 'partial text'}})")
-      let response = evalJson(L, """
-        return neopi.provider.stream({
-          model = "scripted",
-          messages = {{role = "user", text = "go"}},
-        }, neopi._tuiOnEvent)
-      """)
-      # Ctrl+C aborted the stream: the partial response with the delta the
-      # sink had already rendered; no Lua error.
-      check response["text"].getStr == "partial text"
-      check response["stopReason"].getStr == "aborted"
-    finally:
-      removeDir(root)
-      removeFile(path)
-
-  test "aborts on Esc":
-    let root = freshWorkspace("neopi-tp-tui-sink4")
-    let path = freshSessionPath("sink4")
-    try:
-      let sess = newSession(path)
-      let ext = newExtensibility(root, none(Provider), sess)
-      let L = ext.bus.state
-      var st = initTuiState("p", "m", sess)
-      var polls = 0
-      st.keyPoller = proc (): Key =
-        inc polls
-        if polls == 1: Key.Escape else: Key.None
-      exposeTuiSink(L, addr st, "scripted")
-      runScript(L, "neopi.provider.setScripted({{text = 'partial text'}})")
-      let response = evalJson(L, """
-        return neopi.provider.stream({
-          model = "scripted",
-          messages = {{role = "user", text = "go"}},
-        }, neopi._tuiOnEvent)
-      """)
-      # Esc aborted the stream: the partial response, no Lua error. The
-      # draft stays for the recovered composer.
-      check response["text"].getStr == "partial text"
-      check response["stopReason"].getStr == "aborted"
-      check st.composer.text == ""
+      check not st.abortRequested
     finally:
       removeDir(root)
       removeFile(path)
 
   test "edits the draft on printable keys":
-    let root = freshWorkspace("neopi-tp-tui-sink3")
-    let path = freshSessionPath("sink3")
+    let root = freshWorkspace("neopi-tp-tui-timer4")
+    let path = freshSessionPath("timer4")
     try:
       let sess = newSession(path)
       let ext = newExtensibility(root, none(Provider), sess)
-      let L = ext.bus.state
       var st = initTuiState("p", "m", sess)
       var polls = 0
       st.keyPoller = proc (): Key =
         inc polls
         if polls == 1: Key(104) else: Key.None
-      exposeTuiSink(L, addr st, "scripted")
-      runScript(L, "neopi.provider.setScripted({{text = 'x'}})")
-      discard evalJson(L, """
-        return neopi.provider.stream({
-          model = "scripted",
-          messages = {{role = "user", text = "go"}},
-        }, neopi._tuiOnEvent)
-      """)
-      # The printable key edited the draft (the composer).
+      check not pollTimerKeys(addr st)
+      # The printable key edited the draft (the composer); no abort.
       check st.composer.text == "h"
+      check not st.abortRequested
     finally:
       removeDir(root)
       removeFile(path)
