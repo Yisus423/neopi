@@ -21,17 +21,18 @@ honest record of the design decisions.
 | `lua.nim` | The LuaJIT 5.1 FFI bindings: macro-only 5.1 names wrapped Nim-side (`lua_pop`, `lua_pushcfunction`, `lua_getglobal`/`setglobal`, `luaUpvalueIndex = luaGlobalsIndex - i`); selective lib opening — ffi/io/os/debug/jit closed; the loadlib closure (`package.loadlib = nil`, C loader removed) |
 | `fs.nim` | The confined fs primitives (`neopi.fs`: read/write/mkdir/exists/list) + `resolveConfined`, the one confinement source of truth shared with the agent tools |
 | `process.nim` | The spawn-per-call process primitive (`neopi.process.run`): `process_run` hook (block/rewrite), then `execCmdEx` in the workspace root |
-| `extensibility.nim` | The assembly: hook bus + provider/session exposures + confined fs/process on one interpreter (`newExtensibility`) |
+| `extensibility.nim` | The assembly: hook bus + provider/session exposures + confined fs/process on one interpreter (`newExtensibility`); `loadUserConfig` loads `.neopi/init.lua` the nvim way (package.path + loadScript, a failure raises LuaError) |
 | `session.nim` | The session tree: append-only JSONL, id + parent, the active branch, `navigateTo` (branch in place), the torn-tail rule |
 | `tools.nim` | The Nim agent tools (read/write/edit/bash) over `resolveConfined`; failures raise model-facing messages |
-| `expose.nim` | The Lua exposure of provider/session: `neopi.provider` (generate/setScripted) and `neopi.session` (append/history/navigate) |
+| `expose.nim` | The Lua exposure of provider/session: `neopi.provider` (generate/stream/setScripted) and `neopi.session` (append/history/navigate); `stopReasonOf` maps `frCancelled` → "aborted" |
+| `tui.nim` | The TUI: the pure render layer (wrapLine/lineColor/transcriptLines/usageTotals/footerLine/visibleRange/selectLines), the three components (transcript/composer/footer) + the select overlay, the async timer (`pollTimerKeys`, addTimer 50ms), the stream sink (`tuiOnEventCB` via lua_pushcclosure), and the loop (`tuiLoop`: init + key dispatch + the SIGINT hook) |
 
 ## The runtime modules
 
 | Module | Role |
 |---|---|
-| `runtime/init.lua` | The entry: requires the pieces, returns the agent table (LuaCATS-annotated) |
-| `runtime/agent.lua` | The loop: history → request → `neopi.provider.generate` → append assistant → tool calls → next turn while `toolUse` (LuaCATS-annotated) |
+| `runtime/init.lua` | The entry: requires the pieces, the tool and command registries (the runtime owns both), `neopi.runCommand` (the `/` dispatcher), returns the agent table (LuaCATS-annotated) |
+| `runtime/agent.lua` | The loop: history → request → `neopi.provider.stream`/`generate` → append assistant → the steering drain (`drainSteering`) → tool calls → the compaction trigger → next turn while `toolUse` or steering queued (LuaCATS-annotated) |
 | `runtime/tools.lua` | bash/read/edit/write in Lua over `neopi.fs`/`neopi.process` (LuaCATS-annotated) |
 
 ## Two tool implementations, on purpose
@@ -63,15 +64,40 @@ lines / 50KB. Converging them is runtime work, not core work.
    tree is the slice-4a foundation.
 5. **The static profile.** 3 hard deps (libm, libluajit, libc); libssl and
    libpcre arrive via dlopen at load time.
+6. **The interface is separate from the engine.** The loop and the tools do
+   not change for the TUI: sends go through the same `agent.run` chunk print
+   mode uses, the deltas render live through the stream sink (a Lua closure
+   carrying the TUI state pointer as its first upvalue), and an
+   asyncdispatch timer keeps the keys and the render alive during the
+   stream's waitFor — same thread as the sink, no races, no threading. The
+   pure render layer tests without a terminal.
+7. **Extensions load the nvim way.** `.neopi/init.lua` is one config file
+   the user owns; `require` (through `package.path` extended with
+   `.neopi/`) is the loading mechanism — a directory scan is redundant with
+   it (YAGNI). A broken config warns and the agent still works (the loader
+   raises, the binary decides the severity — nvim's surface-and-continue).
+8. **The registry pointer is the session swap.** `exposeSession` binds one
+   registry pointer + one table of cfunctions; the cfunctions read the
+   pointer dynamically per call, so resuming a session is a
+   `setRegistryPointer` update — the table stays intact.
+9. **Ctrl+C is the OS path, Esc is the abort.** illwill does not enable raw
+   mode on Linux: the terminal's INTR character delivers SIGINT and kills
+   the process before any key loop sees it — a `setControlCHook` restores
+   the terminal and exits (the graceful exit); the stream's abort key is
+   Esc, whose cancel flows through the sink into the partial response
+   (`frCancelled` → "aborted").
 
 ## The interfaces
 
-Print mode today: `neopi "prompt"` → the runtime loop → stdout. Interactive
-and JSON/RPC interfaces come later — all over the same agent/session
-mechanisms; the core stays stable, an interface is one more composer.
+Print mode: `neopi "prompt"` → the runtime loop → stdout. Interactive: the
+TUI (`neopi` with no prompt) — the transcript, the composer, the footer,
+`/commands` and `/resume` — over the same agent/session mechanisms; the
+core stays stable, an interface is one more composer. JSON/RPC interfaces
+come later.
 
-Test interfaces today: the Nim suite (`tests/tp_all.nim` dispatcher, 57
-tests, unittest2) and the in-process busted specs
-(`tests/spec/agent_spec.lua` through the test-only `tests/busted_main.nim`
-runner) — the specs run in the host's live Lua state with the core exposed
-(the nvim pattern).
+Test interfaces today: the Nim suite (`tests/tp_all.nim` dispatcher, 119
+tests, unittest2) and the in-process busted specs (4 spec files through the
+test-only `tests/busted_main.nim` runner) — the specs run in the host's
+live Lua state with the core exposed (the nvim pattern). The TUI is also
+tested end-to-end by the agent through a pty harness (the keys written to
+the master, the render captured, the session JSONL as the verdict).

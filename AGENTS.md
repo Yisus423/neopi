@@ -27,20 +27,26 @@ LD_LIBRARY_PATH="$HOME/.local/lib/nimlet"             # nimgent dlopens libpcre 
 ```
 
 Compile with `-o:build/<name>` — NEVER next-to-source (a binary was
-committed once and removed). The `nimble test` task sets TMPDIR and
-LD_LIBRARY_PATH itself, so `nimble test` is self-contained; direct
-`nim c` builds need the env above.
+committed once and removed). illwill (the TUI) needs `--threads:on`:
+`nim c --hints:off --threads:on --mm:orc -o:build/neopi src/neopi.nim`. The
+`nimble test` task sets TMPDIR and LD_LIBRARY_PATH itself, so `nimble test`
+is self-contained; direct `nim c` builds need the env above.
 
 ## Testing
 
-- `nimble test` — self-contained; the Nim suite via unittest2 (57 tests; the
-  live OpenRouter check reads OPENROUTER_API_KEY from the env or .env and
-  self-skips without it).
+- `nimble test` — self-contained; the Nim suite via unittest2 (119 tests;
+  the live OpenRouter check reads OPENROUTER_API_KEY from the env or .env
+  and self-skips without it).
 - Compile-fresh discipline: compile while you write (a 7-defect class in
   lua.nim came from writing without compiling).
-- The Lua layer: `tp_expose.nim` today; the busted specs run through the
-  test-only runner `./build/busted_main <spec>` (2 specs, verified green);
-  the `neopi --spec` CLI mode is deferred.
+- The Lua layer: the busted specs run through the test-only runner
+  `./build/busted_main <spec>` (4 spec files, verified green); the
+  `neopi --spec` CLI mode is deferred.
+- The TUI's pty harness: `openpty` + TIOCSCTTY + TIOCSWINSZ (without the
+  winsize, terminalHeight() is 0 and the buffer clamps to 1 row — the only
+  footer renders; without TIOCSCTTY, no SIGINT). The harness writes keys to
+  the master and the session JSONL is the verdict (`stop=aborted` vs
+  `stop`).
 
 ## The conventions
 
@@ -54,8 +60,16 @@ LD_LIBRARY_PATH itself, so `nimble test` is self-contained; direct
 ## The layer rules
 
 - nimgent types never leak out of `provider.nim`.
-- The Lua extension surface (`neopi.on`/`fs`/`process`/`provider`/`session`)
-  stays frozen until real consumers exist.
+- The Lua extension surface
+  (`neopi.on`/`fs`/`process`/`provider`/`session`/`registerTool`/`registerCommand`/`ui`)
+  stays frozen until real consumers exist. Extensions load from
+  `.neopi/init.lua` (the nvim way: one config file; `require` through
+  `package.path` extended with `.neopi/`).
+- The `{.push stacktrace: off.}` bridge procs: `lua_error` longjmps out of
+  Nim C-callback frames; with frames on, the abandoned frames corrupt the
+  runtime frame stack (the next nimFrame call segfaults). fs/process/hooks
+  use it module-wide; tui.nim scopes it to the bridge procs only (the TUI's
+  own procs keep their traces).
 - fs/process confinement is the security boundary — native, not script-side:
   it lives in `resolveConfined` (lexical; known limit: symlinks followed).
   bash's gate is the approval layer, not the cwd.
