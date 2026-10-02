@@ -13,7 +13,8 @@ Use it BEFORE grep for the runtime Lua code:
   the symbols and call paths of runtime/*.lua and tests/spec/*.lua.
 - **nimlangserver MCP (Nim)**: the nimFindSymbols/nimFindReferences tools for
   symbol search and references, nimCheckProject/nimCheckFile for diagnostics —
-  configured in .mcp.json (load it by restarting the pi session).
+  configured in .pi/mcp.json (native pi project config; local-only, not
+  versioned; loaded at session start, /mcp inspects in-session).
 - **grep/find**: the fallback when the two above cannot answer.
 
 ## The build recipe (exact)
