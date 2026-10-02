@@ -53,6 +53,9 @@ is self-contained; direct `nim c` builds need the env above.
 - 2-space indent, lines ≤100, camelCase procs, constructor-initialized
   results, no `continue`.
 - English artifacts: code, comments, commit messages, docs.
+- Commit messages: a Conventional Commit title plus a body with the why —
+  the title carries the what, the body the reasoning and the notable
+  decisions; no body-only or title-only commits.
 - The tool schema is what the model sees — write tool descriptions for the
   model, not for humans.
 - Doc comments (`##`) on every exported symbol.
