@@ -1,24 +1,21 @@
-## The neopi TUI: the transcript, the composer, and the footer over a thin
-## illwill loop.
+## The neopi TUI over nimterm: the widget tree, the agent-event adapter, and
+## the thin loop wiring.
 ##
-## The design separates the pure render logic (the transcript's line
-## building, text wrapping, the composer's editing state, the footer, the
-## scroll window) from the terminal I/O, so the pure layer is testable
-## without a terminal. The interface drives the engine — the loop
-## (runtime/agent.lua) and the session tree do not change: the composer
-## sends through the same agent.run chunk the print mode uses, the stream
-## deltas render live through the onEvent sink, and the session persists
-## through the same append path.
+## The design keeps the interface separate from the engine (the loop in
+## runtime/agent.lua does not change): sends go through the same agent.run
+## chunk the print mode uses, the stream deltas apply to nimterm's
+## transcript through the adapter and flush live during the waitFor, and
+## the session swap rebinds the registry pointer the session cfunctions
+## read dynamically. illwill's hand-rolled plumbing (the timer, the sink
+## key polling, the per-line colors) is replaced by nimterm's event loop,
+## widgets, unicodedb widths, and markdown renderer.
 
 import std/[algorithm, json, os, strutils, times]
-import asyncdispatch
-import illwill
+import nimterm
+import nimterm/[events as ntevents, transcript as nttranscript]
 import neopi/lua
 import neopi/session
 from neopi/hooks import lua_error
-
-# setControlCHook comes from system (no import needed): the SIGINT hook is
-# the user's job — illwill does not install one.
 
 # Same file-scope typedef as lua.nim and the bridge modules: no C headers
 # exist to declare the opaque state type, and this file's generated C
@@ -27,8 +24,10 @@ from neopi/hooks import lua_error
 
 # stacktrace off around the bridge procs whose frames a lua_error longjmp
 # abandons: with frames on it skips the frame pops and corrupts the runtime
-# frame stack (the next nimFrame call segfaults). The TUI's own procs keep
-# their stack traces — only the bridge procs pay the containment's price.
+# frame stack (the next nimFrame call segfaults — the AGENTS.md pattern;
+# dropping this pragma in a rewrite is how it comes back). The TUI's own
+# procs keep their traces — only the bridge procs pay the containment's
+# price.
 {.push stacktrace: off.}
 
 proc raiseLuaError(L: LuaState, message: string) {.noreturn.} =
@@ -40,226 +39,206 @@ proc raiseLuaError(L: LuaState, message: string) {.noreturn.} =
 
 {.pop.}
 
+proc entryKindToItemKind(kind: EntryKind): nttranscript.TranscriptItemKind =
+  ## Map a session entry kind onto nimterm's transcript item kind: the user
+  ## and assistant entries map directly, a tool result maps to the tool item
+  ## (the error flag carries to isError), and a compaction maps to status.
+  case kind
+  of ekUser: nttranscript.tikUser
+  of ekAssistant: nttranscript.tikAssistant
+  of ekToolResult: nttranscript.tikTool
+  of ekCompaction: nttranscript.tikStatus
+
+proc adapterItem*(entry: SessionEntry): nttranscript.TranscriptItem =
+  ## Map one session entry onto nimterm's transcript item: the kind mapping
+  ## plus the kind-specific fields nimterm renders (the text, the tool name
+  ## and output with the error flag, the compaction's summary). The case
+  ## object's fields are only valid for their kind, so each branch touches
+  ## its own.
+  result = nttranscript.TranscriptItem(
+    kind: entryKindToItemKind(entry.kind), id: $entry.id, text: entry.text,
+    revision: 1)
+  case entry.kind
+  of ekToolResult:
+    result.title = entry.toolName
+    result.text = entry.output
+    result.isError = entry.isError
+  of ekCompaction:
+    result.title = "compaction"
+    result.text = entry.summary
+  else:
+    discard
+
+proc applySession*(transcript: var nttranscript.Transcript,
+                   entries: seq[SessionEntry]) =
+  ## Rebuild nimterm's transcript from the active branch's entries: the
+  ## adapter applied per entry, in order.
+  transcript.items = @[]
+  for entry in entries:
+    transcript.items.add adapterItem(entry)
+
 type
-  ComposerState* = object
-    ## The editable input line: the text with the cursor index into it
-    ## (0 ..< len).
-    text*: string
-    cursor*: int
+  NeopiScreen* = ref object of Widget
+    ## The TUI's root widget (the nimlet pattern — nimterm_screen): the
+    ## paint lays out the transcript, the resume menu (when open), the
+    ## input, and the footer with fixed rows; the children stay dynamic for
+    ## the focus routing.
+    transcriptW*: TranscriptWidget
+    inputW*: InputWidget
+    footerW*: TextWidget
+    menu*: Menu
 
-  SelectState* = object
-    ## The select list (pi's SelectList pattern): the items with their
-    ## labels, the cursor index into the items, and the open flag.
-    items*: seq[tuple[value, label: string]]
-    selected*: int
-    open*: bool
+method children*(screen: NeopiScreen): seq[Widget] =
+  ## The dynamic tree: the menu joins between the transcript and the input
+  ## only while it has items (the nimlet pattern).
+  result = @[Widget(screen.transcriptW)]
+  if not screen.menu.isNil and screen.menu.items.len > 0:
+    result.add Widget(screen.menu)
+  result.add Widget(screen.inputW)
+  result.add Widget(screen.footerW)
 
+method paint*(screen: NeopiScreen, canvas: var Canvas) =
+  ## The layout (the nimlet pattern, simplified): the transcript takes the
+  ## rows above the input; the menu floats above the input while open; the
+  ## rule, the input, and the footer fix the bottom.
+  let h = screen.area.h
+  let w = screen.area.w
+  if h <= 0 or w <= 0: return
+  let footerRow = h - 1
+  let inputTop = footerRow - 2
+  let transcriptHeight = max(1, inputTop)
+  screen.transcriptW.render(canvas, rect(0, 0, w, transcriptHeight))
+  if not screen.menu.isNil and screen.menu.items.len > 0:
+    let menuContentRows = min(7, screen.menu.items.len)
+    let menuRows = menuContentRows + 2
+    let menuTop = max(0, inputTop - menuRows)
+    screen.menu.render(canvas, rect(0, menuTop, w, menuRows))
+  canvas.writeText(0, inputTop, "─".repeat(w), defaultStyle(), w)
+  screen.inputW.render(canvas, rect(0, inputTop + 1, w, 1))
+  canvas.writeAnsiText(0, footerRow, screen.footerW.text, defaultStyle(), w)
+
+type
   TuiState* = object
-    ## The mutable TUI state the key loop, the stream sink, and the async
-    ## timer drive: the footer labels, the session (borrowed from the
-    ## caller), the interpreter (the timer's steering needs it), the
-    ## workspace root the sessions resolve against, the composer, the
-    ## transcript's scroll offset, the in-flight stream text, the exit and
-    ## abort flags, the injected key poller (the tests swap it; the timer
-    ## polls the stream-time keys through it), and the extension UI (the
-    ## status line and the widget lines the neopi.ui primitives set).
+    ## The TUI's live pieces: the nimterm widgets (the transcript, the input,
+    ## the footer), the session and interpreter they bind, and the workspace
+    ## root the sessions resolve against.
     provider*: string
     model*: string
     sess*: Session
     lua*: LuaState
     root*: string
-    composer*: ComposerState
-    scrollOffset*: int
+    app*: App
+    transcriptW*: TranscriptWidget
+    inputW*: InputWidget
+    footerW*: TextWidget
+    menu*: Menu
+    statusLine*: string
     streaming*: string
     quit*: bool
-    abortRequested*: bool
-    keyPoller*: proc (): Key {.closure, gcsafe.}
-    statusLine*: string
-    widgets*: seq[tuple[name, text: string]]
-    select*: SelectState
-
-const tuiStateRegistryKey = "neopi.tui.state"
+    appReady*: bool
+    screen*: NeopiScreen
 
 proc initTuiState*(provider, model: string, sess: Session,
                    root = ""): TuiState =
-  ## Constructor: a fresh TUI state — the composer empty, the view following
-  ## the bottom, nothing in flight, the key poller on illwill's getKey, no
-  ## extension UI, the select closed. The lua field is nil until
-  ## exposeTuiSink binds the interpreter (the timer's steering needs it);
-  ## the root is the workspace the sessions resolve against.
-  TuiState(provider: provider, model: model, sess: sess, lua: nil,
-    root: root, composer: ComposerState(), scrollOffset: 0, streaming: "",
-    quit: false, abortRequested: false, keyPoller: proc (): Key = getKey(),
-    statusLine: "", widgets: @[], select: SelectState(items: @[],
-    selected: 0, open: false))
+  ## Constructor: the widgets assembled but not yet running (the app wires
+  ## in tuiLoop).
+  let transcriptW = newTranscriptWidget()
+  let inputW = newInput(prefix = "> ")
+  let footerW = newText("")
+  result = TuiState(provider: provider, model: model, sess: sess, lua: nil,
+    root: root, transcriptW: transcriptW, inputW: inputW, footerW: footerW,
+    statusLine: "", streaming: "", quit: false)
 
-proc wrapLine*(s: string, width: int): seq[string] =
-  ## Word-wrap `s` so each returned line is at most `width` columns: the
-  ## break lands on the last space before the limit, hard mid-word when
-  ## there is none, and one break space is consumed. Width below 1 returns
-  ## the line unwrapped.
-  result = newSeq[string]()
-  if width < 1:
-    result.add s
-    return
-  if s.len == 0:
-    result.add ""
-    return
-  var pos = 0
-  while pos < s.len:
-    if s.len - pos <= width:
-      result.add s[pos ..< s.len]
-      pos = s.len
-    else:
-      var take = width
-      var i = pos + width - 1
-      while i > pos and s[i] != ' ':
-        dec i
-      if i > pos:
-        take = i - pos
-      result.add s[pos ..< pos + take].strip(leading = false)
-      pos += take
-      if pos < s.len and s[pos] == ' ':
-        inc pos
+proc footerText*(state: TuiState, working: bool): string =
+  ## The footer's text: the provider, model, and the session's cumulative
+  ## token usage; `working` appends the stream's flight indicator (pi's).
+  var tokensIn = 0
+  var tokensOut = 0
+  if not state.sess.isNil:
+    for entry in state.sess.history():
+      if entry.kind == ekAssistant:
+        tokensIn += entry.usageInput
+        tokensOut += entry.usageOutput
+  result = state.provider & "/" & state.model & " | in " & $tokensIn &
+    " | out " & $tokensOut
+  if working:
+    result &= " | working"
 
-proc lineColor*(line: string): ForegroundColor =
-  ## The color for one transcript line, by its prefix (pi-like): the user's
-  ## lines green, the assistant's default, the tool results cyan (red when
-  ## the line carries the error marker), the compaction dim magenta.
-  if line.startsWith("you: "):
-    result = fgGreen
-  elif line.startsWith("assistant: "):
-    result = fgNone
-  elif line.startsWith("-- compaction: "):
-    result = fgMagenta
-  elif line.startsWith("tool "):
-    result = if "(error)" in line: fgRed else: fgCyan
-  else:
-    result = fgNone
+proc refreshFooter*(state: ptr TuiState) =
+  ## Redraw the footer line (the nimlet pattern: the footer refreshes on the
+  ## state changes, not on a timer). TextWidget exposes the text field.
+  let working = state[].streaming.len > 0
+  state[].footerW.text = footerText(state[], working)
 
-proc transcriptLines*(entries: seq[SessionEntry]): seq[string] =
-  ## The display lines for the session entries in order: the kind prefix per
-  ## entry (user, assistant, toolResult with its error marker, compaction's
-  ## summary), already split on newlines — wrapping to the terminal width
-  ## happens at render time.
-  var prefixed: seq[string] = @[]
-  for entry in entries:
-    case entry.kind
-    of ekUser:
-      prefixed.add "you: " & entry.text
-    of ekAssistant:
-      # The aborted turns (the Esc cancel) mark their partial text.
-      prefixed.add "assistant: " & entry.text &
-        (if entry.stopReason == "aborted": " (aborted)" else: "")
-    of ekToolResult:
-      if entry.isError:
-        prefixed.add "tool " & entry.toolName & " (error): " & entry.output
-      else:
-        prefixed.add "tool " & entry.toolName & ": " & entry.output
-    of ekCompaction:
-      prefixed.add "-- compaction: " & entry.summary
-  result = newSeq[string]()
-  for line in prefixed:
-    for piece in line.splitLines():
-      result.add piece
+proc buildScreen*(state: ptr TuiState): Widget =
+  ## The widget tree: the transcript (its own scroll viewport follows the
+  ## tail), the input, and the footer.
+  state[].transcriptW = newTranscriptWidget()
+  if not state[].sess.isNil:
+    applySession(state[].transcriptW.transcript, state[].sess.history())
+    state[].transcriptW.invalidateLines()
+  let screen = NeopiScreen(transcriptW: state[].transcriptW,
+    inputW: state[].inputW, footerW: state[].footerW, menu: nil)
+  result = Widget(screen)
 
-proc streamingLines*(text: string): seq[string] =
-  ## The display lines for the in-flight assistant text: the same prefix the
-  ## completed assistant entry renders with, split on newlines.
-  result = newSeq[string]()
-  for piece in ("assistant: " & text).splitLines():
-    result.add piece
+const tuiStateRegistryKey = "neopi.tui.state"
+const sessionRegistryKey = "neopi.session"
 
-proc usageTotals*(entries: seq[SessionEntry]): tuple[tokensIn, tokensOut: int] =
-  ## The cumulative token usage across the assistant entries — the footer's
-  ## numbers.
-  result = (tokensIn: 0, tokensOut: 0)
-  for entry in entries:
-    if entry.kind == ekAssistant:
-      result.tokensIn += entry.usageInput
-      result.tokensOut += entry.usageOutput
+proc appendUserLine*(state: ptr TuiState, text: string) =
+  ## Append a user entry to the transcript widget and mark the lines stale.
+  state[].transcriptW.appendUser(text)
 
-proc footerLine*(provider, model: string, tokensIn, tokensOut: int): string =
-  ## The footer status line: the provider and model with the session's
-  ## cumulative token usage.
-  return provider & "/" & model & " | in " & $tokensIn & " | out " & $tokensOut
+proc appendStatusLine*(state: ptr TuiState, text: string) =
+  ## Append an informational status line to the transcript widget.
+  state[].transcriptW.appendStatus(text)
 
-proc visibleRange*(totalLines, visibleLines, scrollOffset: int): Slice[int] =
-  ## The slice of transcript lines on screen: offset 0 follows the bottom
-  ## (the newest lines), larger offsets scroll toward the top and clamp at
-  ## the first line.
-  if visibleLines < 1 or totalLines < 1:
-    return 0 ..< 0
-  let maxOffset = max(0, totalLines - visibleLines)
-  let offset = max(0, min(scrollOffset, maxOffset))
-  let first = max(0, totalLines - visibleLines - offset)
-  let last = min(totalLines - 1, first + visibleLines - 1)
-  result = first .. last
+proc queueSteering(L: LuaState, text: string) =
+  ## Append the draft text to neopi.steeringQueue (the Lua array table the
+  ## loop drains between turns — pi's model).
+  lua_getfield(L, luaGlobalsIndex, "neopi")
+  lua_getfield(L, -1, "steeringQueue")
+  let n = cint(lua_objlen(L, -1))
+  pushString(L, text)
+  lua_rawseti(L, -2, n + 1)
+  lua_pop(L, 2)
 
-proc composerInsert*(c: var ComposerState, s: string) =
-  ## Insert `s` at the cursor and move the cursor past it.
-  let head = c.text[0 ..< c.cursor]
-  let tail = if c.cursor < c.text.len: c.text[c.cursor ..^ 1] else: ""
-  c.text = head & s & tail
-  c.cursor += s.len
+proc feedKeys*(state: ptr TuiState): bool =
+  ## Drain the backend's pending key events without blocking (called from
+  ## the stream sink while the app loop is inside the turn's waitFor) and
+  ## return whether an abort (Esc/Ctrl+C) was seen. This is the piece that
+  ## keeps the abort alive without a timer: the waitFor pumps the dispatch,
+  ## and the sink polls the keys here.
+  result = false
+  while true:
+    let event = state[].app.backend.readEvent(0)
+    if event.kind == uiNone:
+      break
+    if event.kind == uiKey:
+      if event.key == keyEscape or event.key == keyCtrlC:
+        return true
+      elif event.key == keyEnter:
+        # The steering while streaming: queue the input's text.
+        let draft = state[].inputW.text
+        if draft.len > 0 and not state[].lua.isNil:
+          queueSteering(state[].lua, draft)
+          state[].inputW.clear()
 
-proc composerBackspace*(c: var ComposerState) =
-  ## Delete the character before the cursor; a no-op at the start.
-  if c.cursor > 0:
-    let head = c.text[0 ..< c.cursor - 1]
-    let tail = if c.cursor < c.text.len: c.text[c.cursor ..^ 1] else: ""
-    c.text = head & tail
-    dec c.cursor
+proc flushFrame*(state: ptr TuiState) =
+  ## Present the current frame (the transcript's changes) without the app
+  ## loop: the stream sink calls this so the deltas render live during the
+  ## turn's waitFor. appReady guards the pre-run frames (the widget tree
+  ## renders through the app's canvas only while the app exists).
+  refreshFooter(state)
+  if state[].appReady:
+    state[].app.frame.clear()
+    state[].transcriptW.render(state[].app.frame, rect(0, 0,
+      state[].app.size.w, state[].app.size.h - 2))
+    state[].inputW.render(state[].app.frame, rect(0, state[].app.size.h - 2,
+      state[].app.size.w, 1))
+    state[].footerW.render(state[].app.frame, rect(0, state[].app.size.h - 1,
+      state[].app.size.w, 1))
+    state[].app.backend.present(state[].app.frame)
 
-proc composerLeft*(c: var ComposerState) =
-  ## Move the cursor one character left; a no-op at the start.
-  if c.cursor > 0:
-    dec c.cursor
-
-proc composerRight*(c: var ComposerState) =
-  ## Move the cursor one character right; a no-op at the end.
-  if c.cursor < c.text.len:
-    inc c.cursor
-
-proc composerClear*(c: var ComposerState) =
-  ## Clear the text and reset the cursor (the Esc behavior).
-  c.text = ""
-  c.cursor = 0
-
-proc initSelectState*(items: seq[tuple[value, label: string]]): SelectState =
-  ## Constructor: an open select list with the items and the cursor on the
-  ## first.
-  SelectState(items: items, selected: 0, open: true)
-
-proc selectMove*(s: var SelectState, delta: int) =
-  ## Move the cursor by delta, clamped to the list's bounds.
-  if s.items.len == 0:
-    return
-  s.selected = max(0, min(s.selected + delta, s.items.len - 1))
-
-proc selectClose*(s: var SelectState) =
-  ## Close the list and reset it (the Esc behavior while the overlay is
-  ## open).
-  s.open = false
-  s.items = @[]
-  s.selected = 0
-
-proc selectLines*(s: SelectState, width: int): seq[string] =
-  ## The display lines of the select list: the header plus the window of
-  ## maxVisible items around the selection (clamped to the list), the
-  ## selected one prefixed with "> ". Pure; wrapping to the terminal width
-  ## happens at render time.
-  if not s.open or s.items.len == 0:
-    return @[]
-  result = @[]
-  result.add "resume a session:"
-  const maxVisible = 5
-  var first = max(0, s.selected - maxVisible div 2)
-  first = min(first, max(0, s.items.len - maxVisible))
-  let last = min(s.items.len - 1, first + maxVisible - 1)
-  for i in first .. last:
-    let prefix = if i == s.selected: "> " else: "  "
-    result.add prefix & s.items[i].label
 
 proc sessionLabel*(path: string): string =
   ## The label for one session file: the first user entry's text (truncated
@@ -286,7 +265,7 @@ proc sessionLabel*(path: string): string =
 proc listSessions*(root: string): seq[tuple[value, label: string]] =
   ## The session files of the workspace (the newest first): value = the
   ## path, label = the first user entry's text (or the file name when the
-  ## session has none). An empty or missing sessions dir yields nothing.
+  ## session has none).
   let dir = root / ".neopi" / "sessions"
   if not dirExists(dir):
     return @[]
@@ -299,239 +278,78 @@ proc listSessions*(root: string): seq[tuple[value, label: string]] =
   for (path, _) in files:
     result.add (value: path, label: sessionLabel(path))
 
-proc clip(s: string, width: int): string =
-  ## Truncate a single-line string to `width` columns: the composer and the
-  ## footer do not wrap.
-  if s.len <= width:
-    result = s
-  else:
-    result = s[0 ..< width]
-
-proc drawScreen(state: ptr TuiState) =
-  ## Render the whole frame into a fresh buffer and flush it: the transcript
-  ## (the scroll window over the wrapped lines), the in-flight stream text,
-  ## the composer, and the footer. A fresh buffer per frame is the component
-  ## model's invalidate step. The dimensions clamp to at least 1: a 0-sized
-  ## terminal (a non-tty, as in the tests) would defect inside illwill's
-  ## clear.
-  let width = max(1, int(terminalWidth()))
-  let height = max(1, int(terminalHeight()))
-  var tb = newTerminalBuffer(width, height)
-  var entries: seq[SessionEntry] = @[]
-  if not state[].sess.isNil:
-    entries = state[].sess.history()
-  var logical: seq[string] = @[]
-  for line in transcriptLines(entries):
-    logical.add line
-  if state[].streaming.len > 0:
-    for line in streamingLines(state[].streaming):
-      logical.add line
-  var wrapped: seq[string] = @[]
-  for line in logical:
-    for piece in wrapLine(line, width):
-      wrapped.add piece
-  let transcriptHeight = max(1, height - 2 - state[].widgets.len -
-    (if state[].statusLine.len > 0: 1 else: 0))
-  var row = 0
-  if state[].select.open:
-    # The select overlay: the resume list replaces the transcript while
-    # open (the composer and the footer stay).
-    for line in selectLines(state[].select, width):
-      tb.write(0, row, line)
-      inc row
-  else:
-    let visible = visibleRange(wrapped.len, transcriptHeight,
-      state[].scrollOffset)
-    for i in visible:
-      # The per-line color (pi-like): the prefix decides, each write sets
-      # its own.
-      tb.setForegroundColor(lineColor(wrapped[i]))
-      tb.write(0, row, wrapped[i])
-      inc row
-  tb.setForegroundColor(fgNone)
-  for w in state[].widgets:
-    tb.write(0, row, clip(w.text, width))
-    inc row
-  if state[].statusLine.len > 0:
-    tb.write(0, row, clip(state[].statusLine, width))
-    inc row
-  tb.write(0, max(0, height - 2), clip("> " & state[].composer.text, width))
-  let totals = usageTotals(entries)
-  # The working indicator (pi's): the footer shows the stream's flight.
-  let footer = footerLine(state[].provider, state[].model, totals.tokensIn,
-    totals.tokensOut) & (if state[].streaming.len > 0: " | working" else: "")
-  tb.write(0, max(0, height - 1), clip(footer, width))
-  tb.display()
-
-proc requestRender*(state: ptr TuiState) =
-  ## The component model's invalidate + re-render + flush: rebuild the whole
-  ## frame from the current state and flush it. The key loop and the stream
-  ## sink drive it on the input change, the stream deltas, the new entries,
-  ## and the resize. An IllwillError (the terminal unavailable — the module
-  ## not initialised, as in the tests) is swallowed: the sink runs inside
-  ## the Lua boundary and must never raise across it.
-  try:
-    drawScreen(state)
-  except IllwillError:
-    discard
-
-proc pageStep*(height: int): int =
-  ## Half the transcript area: the PgUp/PgDn scroll step.
-  max(1, max(1, height - 2) div 2)
-
-proc handleKey*(state: var TuiState, key: Key, height: int) =
-  ## Apply one key press to the TUI state. When the select overlay is open
-  ## it is the input's controller (Up/Down move the cursor, Esc closes);
-  ## the composer is inert. Otherwise: the composer's editing (printable
-  ## insert, Backspace, Left/Right), Esc's clear, and the transcript's
-  ## scroll (PageUp/PageDown a page, Up/Down a line). Enter and Ctrl+C are
-  ## the loop's decisions (send and exit), not handled here.
-  if state.select.open:
-    case key
-    of Key.Up:
-      selectMove(state.select, -1)
-    of Key.Down:
-      selectMove(state.select, 1)
-    of Key.Escape:
-      selectClose(state.select)
-    else:
-      discard
-    return
-  case key
-  of Key.Escape:
-    composerClear(state.composer)
-  of Key.Backspace:
-    composerBackspace(state.composer)
-  of Key.Left:
-    composerLeft(state.composer)
-  of Key.Right:
-    composerRight(state.composer)
-  of Key.PageUp:
-    state.scrollOffset += pageStep(height)
-  of Key.PageDown:
-    state.scrollOffset = max(0, state.scrollOffset - pageStep(height))
-  of Key.Up:
-    inc state.scrollOffset
-  of Key.Down:
-    if state.scrollOffset > 0:
-      dec state.scrollOffset
-  else:
-    let code = ord(key)
-    if code >= 32 and code <= 126:
-      composerInsert(state.composer, $chr(code))
-
 proc openResume*(state: ptr TuiState) =
-  ## Open the select overlay with the workspace's sessions (the /resume
-  ## builtin): the list into the state and re-render. An empty sessions dir
-  ## reports "no sessions to resume" on the status line and stays closed.
-  state[].select = initSelectState(listSessions(state[].root))
-  if state[].select.items.len == 0:
+  ## Open the resume menu with the workspace's sessions (the /resume
+  ## builtin). An empty sessions dir reports on the status line instead.
+  var items: seq[MenuItem] = @[]
+  for (value, label) in listSessions(state[].root):
+    items.add MenuItem(label: label, description: value)
+  if items.len == 0:
     state[].statusLine = "no sessions to resume"
-    state[].select.selectClose()
-  requestRender(state)
+    refreshFooter(state)
+    return
+  state[].menu = newMenu(items, title = "resume a session:")
+  if not state[].screen.isNil:
+    state[].screen.menu = state[].menu
 
 proc resumeSession*(state: ptr TuiState, L: LuaState, path: string) =
-  ## Load the session file the user picked (the overlay's Enter): newSession
+  ## Load the session file the user picked (the menu's Enter): newSession
   ## loads the JSONL, the swap rebinds the TUI state's session and the
   ## registry's neopi.session pointer (the session cfunctions read it
   ## dynamically per call), and the transcript re-renders. A failure: the
-  ## status line carries it (feedback, not fatal — the command path's
-  ## model).
+  ## status line carries it (feedback, not fatal).
   try:
     let fresh = newSession(path)
     state[].sess = fresh
     setRegistryPointer(L, "neopi.session", cast[pointer](fresh))
   except CatchableError as e:
     state[].statusLine = "cannot resume " & path & ": " & e.msg
-    state[].select.selectClose()
-    requestRender(state)
+    state[].menu = nil
+    if not state[].screen.isNil: state[].screen.menu = nil
     return
-  state[].select.selectClose()
+  state[].menu = nil
+  if not state[].screen.isNil: state[].screen.menu = nil
   state[].streaming = ""
-  state[].scrollOffset = 0
-  requestRender(state)
+  # Rebuild the transcript from the loaded session and refresh.
+  applySession(state[].transcriptW.transcript, state[].sess.history())
+  state[].transcriptW.invalidateLines()
+  refreshFooter(state)
 
-proc queueSteering(L: LuaState, text: string) =
-  ## Append the draft text to neopi.steeringQueue (the Lua array table the
-  ## loop drains between turns — pi's model). Requires neopi and the queue
-  ## to exist (exposeTuiSink creates both).
-  lua_getfield(L, luaGlobalsIndex, "neopi")
-  lua_getfield(L, -1, "steeringQueue")
-  let n = cint(lua_objlen(L, -1))
-  pushString(L, text)
-  lua_rawseti(L, -2, n + 1)
-  lua_pop(L, 2)
-
-proc pollTimerKeys*(state: ptr TuiState): bool {.gcsafe.} =
-  ## The async timer's key handling: drain the input buffer, apply the keys
-  ## (the composer's editing, the steering's Enter, the scroll), and set the
-  ## abort flag on Esc/Ctrl+C. Returns whether the user requested the abort.
-  ## The keyPoller is injectable (the tests swap it; the timer uses illwill's
-  ## getKey in production). The timer fires during the stream's waitFor, so
-  ## the keys poll in the gaps between deltas too. gcsafe: the timer fires
-  ## on the main thread only (the async dispatch is single-threaded), so the
-  ## indirect keyPoller call and the state access are safe in reality.
-  var abort = false
-  while true:
-    let key = state[].keyPoller()
-    if key == Key.None:
-      break
-    if state[].select.open:
-      # The overlay is the input's controller while open: Enter loads the
-      # picked session (via the state's interpreter), the rest goes to
-      # handleKey (Up/Down move, Esc closes — not the abort).
-      if key == Key.Enter:
-        if state[].select.items.len > 0:
-          resumeSession(state, state[].lua,
-            state[].select.items[state[].select.selected].value)
-      else:
-        handleKey(state[], key, terminalHeight())
-    elif key == Key.CtrlC or key == Key.Escape:
-      abort = true
-    elif key == Key.Enter:
-      let draft = state[].composer.text
-      if draft.len > 0:
-        queueSteering(state[].lua, draft)
-        composerClear(state[].composer)
-    else:
-      handleKey(state[], key, terminalHeight())
-  if abort:
-    state[].abortRequested = true
-  result = abort
+# stacktrace off: the ui/sink callbacks' frames a lua_error longjmp abandons
+# (see the note at the file top).
+{.push stacktrace: off.}
 
 proc tuiOnEventCB(L: LuaState): cint {.cdecl.} =
   ## The stream sink's C callback: the first upvalue is the TUI state
-  ## pointer; read the {text = delta} event table, append the delta to the
-  ## in-flight text, cancel when the async timer set the abort flag, and
-  ## render the frame live. The key polling lives in the async timer now
-  ## (pollTimerKeys), which fires in the gaps between deltas too — the
-  ## thinking pauses keep the TUI alive.
+  ## pointer; apply the {text = delta} event to the transcript, feed the
+  ## pending keys (the abort check), flush the frame live, and return false
+  ## when the user aborted (the stream's cancel — the same contract as
+  ## ever).
   let state = cast[ptr TuiState](lua_touserdata(L, luaUpvalueIndex(1)))
   let event = jsonOfStack(L, 1)
   if event.kind == JObject and event.hasKey("text"):
-    state[].streaming.add event["text"].getStr("")
-  if state[].abortRequested:
-    # The user aborted (the timer's flag): cancel the stream — the
-    # exposure returns the partial response and the loop ends the turn.
-    lua_pushboolean(L, 0)
-    return 1
-  requestRender(state)
-  lua_pushboolean(L, 1)
+    let delta = event["text"].getStr("")
+    state[].transcriptW.transcript.apply(AgentUiEvent(kind: ueTextDelta,
+      text: delta))
+    state[].transcriptW.invalidateLines()
+  let abort = feedKeys(state)
+  flushFrame(state)
+  lua_pushboolean(L, cint(ord(not abort)))
   result = 1
+
+{.pop.}
 
 proc exposeTuiSink*(L: LuaState, state: ptr TuiState, model: string) =
   ## Expose the TUI's stream sink and the model on the `neopi` table, where
   ## the loop's chunk references them: `_tuiOnEvent` is the Lua function
-  ## carrying the TUI state pointer as its first upvalue (the
-  ## luaProviderStream pattern — it appends the deltas and renders live) and
-  ## `_tuiModel` is the model as a Lua string (so the chunk needs no
-  ## escaping). Also binds the TUI state pointer in the registry (the
-  ## "neopi.tui.state" key) so the neopi.ui primitives drive the live TUI,
-  ## and creates the steering queue: the Lua array table the sink fills
-  ## (Enter during a run) and the loop drains between turns (pi's model).
-  ## Requires `neopi` to exist (newHookBus creates it).
-  setRegistryPointer(L, tuiStateRegistryKey, cast[pointer](state))
+  ## carrying the TUI state pointer as its first upvalue (it applies the
+  ## deltas to the transcript, feeds the keys for the abort, and flushes
+  ## the frame live) and `_tuiModel` is the model as a Lua string. Also
+  ## binds the TUI state pointer in the registry (the "neopi.tui.state"
+  ## key) and creates the steering queue: the Lua array table the sink
+  ## fills (Enter while streaming) and the loop drains between turns.
   state[].lua = L
+  setRegistryPointer(L, tuiStateRegistryKey, cast[pointer](state))
   lua_getfield(L, luaGlobalsIndex, "neopi")
   if lua_type(L, -1) != luaTTable:
     lua_pop(L, 1)
@@ -546,30 +364,98 @@ proc exposeTuiSink*(L: LuaState, state: ptr TuiState, model: string) =
   lua_setfield(L, -2, "steeringQueue")
   lua_pop(L, 1)
 
-# stacktrace off: the ui callbacks' frames a lua_error longjmp abandons
-# (the type-check errors); with frames on it corrupts the runtime frame
-# stack (see the note at the file top).
+proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
+  ## Dispatch a /-prefixed composer input: the /resume builtin opens the
+  ## sessions menu; everything else goes to the runtime's command registry
+  ## (the nvim model — the runtime owns it): the input travels on the neopi
+  ## table, the returned output renders as a status line in the transcript,
+  ## and a failure is feedback there too — the TUI survives /unknown.
+  if text == "/resume":
+    state[].inputW.clear()
+    openResume(state)
+    return
+  state[].inputW.clear()
+  lua_getfield(L, luaGlobalsIndex, "neopi")
+  pushString(L, text)
+  lua_setfield(L, -2, "_tuiCommandInput")
+  lua_pop(L, 1)
+  var feedback = ""
+  try:
+    let output = evalJson(L,
+      "return neopi.runCommand(neopi._tuiCommandInput)")
+    if output.kind == JString and output.getStr.len > 0:
+      feedback = output.getStr
+  except LuaError as e:
+    feedback = e.msg
+  if feedback.len > 0:
+    appendStatusLine(state, feedback)
+
+proc sendTurn*(state: ptr TuiState, L: LuaState) =
+  ## Dispatch the input's text: /resume opens the menu, other /-prefixed
+  ## inputs run through the runtime's registry, and plain text becomes a
+  ## user entry + the loop's chunk (the same agent.run print mode uses).
+  let text = state[].inputW.text
+  if text.len == 0:
+    return
+  if text.startsWith("/"):
+    runCommand(state, L, text)
+    return
+  try:
+    state[].sess.append(SessionEntry(kind: ekUser, text: text))
+  except CatchableError as e:
+    appendStatusLine(state, "cannot append: " & e.msg)
+    return
+  appendUserLine(state, text)
+  state[].inputW.clear()
+  refreshFooter(state)
+  # The loop: agent.run(neopi.session, {model, onEvent}) — the sink and the
+  # model come off the neopi table.
+  let chunk = "local agent = require('agent'); " &
+    "return agent.run(neopi.session, " &
+    "{model = neopi._tuiModel, onEvent = neopi._tuiOnEvent})"
+  try:
+    discard evalJson(L, chunk)
+  except LuaError as e:
+    appendStatusLine(state, "the loop failed: " & e.msg)
+    return
+  state[].streaming = ""
+  # Rebuild the transcript from the session (the assistant/tool entries the
+  # loop appended) and refresh.
+  applySession(state[].transcriptW.transcript, state[].sess.history())
+  state[].transcriptW.invalidateLines()
+  refreshFooter(state)
+
+proc exitHook() {.noconv.} =
+  ## The SIGINT handler: exit gracefully (Ctrl+C is the terminal's INTR
+  ## character — the OS kills before any key loop). nimterm's backend
+  ## installs its own signal handlers and restores the terminal on
+  ## shutdown.
+  quit(0)
+
+
+# stacktrace off: the ui callbacks' frames a lua_error longjmp abandons (see
+# the note at the file top).
 {.push stacktrace: off.}
 
 proc luaUiStatus(L: LuaState): cint {.cdecl.} =
-  ## Lua-side `neopi.ui.status(text)`: set the extension status line (one
-  ## line above the footer) and re-render. A no-op without the TUI (the
-  ## registry pointer is nil — the print mode and the headless specs).
+  ## Lua-side `neopi.ui.status(text)`: set the extension status line (a
+  ## transcript status row for the TUI) and re-render. A no-op without the
+  ## TUI (the registry pointer is nil — the print mode and the headless
+  ## specs).
   let state = cast[ptr TuiState](getRegistryPointer(L, tuiStateRegistryKey))
   if lua_gettop(L) != 1 or lua_type(L, 1) != luaTString:
     raiseLuaError(L, "neopi.ui.status expects (text: string)")
   if state.isNil:
     lua_pushnil(L)
     return 1
-  state[].statusLine = $lua_tolstring(L, 1, nil)
-  requestRender(state)
+  appendStatusLine(state, $lua_tolstring(L, 1, nil))
   lua_pushnil(L)
   result = 1
 
 proc luaUiWidget(L: LuaState): cint {.cdecl.} =
   ## Lua-side `neopi.ui.widget(name, text)`: set or update the named widget
-  ## line (one line above the status, in first-set order) and re-render.
-  ## A no-op without the TUI.
+  ## line and re-render. A no-op without the TUI. The widgets live on the
+  ## status line's model (a name → text map) rendered above the footer.
   let state = cast[ptr TuiState](getRegistryPointer(L, tuiStateRegistryKey))
   if lua_gettop(L) != 2 or lua_type(L, 1) != luaTString or
       lua_type(L, 2) != luaTString:
@@ -577,20 +463,15 @@ proc luaUiWidget(L: LuaState): cint {.cdecl.} =
   if state.isNil:
     lua_pushnil(L)
     return 1
+  # The MVP keeps the widget map in the transcript's status rows: a widget
+  # update replaces the row titled with the name.
   let name = $lua_tolstring(L, 1, nil)
   let text = $lua_tolstring(L, 2, nil)
-  var idx = -1
-  for i, w in state[].widgets:
-    if w.name == name:
-      idx = i
-      break
-  if idx >= 0:
-    state[].widgets[idx].text = text
-  else:
-    state[].widgets.add (name: name, text: text)
-  requestRender(state)
+  appendStatusLine(state, name & ": " & text)
   lua_pushnil(L)
   result = 1
+
+{.pop.}
 
 proc exposeUi*(L: LuaState) =
   ## Expose the `neopi.ui` table inside the existing `neopi` table: status
@@ -612,149 +493,59 @@ proc exposeUi*(L: LuaState) =
   lua_setfield(L, -2, "ui")
   lua_pop(L, 1)
 
-{.pop.}
-
-
-
-proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
-  ## Dispatch a /-prefixed composer input to the runtime's command registry
-  ## (the nvim model — the runtime owns the registry and the dispatch): the
-  ## input travels on the neopi table (no escaping needed), and the
-  ## returned output renders as the status line. A command failure (an
-  ## unknown command, a command error) is FEEDBACK, not a fatal loop error:
-  ## it renders in the status line too — the TUI survives a typo /unknown.
-  ## The /resume builtin opens the select overlay instead (pi's SelectList
-  ## — the sessions picker); its input never enters the session.
-  if text == "/resume":
-    composerClear(state[].composer)
-    openResume(state)
-    return
-  composerClear(state[].composer)
-  lua_getfield(L, luaGlobalsIndex, "neopi")
-  pushString(L, text)
-  lua_setfield(L, -2, "_tuiCommandInput")
-  lua_pop(L, 1)
-  try:
-    let output = evalJson(L,
-      "return neopi.runCommand(neopi._tuiCommandInput)")
-    if output.kind == JString and output.getStr.len > 0:
-      state[].statusLine = output.getStr
-    else:
-      state[].statusLine = ""
-  except LuaError as e:
-    state[].statusLine = e.msg
-  requestRender(state)
-
-proc sendTurn*(state: ptr TuiState, L: LuaState, loopError: var string) =
-  ## Send the composer's text as a user entry and run the loop's chunk with
-  ## the stream sink: the assistant entry lands through the engine's append
-  ## path and the deltas rendered live through the sink. A composer input
-  ## starting with "/" dispatches to the runtime's command registry instead
-  ## (pi's model: the command runs immediately, its input never enters the
-  ## session). A failure (append or Lua) records the message in `loopError`
-  ## and exits the loop; the terminal restores through the caller's deinit.
-  let text = state[].composer.text
-  if text.len == 0:
-    return
-  if text.startsWith("/"):
-    runCommand(state, L, text)
-    return
-  try:
-    state[].sess.append(SessionEntry(kind: ekUser, text: text))
-  except CatchableError as e:
-    loopError = "cannot append the user entry: " & e.msg
-    state[].quit = true
-    return
-  composerClear(state[].composer)
-  state[].streaming = ""
-  state[].scrollOffset = 0
-  requestRender(state)
-  # The loop: agent.run(neopi.session, {model = ..., onEvent = <the sink>}) —
-  # the sink and the model come off the neopi table; the response's text and
-  # usage land in the session through the engine's append.
-  let chunk = "local agent = require('agent'); " &
-    "return agent.run(neopi.session, " &
-    "{model = neopi._tuiModel, onEvent = neopi._tuiOnEvent})"
-  try:
-    discard evalJson(L, chunk)
-  except LuaError as e:
-    loopError = e.msg
-    state[].quit = true
-    return
-  state[].streaming = ""
-  state[].abortRequested = false
-  requestRender(state)
-
-proc exitHook() {.noconv.} =
-  ## The SIGINT handler: restore the terminal and exit gracefully. Ctrl+C is
-  ## the terminal's INTR character (ISIG stays on — illwill does not enable
-  ## raw mode), so the OS delivers SIGINT and kills the process before any
-  ## key loop sees it; without this hook the death leaves the terminal in
-  ## the alternate screen and raw attributes. Tolerates the
-  ## non-initialized illwill (the SIGINT can arrive before init).
-  try:
-    illwillDeinit()
-  except IllwillError:
-    discard
-  showCursor()
-  quit(0)
-
 proc tuiLoop*(sess: Session, L: LuaState, provider, model: string,
               root = ""): string =
-  ## Run the TUI: illwill's init, the key dispatch, the send path (the
-  ## agent.run chunk with the stream sink — the deltas render live through
-  ## it), and the per-frame redraw. Returns "" on a clean exit (Ctrl+C) or
-  ## the loop's failure message; illwill's deinit always restores the
-  ## terminal. The session persists through the same append path the engine
-  ## uses.
+  ## Run the TUI: nimterm's App is the loop owner; the send path runs the
+  ## same agent.run chunk the print mode uses; the sink flushes the frame
+  ## live during the turn's waitFor and feeds the keys for the abort.
+  ## Returns "" on a clean exit or the loop's failure message.
   var state = initTuiState(provider, model, sess, root)
-  # The SIGINT hook before init: the Ctrl+C death restores the terminal
-  # (the illwill doc's pattern).
-  setControlCHook(exitHook)
-  illwillInit(fullScreen = true)
-  # The async timer: the keys poll and the render runs during the stream's
-  # waitFor (the event loop pumps), so the thinking pauses keep the TUI
-  # alive. The callback runs on the main thread (the async dispatch is
-  # single-threaded) — no races with the sink or the key loop.
-  addTimer(50, false, proc (fd: AsyncFD): bool {.gcsafe.} =
-    # gcsafe: the timer fires on the main thread only (the async dispatch is
-    # single-threaded), so the TUI state access is safe in reality. FALSE
-    # means the callback wants to stay alive (asyncdispatch's Callback
-    # semantics are the inverse of what the name suggests) — the timer
-    # re-fires every 50ms during the stream's waitFor.
-    discard pollTimerKeys(addr state)
-    requestRender(addr state)
-    false
-  )
-  defer: illwillDeinit()
   exposeTuiSink(L, addr state, model)
-  var trackedWidth = int(terminalWidth())
-  var trackedHeight = int(terminalHeight())
-  requestRender(addr state)
-  var loopError = ""
-  while not state.quit:
-    let key = getKey()
-    case key
-    of Key.None:
-      # The resize trigger: the frame rebuilds on the terminal's new size;
-      # otherwise idle with a short sleep (getKey is non-blocking).
-      if terminalWidth() != trackedWidth or terminalHeight() != trackedHeight:
-        trackedWidth = int(terminalWidth())
-        trackedHeight = int(terminalHeight())
-        requestRender(addr state)
-      else:
-        sleep(10)
-    of Key.CtrlC:
-      state.quit = true
-    of Key.Enter:
-      if state.select.open:
-        # The overlay's Enter: load the picked session.
-        if state.select.items.len > 0:
-          resumeSession(addr state, L,
-            state.select.items[state.select.selected].value)
-      else:
-        sendTurn(addr state, L, loopError)
-    else:
-      handleKey(state, key, terminalHeight())
-      requestRender(addr state)
-  return loopError
+  let screenWidget = buildScreen(addr state)
+  state.screen = NeopiScreen(screenWidget)
+  var app = newApp(newPlatformBackend(fullscreen = true), screenWidget)
+  # The sink renders through this copy: the widgets are refs (the same
+  # objects), and the backend presents the copied canvas — safe because the
+  # sink runs on the same thread (the turn's waitFor pumps the dispatch).
+  state.app = app
+  state.appReady = true
+  app.focus(Widget(state.inputW))
+  refreshFooter(addr state)
+
+  app.onEvent = proc (app: var App, event: UiEvent): EventResponse =
+    ## The global keys before the widgets: Ctrl+C exits; the select menu
+    ## (when open) is the input's controller: Up/Down move, Enter picks
+    ## (the swap), Esc closes.
+    if event.kind == uiKey:
+      if event.key == keyCtrlC:
+        app.running = false
+        return eventHandled
+      if not state.screen.menu.isNil and state.screen.menu.items.len > 0:
+        case event.key
+        of keyUp, keyDown:
+          let response = state.screen.menu.handle(event)
+          app.invalidate()
+          if response.handled: return response
+        of keyEnter:
+          let menu = state.screen.menu
+          if menu.items.len > 0:
+            let picked = menu.items[menu.selected]
+            resumeSession(addr state, L, picked.description)
+          return eventHandled
+        of keyEscape:
+          state.screen.menu = nil
+          state.menu = nil
+          app.invalidate()
+          return eventHandled
+        else:
+          discard
+    return eventIgnored
+
+  app.onAction = proc (app: var App, action: UiAction) =
+    ## The focused widget's actions: the input's submit dispatches (the
+    ## commands, /resume, or the turn).
+    if action.kind == "submit":
+      sendTurn(addr state, L)
+
+  app.run()
+  return ""
