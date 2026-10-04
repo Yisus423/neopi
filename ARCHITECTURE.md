@@ -66,11 +66,11 @@ lines / 50KB. Converging them is runtime work, not core work.
    libpcre arrive via dlopen at load time.
 6. **The interface is separate from the engine.** The loop and the tools do
    not change for the TUI: sends go through the same `agent.run` chunk print
-   mode uses, the deltas render live through the stream sink (a Lua closure
-   carrying the TUI state pointer as its first upvalue), and an
-   asyncdispatch timer keeps the keys and the render alive during the
-   stream's waitFor — same thread as the sink, no races, no threading. The
-   pure render layer tests without a terminal.
+   mode uses, and the deltas render live through the stream sink (a Lua
+   closure carrying the TUI state pointer as its first upvalue) that applies
+   them to nimterm's transcript and flushes the frame in the same thread
+   the turn's waitFor pumps — no timer, no races, no threading (nimterm's
+   App is the loop owner). The pure render layer tests without a terminal.
 7. **Extensions load the nvim way.** `.neopi/init.lua` is one config file
    the user owns; `require` (through `package.path` extended with
    `.neopi/`) is the loading mechanism — a directory scan is redundant with
@@ -80,12 +80,11 @@ lines / 50KB. Converging them is runtime work, not core work.
    registry pointer + one table of cfunctions; the cfunctions read the
    pointer dynamically per call, so resuming a session is a
    `setRegistryPointer` update — the table stays intact.
-9. **Ctrl+C is the OS path, Esc is the abort.** illwill does not enable raw
-   mode on Linux: the terminal's INTR character delivers SIGINT and kills
-   the process before any key loop sees it — a `setControlCHook` restores
-   the terminal and exits (the graceful exit); the stream's abort key is
-   Esc, whose cancel flows through the sink into the partial response
-   (`frCancelled` → "aborted").
+9. **Esc aborts, Ctrl+C exits.** nimterm's backend owns raw mode and the
+   signal handlers: Esc and Ctrl+C arrive as key events the app reads —
+   during a stream, Esc (or Ctrl+C) aborts and the cancel flows through the
+   sink into the partial response (`frCancelled` → "aborted"); in the idle
+   loop Ctrl+C exits the process.
 
 ## The interfaces
 
@@ -95,7 +94,7 @@ TUI (`neopi` with no prompt) — the transcript, the composer, the footer,
 core stays stable, an interface is one more composer. JSON/RPC interfaces
 come later.
 
-Test interfaces today: the Nim suite (`tests/tp_all.nim` dispatcher, 119
+Test interfaces today: the Nim suite (`tests/tp_all.nim` dispatcher, 81
 tests, unittest2) and the in-process busted specs (4 spec files through the
 test-only `tests/busted_main.nim` runner) — the specs run in the host's
 live Lua state with the core exposed (the nvim pattern). The TUI is also

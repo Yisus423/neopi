@@ -9,7 +9,6 @@ bin           = @["neopi"]
 
 requires "nim >= 2.0.0"
 requires "https://github.com/martineastwood/nimgent"
-requires "illwill"
 
 task test, "Run the test suite":
   # The env the tests need (libpcre for dlopen, a disk-backed TMPDIR); set

@@ -425,14 +425,6 @@ proc sendTurn*(state: ptr TuiState, L: LuaState) =
   state[].transcriptW.invalidateLines()
   refreshFooter(state)
 
-proc exitHook() {.noconv.} =
-  ## The SIGINT handler: exit gracefully (Ctrl+C is the terminal's INTR
-  ## character — the OS kills before any key loop). nimterm's backend
-  ## installs its own signal handlers and restores the terminal on
-  ## shutdown.
-  quit(0)
-
-
 # stacktrace off: the ui callbacks' frames a lua_error longjmp abandons (see
 # the note at the file top).
 {.push stacktrace: off.}

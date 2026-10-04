@@ -28,14 +28,17 @@ LD_LIBRARY_PATH="$HOME/.local/lib/nimlet"             # nimgent dlopens libpcre 
 ```
 
 Compile with `-o:build/<name>` — NEVER next-to-source (a binary was
-committed once and removed). illwill (the TUI) needs `--threads:on`:
+committed once and removed). The build keeps `--threads:on`:
 `nim c --hints:off --threads:on --mm:orc -o:build/neopi src/neopi.nim`. The
-`nimble test` task sets TMPDIR and LD_LIBRARY_PATH itself, so `nimble test`
-is self-contained; direct `nim c` builds need the env above.
+TUI backend is nimterm, a sibling checkout nim.cfg points at
+(`--path:"/home/jesus/proyectos/nimterm/src"` — absolute on purpose: the
+relative form failed the nim.cfg parse). The `nimble test` task sets TMPDIR
+and LD_LIBRARY_PATH itself, so `nimble test` is self-contained; direct
+`nim c` builds need the env above.
 
 ## Testing
 
-- `nimble test` — self-contained; the Nim suite via unittest2 (119 tests;
+- `nimble test` — self-contained; the Nim suite via unittest2 (81 tests;
   the live OpenRouter check reads OPENROUTER_API_KEY from the env or .env
   and self-skips without it).
 - Compile-fresh discipline: compile while you write (a 7-defect class in
