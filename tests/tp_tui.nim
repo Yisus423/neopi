@@ -210,3 +210,46 @@ suite "the / command dispatch":
     finally:
       removeDir(root)
       removeFile(path)
+
+suite "the turn drive":
+  test "sendTurn drives one turn at a time: the tool result and the final text land":
+    let root = freshWorkspace("neopi-tp-tui-drive")
+    let path = freshSessionPath("drive")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      exposeTuiSink(L, addr st, "scripted")
+      # The scripted provider: the first turn answers with a write tool
+      # call, the second with the final text. The TUI drives one turn per
+      # evalJson; the sink binds the model and exercises the stream path
+      # (the headless state has no app — feedKeys and flushFrame guard it).
+      runScript(L, """
+        neopi.provider.setScripted({
+          {toolCalls = {{id = "call-1", name = "write",
+            args = {path = "drive.txt", content = "one"}}}},
+          {text = "second turn"},
+        })
+      """)
+      st.inputW.setText("go")
+      sendTurn(addr st, L)
+      # The drive ran two turns: user, assistant (toolUse), toolResult,
+      # assistant (final). The write tool ran through the confined
+      # primitives inside the first turn.
+      check sess.history().len == 4
+      check readFile(root / "drive.txt") == "one"
+      # The transcript rebuilt from the session: every entry renders.
+      check st.transcriptW.transcript.items.len == 4
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "turnContinues: the engine's continueLoop or steering queued in the gap":
+    check turnContinues(parseJson("{\"continueLoop\":true}"), false)
+    check not turnContinues(parseJson("{\"continueLoop\":false}"), false)
+    check turnContinues(parseJson("{\"continueLoop\":false}"), true)
+    check not turnContinues(parseJson("{}"), false)
+    check not turnContinues(newJNull(), false)

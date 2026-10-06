@@ -204,11 +204,16 @@ proc queueSteering(L: LuaState, text: string) =
 
 proc feedKeys*(state: ptr TuiState): bool =
   ## Drain the backend's pending key events without blocking (called from
-  ## the stream sink while the app loop is inside the turn's waitFor) and
-  ## return whether an abort (Esc/Ctrl+C) was seen. This is the piece that
-  ## keeps the abort alive without a timer: the waitFor pumps the dispatch,
-  ## and the sink polls the keys here.
+  ## the stream sink while the app loop is inside the turn's waitFor, and
+  ## from the turn drive's between-turns gap) and return whether an abort
+  ## (Esc/Ctrl+C) was seen. This is the piece that keeps the keys alive
+  ## without a timer: the waitFor pumps the dispatch, and the sink and the
+  ## gap poll the keys here. The editing keys forward to the input widget
+  ## (nimlet's composer-alive pattern): the draft builds during the run, so
+  ## steering is typable at all.
   result = false
+  if not state[].appReady:
+    return
   while true:
     let event = state[].app.backend.readEvent(0)
     if event.kind == uiNone:
@@ -222,6 +227,10 @@ proc feedKeys*(state: ptr TuiState): bool =
         if draft.len > 0 and not state[].lua.isNil:
           queueSteering(state[].lua, draft)
           state[].inputW.clear()
+      else:
+        # The editing keys stay alive during the run (the draft builds so
+        # steering is typable): the same dispatch the app loop runs.
+        discard state[].inputW.handle(event)
 
 proc flushFrame*(state: ptr TuiState) =
   ## Present the current frame (the transcript's changes) without the app
@@ -390,10 +399,45 @@ proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
   if feedback.len > 0:
     appendStatusLine(state, feedback)
 
+proc turnContinues*(response: JsonNode, steered: bool): bool =
+  ## Whether the drive runs another turn after one turn's response: the
+  ## engine's continueLoop flag (the model asked for tools, or the steering
+  ## drained after the assistant entry), or steering queued in the gap. No
+  ## step cap in the TUI drive (nimlet's while-true): the user steers and
+  ## aborts.
+  let continues = response.kind == JObject and
+    response.hasKey("continueLoop") and response["continueLoop"].getBool(false)
+  result = continues or steered
+
+proc steeringQueueLen(L: LuaState): int =
+  ## The steering queue's length (0 without the table — the headless state
+  ## has no queue until the sink binds it).
+  result = 0
+  lua_getfield(L, luaGlobalsIndex, "neopi")
+  if lua_type(L, -1) == luaTTable:
+    lua_getfield(L, -1, "steeringQueue")
+    if lua_type(L, -1) == luaTTable:
+      result = int(lua_objlen(L, -1))
+    lua_pop(L, 1)
+  lua_pop(L, 1)
+
+proc drainGapKeys(state: ptr TuiState, L: LuaState): bool =
+  ## The between-turns gap: drain the backend's pending keys (the keys
+  ## alive between turns — Esc aborts the drive, Enter queues the
+  ## steering, the editing keys build the draft), flush the frame, and
+  ## return whether steering was queued (it asks for another turn — pi's
+  ## model; the next turn's drainSteering delivers it).
+  let before = steeringQueueLen(L)
+  discard feedKeys(state)
+  flushFrame(state)
+  result = steeringQueueLen(L) > before
+
 proc sendTurn*(state: ptr TuiState, L: LuaState) =
   ## Dispatch the input's text: /resume opens the menu, other /-prefixed
   ## inputs run through the runtime's registry, and plain text becomes a
-  ## user entry + the loop's chunk (the same agent.run print mode uses).
+  ## user entry + the turn drive: one turn per evalJson, the keys alive
+  ## between turns (nimlet's while-true — no step cap: the user steers and
+  ## aborts).
   let text = state[].inputW.text
   if text.len == 0:
     return
@@ -408,19 +452,31 @@ proc sendTurn*(state: ptr TuiState, L: LuaState) =
   appendUserLine(state, text)
   state[].inputW.clear()
   refreshFooter(state)
-  # The loop: agent.run(neopi.session, {model, onEvent}) — the sink and the
-  # model come off the neopi table.
+  # The turn drive: agent.runTurn(neopi.session, {model, onEvent}) — one
+  # call per turn, the keys alive between turns. The sink and the model
+  # come off the neopi table.
   let chunk = "local agent = require('agent'); " &
-    "return agent.run(neopi.session, " &
+    "return agent.runTurn(neopi.session, " &
     "{model = neopi._tuiModel, onEvent = neopi._tuiOnEvent})"
-  try:
-    discard evalJson(L, chunk)
-  except LuaError as e:
-    appendStatusLine(state, "the loop failed: " & e.msg)
-    return
+  while true:
+    var response: JsonNode
+    try:
+      response = evalJson(L, chunk)
+    except LuaError as e:
+      appendStatusLine(state, "the loop failed: " & e.msg)
+      break
+    # The transcript rebuilds per turn: the tool results render live (the
+    # sink already streamed the assistant text).
+    applySession(state[].transcriptW.transcript, state[].sess.history())
+    state[].transcriptW.invalidateLines()
+    refreshFooter(state)
+    # The gap between turns: the keys alive.
+    let steered = drainGapKeys(state, L)
+    if not turnContinues(response, steered):
+      break
   state[].streaming = ""
   # Rebuild the transcript from the session (the assistant/tool entries the
-  # loop appended) and refresh.
+  # turns appended) and refresh.
   applySession(state[].transcriptW.transcript, state[].sess.history())
   state[].transcriptW.invalidateLines()
   refreshFooter(state)
