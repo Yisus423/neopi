@@ -61,13 +61,25 @@ extensions. The .tape files are view-only (not a test surface).
   draft renders, the stream renders live, Esc aborts, Ctrl+C exits,
   /resume loads) + nimble test green.
 
-### Slice B — the loop driver + the abort/steering (the next slice)
+### Slice B — the loop driver + the abort/steering (this slice)
 
-- agent.runTurn (one turn per call, the loop's driver in the TUI) so the
-  keys are alive between turns: the abort between turns, the steering
-  drain between turns — the engine keeps the turn logic (Lua).
+- agent.runTurn (one turn per call — the loop body extracted: request →
+  stream/generate → assistant append → drainSteering → tools + compaction
+  when continuing) and agent.run as the driver over it (print mode and the
+  scripted tests keep the same contract; maxSteps/stepLimit stay headless).
+- The TUI drives: one evalJson per turn, the continue decision between
+  turns (the engine's continueLoop flag, or steering queued in the gap),
+  the transcript rebuilt per turn (the tool results render live).
+- The between-turns gap: feedKeys — Esc aborts the drive, Enter queues the
+  steering (pi's model: the next turn's drainSteering delivers it), and
+  the editing keys forward to the input (nimlet's composer-alive pattern:
+  the draft builds during the run, so steering is typable at all).
+- No step cap in the TUI drive (nimlet's while-true): the user steers and
+  aborts; the headless run keeps the cap.
 - The abort during a stream: the cancel through the sink (the flag the
-  sink checks per delta) — the same contract, the new plumbing.
+  sink checks per delta) — the same contract, unchanged. Tool execution
+  stays frozen during a run (the threads/async gap pi and nimlet solve —
+  deferred).
 
 ## Non-goals (both slices)
 
@@ -93,6 +105,25 @@ extensions. The .tape files are view-only (not a test surface).
       helpers); nimble test green; the pty harness end-to-end (the same
       exit criteria as the illwill TUI)
 - [x] 7. Work-unit commit on main; record evidence here
+
+## Tasks (slice B)
+
+- [x] 1. The busted spec first (RED): agent.runTurn's contract — one turn
+      per call (the toolUse response continues: the tools execute, the
+      steering drains, compaction triggers), the stop response returns
+      (continueLoop false, no tools), agent.run's contract unchanged
+- [x] 2. The engine (GREEN): agent.runTurn + agent.run as the driver over
+      it (the loop body extracted; continueLoop on the response)
+- [x] 3. The pure continue decision: turnContinues(response, steered)
+      extracted from sendTurn + the tp_tui test (RED → GREEN)
+- [x] 4. The TUI drive: sendTurn runs one evalJson per turn, the gap
+      between turns (feedKeys + the transcript rebuild per turn)
+- [x] 5. feedKeys forwards the editing keys to the input (the draft
+      builds during the run — the steering path alive)
+- [x] 6. Verify: nimble test green; the pty harness end-to-end (the draft
+      builds during the stream, Esc aborts the drive between turns, the
+      steering delivered in the next turn, Ctrl+C exits)
+- [x] 7. Work-unit commits on main; record evidence here
 
 ## Evidence
 
@@ -135,5 +166,65 @@ extensions. The .tape files are view-only (not a test surface).
 - Known limits: the abort during a thinking pause waits for the next delta
   (the sink's feedKeys runs per delta); the widget primitives render to
   status rows (no named replacement yet); the scroll is the transcript's
-  viewport (the keys for scrolling: pending); illwill stays in nimble
-  requires (the cleanup pending).
+  viewport (the keys for scrolling: pending).
+- Post-slice cleanup (2026-10-04, 71d88dd): illwill out of neopi.nimble
+  (no module imports it since the port); the dead exitHook proc removed
+  from tui.nim (the illwill-era SIGINT handler — nimterm's backend
+  installs its own and the registration never came back); AGENTS.md
+  refreshed (the nimterm build recipe + the sibling-checkout nim.cfg path
+  + 81 tests) and ARCHITECTURE.md de-staled (rule 6: the asyncdispatch
+  timer → the sink's nimterm transcript flush; rule 9: the illwill
+  raw-mode note → the nimterm key events). nimble test verbatim: "[Summary]
+  81 tests run (2.56s): 81 OK, 0 FAILED, 0 SKIPPED" + busted "10
+  successes"; the binary compiles clean (4.1M).
+
+## Evidence (slice B, 2026-10-04)
+
+- The parent implemented the slice inline (the writers stall
+  systematically — the established lesson). The design verified against
+  nimlet first (the user's call — nimlet is the production consumer):
+  nimterm_controller's turn source (the Future + the app loop alive), the
+  abort as flags checked by delta, the steering queue drained at the turn
+  boundary — adapted to neopi's synchronous Lua engine (no engine rewrite).
+- The engine (ac4f180): the loop body extracted into agent.runTurn (one
+  turn: request → stream/generate → assistant append → drainSteering →
+  tools + compaction when continuing) with continueLoop on the response;
+  agent.run drives it headless (maxSteps/stepLimit unchanged). Test-first:
+  the busted spec RED (attempt to call field 'runTurn' (a nil value)) then
+  GREEN.
+- The TUI drive (7e6dbd5): sendTurn runs one evalJson per turn, the gap
+  between turns (drainGapKeys: feedKeys + flush + the steered flag), the
+  transcript rebuilt per turn (the tool results render live), no step cap
+  (nimlet's while-true — the user steers and aborts). feedKeys forwards
+  the editing keys to the input (the draft builds during the run — before
+  this, the letters were dropped and the steering queue was unreachable
+  from the TUI) and guards appReady (the headless tests drain nothing).
+- Tests: turnContinues (the pure continue decision) + the drive test (the
+  scripted provider end-to-end through the sink) — both RED (the compile
+  failure + the first run's 1 entry: without exposeTuiSink the chunk's
+  model was nil) then GREEN. nimble test verbatim: "[Summary] 83 tests run
+  (3.04s): 83 OK, 0 FAILED, 0 SKIPPED" + busted "13 successes".
+- The pty harness E2E (/tmp/tui_test_drive.py — the harness the crash
+  ate, rewritten; the scripted provider injected via .neopi/init.lua —
+  the setScripted surface is production-exposed): phase 1 (scripted): the
+  drive ran 3 turns (user, assistant, toolResult, assistant, toolResult,
+  assistant), the tools executed inside their turns, the final text
+  rendered, the second send works, Ctrl+C exit 0. Phase 2a (real, ling
+  flash): the draft builds during the stream ("abc" typed mid-stream
+  renders), the steering user entry landed mid-run and an assistant entry
+  follows it (the next turn delivered it), Ctrl+C exit 0. Phase 2b: the
+  Esc abort recorded (stop=aborted), Ctrl+C exit 0.
+- The harness lessons (extended): the per-cell diff presents the cursor
+  cell after each typed char — the draft check strips the cursor marks
+  ("abc", not "a▌b▌c▌"), the tui-async lesson extended; the thinking
+  pause renders nothing (the deltas drive everything) — the harness waits
+  for the text before typing; the E2E must run the freshly built binary
+  (the stale build/neopi from the cleanup ran the pre-slice behavior and
+  failed the draft check silently).
+- Known limits (unchanged + new): the abort during a thinking pause waits
+  for the next delta (the deltas drive everything); the tool execution
+  stays frozen during a run (the threads/async gap pi and nimlet solve —
+  the ROADMAP's #14); the scroll keys pending (the ROADMAP's #11); the
+  between-turns abort is exercised by the unit contract (turnContinues)
+  and not pinned by the E2E (the scripted runs are instant — the gap is
+  milliseconds).

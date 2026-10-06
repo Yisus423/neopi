@@ -27,16 +27,19 @@ verified basis of each slice.
 | 8. TUI polish | Per-line colors + the abort marker + the working indicator (`6a9c53d`) | pi-like rendering; `lineColor` is pure and testable |
 | Fix. The timer stays alive | The Callback returns `false` (`7c8bdc6`) | asyncdispatch's Callback semantics are inverted: `false` = stay alive; `true` unregistered after the first fire |
 | 9. Session resume | `/resume` + the select overlay + the registry swap (`ed4a006`) | pi's SelectList pattern; the swap rebinds the registry pointer the cfunctions read dynamically |
+| 10. The TUI on nimterm | The backend swap: nimterm's widget tree, unicodedb widths, and markdown replace illwill; the async tangle (the timer, the keyPoller) out (`6d4a998`) | The user regretted illwill (the unicode widths, the markdown gap); nimterm's App is the loop owner — the deltas flush direct from the sink, no timer; the local checkout is the fork seed |
+| Fix. The nimterm tail | The dead illwill requires + the dead exitHook out; AGENTS.md/ARCHITECTURE.md refreshed (`71d88dd`) | The port left the tail behind: no module imports illwill anymore, and the docs still described the old recipe and the removed timer |
 
 ## Remaining (priority order)
 
 | # | Item | Notes |
 |---|---|---|
 | 10 | lazy.npi (the lazy plugin manager, the user's plan) | An extension: `neopi.fs.list` + `require` on-trigger — everything against the surface |
-| 11 | The interface study: what else to copy from pi's TUI | The renderers (markdown), the mouse, the themes, the widget borders |
+| 11 | The interface study: what else to copy from pi's TUI | The mouse, the themes, the widget borders; the markdown landed with nimterm; the transcript scroll keys pending |
 | 12 | Packaging (single-binary distribution) | The runtime ships with the binary |
 | 13 | Fork/clone to new files | Branch-in-place covers the MVP; forking copies the tree |
-| 14 | grep/find/ls agent tools | If the model needs them |
+| 14 | The tool execution alive during a run | bash runs frozen inside the turn's chunk (the threads/async gap pi and nimlet solve); the abort during a thinking pause waits for the next delta |
+| 15 | grep/find/ls agent tools | If the model needs them |
 
 ## Deferred
 
