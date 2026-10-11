@@ -34,7 +34,7 @@ verified basis of each slice.
 
 | # | Item | Notes |
 |---|---|---|
-| 10 | **Our own provider layer, on chronos** | The decoupling, provider first: the wire contract with the transport injectable (the pi `client` pattern), the SSE parser against the recorded OpenRouter fixtures, the scripted provider port, the Lua surface unchanged — the .env dependency leaves `nimble test` (`odd/tasks/provider-chronos.md`) |
+| 10 | **Our own provider layer, on chronos** | The decoupling, provider first: the wire contract with the transport injectable (the pi `client` pattern), the SSE layer adopted (iceberg-work/sse — the incremental feed parser) mapped to our StreamEvent against the recorded OpenRouter fixtures, the scripted provider port, the Lua surface unchanged — the .env dependency leaves `nimble test` (`odd/tasks/provider-chronos.md`) |
 | 11 | **Our own TUI, on the same lessons** | The grid with invalid regions (the per-delta full render is the performance defect), the terminal as an interface with a fake backend (the pi FakeTerminal pattern — the pty harness demotes to smoke), chronos's loop as the owner |
 | 12 | lazy.npi (the lazy plugin manager, the user's plan) | An extension: `neopi.fs.list` + `require` on-trigger — everything against the surface |
 | 13 | The interface study: what else to copy from pi's TUI | The mouse, the themes, the widget borders; the markdown landed with nimterm; the transcript scroll keys pending |

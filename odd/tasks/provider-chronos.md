@@ -24,6 +24,18 @@ design).
   StreamFunction → AssistantMessageEventStream pattern) with the
   **transport injectable in the options** — the injection must exist in
   the design; it cannot be added cheaply later.
+- **The pure-Nim search (2026-10-06, the user's call) settled the
+  build-vs-reuse split**: chronos's httpclient IS the streaming transport
+  (AsyncStreamReader + chunked, bearssl TLS — no OpenSSL); iceberg-work/sse
+  IS the SSE parser (the incremental feed, the `:`-comment keepalives, the
+  multiline data, the CRLF — spec-complete, 588 lines, zero deps); the
+  OpenAI wire layer is ours — planetis-m/openai has no streaming and rides
+  relay→libcurl, openai_leap has streaming but rides Curly→libcurl with
+  live-only tests and no injection point (it fails the two criteria this
+  feature just fixed: keyless testability and the minimal-deps profile).
+  The dependency rule that came out of it: a dependency earns its place if
+  it is production-proven (chronos) or so small and focused that absorbing
+  it is trivial (sse, 588 lines — the fork-seed pattern applies trivially).
 - **Three test levels** (the pi study): L1 wire (a fake transport + the
   real OpenRouter SSE fixtures → the real parser; the .env dependency
   leaves `nimble test`), L2 provider (the scripted provider — exists),
@@ -49,9 +61,11 @@ design).
 - [ ] 2. chronos as a dependency + the wire contract: WireRequest/
       WireResponse/Transport (the injection point) + the FakeTransport
       (L1) — test-first (RED → GREEN)
-- [ ] 3. The SSE parser: the incremental state machine (the events out of
-      arbitrary chunk splits) + the OpenRouter wire fixtures (the capture
-      script + the committed fixture) — test-first
+- [ ] 3. The SSE layer: adopt iceberg-work/sse (the incremental feed
+      parser, pure Nim, zero deps, MIT — the search found it; writing the
+      ~200-line state machine would duplicate it) + the OpenRouter wire
+      fixtures (the capture script + the committed fixture) + our mapping
+      SSE → StreamEvent — test-first
 - [ ] 4. The openai-compatible provider: the request builder (the dummy
       keys asserted) + the stream on chronos (the cancellation + the
       timeout) — test-first
