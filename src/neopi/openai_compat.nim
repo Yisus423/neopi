@@ -5,7 +5,10 @@
 ## decides the extension). The stream loop owns the end semantics: one
 ## seFinished after the done.
 import std/json
-import neopi/provider
+import chronos
+import neopi/wire
+import neopi/provider except CancelledError
+import sse
 
 type
   ToolCallAccum* = object
@@ -36,10 +39,6 @@ proc field(n: JsonNode, key: string): JsonNode =
 
 proc toToolCalls*(acc: OaiAccum): seq[tuple[id: string, name: string,
     args: JsonNode]] =
-  ## The accumulated fragments → the response tool calls. The argument
-  ## fragments join into one JSON value; an unparsable accumulation
-  ## surfaces as JNull (the engine reports a tool failure instead of
-  ## aborting the run).
   for tc in acc.toolCalls:
     var parsed = newJNull()
     if tc.args.len > 0:
@@ -102,3 +101,99 @@ proc mapOaiChunk*(data: string, acc: var OaiAccum): seq[StreamEvent] =
       acc.finishReason = frMaxTokens
     else:
       discard
+
+proc roleStr(r: ChatRole): string =
+  ## The wire spelling of the role (the enum's $ gives the identifier).
+  case r
+  of roleSystem: "system"
+  of roleUser: "user"
+  of roleAssistant: "assistant"
+
+proc buildChatRequest*(model: string, messages: seq[Message], system = "",
+    tools: seq[Tool] = @[], stream = true): JsonNode =
+  ## The chat-completions request body. The system message leads when set;
+  ## the tools key stays out when there are none (the wire omits it).
+  var msgs = newJArray()
+  if system.len > 0:
+    msgs.add %*{"role": "system", "content": system}
+  for m in messages:
+    msgs.add %*{"role": roleStr(m.role), "content": m.text}
+  result = %*{"model": model, "messages": msgs, "stream": stream}
+  if tools.len > 0:
+    var arr = newJArray()
+    for t in tools:
+      arr.add %*{"type": "function", "function": {"name": t.name,
+        "description": t.description, "parameters": t.inputSchema}}
+    result["tools"] = arr
+
+proc chatHeaders*(apiKey: string): seq[(string, string)] =
+  ## The auth and content headers. The key arrives here from the caller —
+  ## the tests pass dummy keys and assert this exact shape.
+  @[("Authorization", "Bearer " & apiKey),
+    ("Content-Type", "application/json")]
+
+proc streamChatAsync*(transport: Transport, baseUrl: string, apiKey: string,
+    model: string, messages: seq[Message], onEvent: provider.StreamCallback,
+    system = "", tools: seq[Tool] = @[], readTimeoutMs = 0):
+    Future[Response] {.async: (raises: [CatchableError]).} =
+  ## One streamed model turn over the wire: the SSE parser and the mapping
+  ## consume the body, the callback sees the events (false cancels — the
+  ## CancelledError unwinds, expose.nim builds the partial response), and
+  ## the accumulated Response returns. readTimeoutMs bounds each body read
+  ## (0 disables; a silent stream is the hung-stream failure mode).
+  let wireReq = WireRequest(url: baseUrl & "/chat/completions",
+    httpMethod: "POST", headers: chatHeaders(apiKey),
+    body: $buildChatRequest(model, messages, system, tools))
+  let resp = await transport.fetch(wireReq)
+  if resp.status != 200:
+    var errBody = ""
+    for _ in 0 ..< 32:
+      let chunk = await resp.next()
+      if chunk.len == 0:
+        break
+      errBody.add chunk
+      if errBody.len > 8192:
+        break
+    raise newException(ProviderError,
+      "the provider returned " & $resp.status & ": " & errBody)
+  var acc: OaiAccum
+  var parser = initSSEParser()
+  try:
+    while true:
+      var chunk: string
+      if readTimeoutMs > 0:
+        let readFut = resp.next()
+        let timeoutFut = sleepAsync(readTimeoutMs.milliseconds)
+        let winner = await race(FutureBase(readFut), FutureBase(timeoutFut))
+        if winner == FutureBase(timeoutFut):
+          await readFut.cancelAndWait()
+          raise newException(ProviderError,
+            "the stream read timed out after " & $readTimeoutMs & "ms")
+        await timeoutFut.cancelAndWait()
+        chunk = await readFut
+      else:
+        chunk = await resp.next()
+      if chunk.len == 0:
+        break
+      for ev in parser.feed(chunk):
+        if ev.data.len == 0:
+          continue
+        for e in mapOaiChunk(ev.data, acc):
+          if not onEvent(e):
+            raise newException(provider.CancelledError, "the stream was cancelled")
+      if acc.done:
+        break
+    discard onEvent(StreamEvent(kind: seFinished))
+  finally:
+    resp.close()
+  return Response(text: acc.text, finishReason: acc.finishReason,
+    inputTokens: acc.inputTokens, outputTokens: acc.outputTokens,
+    requestId: acc.requestId, toolCalls: acc.toToolCalls())
+
+proc streamChat*(transport: Transport, baseUrl: string, apiKey: string,
+    model: string, messages: seq[Message], onEvent: provider.StreamCallback,
+    system = "", tools: seq[Tool] = @[], readTimeoutMs = 0): Response =
+  ## The blocking boundary (the shape the Lua surface calls): chronos's
+  ## waitFor pumps the loop while the stream runs.
+  waitFor streamChatAsync(transport, baseUrl, apiKey, model, messages,
+    onEvent, system, tools, readTimeoutMs)

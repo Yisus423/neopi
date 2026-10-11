@@ -2,8 +2,12 @@
 ## the neopi StreamEvents and the accumulated Response. The hand-written
 ## chunks pin the wire shape; the two captured OpenRouter fixtures replay
 ## the real stream end-to-end (L1 — keyless, no network).
-import std/json
-import neopi/[openai_compat, provider]
+import std/[json, strutils]
+import chronos
+import chronos/timer
+import neopi/openai_compat
+import neopi/wire
+import neopi/provider except CancelledError
 import sse
 import unittest2
 
@@ -124,3 +128,110 @@ suite "the openai wire mapping":
       if e.kind == seToolCallDelta and e.toolCallId == "call_88fe0e24997a4c0bb4408661":
         sawStart = true
     check sawStart
+
+type SlowFakeWireResponse = ref object of WireResponse
+  ## The deliberately silent body: the timeout test races against it.
+  delay: timer.Duration
+
+method next*(r: SlowFakeWireResponse): Future[string] {.async.} =
+  await sleepAsync(r.delay)
+  return ""
+
+proc newSlowResponse(delay: timer.Duration): SlowFakeWireResponse =
+  SlowFakeWireResponse(status: 200, delay: delay)
+
+suite "the openai provider on the wire":
+  test "the request builder shapes the chat completions payload":
+    let req = buildChatRequest("m", @[
+      Message(role: roleUser, text: "go")],
+      system = "be brief", tools = @[Tool(name: "write",
+        description: "writes", inputSchema: parseJson("{}"))])
+    check req["model"].getStr == "m"
+    check req["stream"].getBool
+    check req["messages"][0]["role"].getStr == "system"
+    check req["messages"][0]["content"].getStr == "be brief"
+    check req["messages"][1]["role"].getStr == "user"
+    check req["tools"][0]["function"]["name"].getStr == "write"
+    # Without tools or system the keys stay out.
+    let bare = buildChatRequest("m", @[])
+    check not bare.hasKey("tools")
+    check bare["messages"].len == 0
+
+  test "the chat headers carry the bearer key":
+    let headers = chatHeaders("test-key")
+    check headers[0] == ("Authorization", "Bearer test-key")
+    check headers[1] == ("Content-Type", "application/json")
+
+  test "streamChat streams the deltas and returns the response":
+    let fake = newFakeTransport()
+    fake.canned(200, @[
+      "data: {\"id\":\"g1\",\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n",
+      "data: {\"id\":\"g1\",\"choices\":[{\"delta\":{\"content\":\"lo\"}," &
+        "\"finish_reason\":\"stop\"}]}\n\n",
+      "data: {\"id\":\"g1\",\"choices\":[],\"usage\":{\"prompt_tokens\":9," &
+        "\"completion_tokens\":2}}\n\n",
+      "data: [DONE]\n\n"])
+    var got: seq[StreamEvent] = @[]
+    let r = streamChat(fake, "https://x/v1", "test-key", "m",
+      @[Message(role: roleUser, text: "hi")],
+      proc (e: StreamEvent): bool =
+        got.add e
+        true)
+    check r.text == "hello"
+    check r.finishReason == frStop
+    check r.inputTokens == 9
+    check r.outputTokens == 2
+    check r.requestId == "g1"
+    # The seFinished fires once at the end, after the deltas.
+    check got[^1].kind == seFinished
+    check got[0].kind == seTextDelta and got[0].text == "hel"
+
+  test "streamChat cancels when the callback returns false":
+    let fake = newFakeTransport()
+    fake.canned(200, @[
+      "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n",
+      "data: {\"choices\":[{\"delta\":{\"content\":\"y\"}}]}\n\n"])
+    var cancel = false
+    expect provider.CancelledError:
+      discard streamChat(fake, "https://x/v1", "test-key", "m", @[],
+        proc (e: StreamEvent): bool =
+          if e.kind == seTextDelta:
+            cancel = true
+          not cancel)
+
+  test "streamChat raises on an error status with the body":
+    let fake = newFakeTransport()
+    fake.canned(429, @["{\"error\":\"rate limited\"}\n"])
+    try:
+      discard streamChat(fake, "https://x/v1", "test-key", "m", @[],
+        proc (e: StreamEvent): bool = true)
+      fail()
+    except ProviderError as e:
+      check "429" in e.msg
+      check "rate limited" in e.msg
+
+  test "streamChat assembles the tool call response":
+    let fake = newFakeTransport()
+    fake.canned(200, @[
+      "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":" &
+        "\"c1\",\"type\":\"function\",\"function\":{\"name\":\"write\"," &
+        "\"arguments\":\"\"}}]}}]}\n\n",
+      "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0," &
+        "\"function\":{\"arguments\":\"{\\\"path\\\": \\\"a\\\"}\"}}]}}]}\n\n",
+      "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+      "data: [DONE]\n\n"])
+    let r = streamChat(fake, "https://x/v1", "test-key", "m", @[],
+      proc (e: StreamEvent): bool = true)
+    check r.finishReason == frToolUse
+    check r.toolCalls.len == 1
+    check r.toolCalls[0].id == "c1"
+    check r.toolCalls[0].name == "write"
+    check r.toolCalls[0].args == parseJson("{\"path\": \"a\"}")
+
+  test "streamChat times out on a silent stream":
+    let fake = newFakeTransport()
+    let slow = newSlowResponse(timer.seconds(60))
+    fake.cannedResponse(slow)
+    expect ProviderError:
+      discard streamChat(fake, "https://x/v1", "test-key", "m", @[],
+        proc (e: StreamEvent): bool = true, readTimeoutMs = 10)

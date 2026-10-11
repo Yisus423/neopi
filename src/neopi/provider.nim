@@ -98,9 +98,12 @@ type
     of seFinished:
       discard
 
-  StreamCallback* = proc (e: StreamEvent): bool {.closure.}
+  StreamCallback* = proc (e: StreamEvent): bool {.closure, gcsafe,
+      raises: [CatchableError].}
     ## Receives stream events. Return false to cancel the stream, which raises
-    ## CancelledError once the provider call unwinds.
+    ## CancelledError once the provider call unwinds. A callback may raise
+    ## (the Lua sinks surface their handler errors Nim-side; the stream's
+    ## caller contains them).
 
   ScriptStep* = object
     ## One scripted provider reply for application tests. A step with `text`
