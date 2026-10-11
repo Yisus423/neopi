@@ -61,7 +61,7 @@ design).
 - [x] 2. chronos as a dependency + the wire contract: WireRequest/
       WireResponse/Transport (the injection point) + the FakeTransport
       (L1) — test-first (RED → GREEN)
-- [ ] 3. The SSE layer: adopt iceberg-work/sse (the incremental feed
+- [x] 3. The SSE layer: adopt iceberg-work/sse (the incremental feed
       parser, pure Nim, zero deps, MIT — the search found it; writing the
       ~200-line state machine would duplicate it) + the OpenRouter wire
       fixtures (the capture script + the committed fixture) + our mapping
@@ -98,3 +98,27 @@ design).
   test verbatim: "[Summary] 88 tests run (3.13s): 88 OK, 0 FAILED, 0
   SKIPPED" + busted "13 successes" — the wire tests joined the dispatcher
   (tp_all imports tp_wire).
+- The SSE mapping (2026-10-11): the capture script
+  (tests/capture_openrouter.sh — one curl run per fixture with the .env
+  key; the fixtures committed: openrouter-text-stream.txt 128KB,
+  openrouter-tool-stream.txt 118KB) caught the real wire shape: the
+  reasoning arrives as delta.reasoning (OpenRouter's unified field, with
+  reasoning_details), every chunk carries the empty content + the role,
+  the usage rides the last chunk (with the reasoning_tokens breakdown),
+  the tool calls stream the id+name in the first fragment and the
+  argument JSON in fragments after (14 fragments → one call_.../write
+  /{"path": "notas/x.txt", "content": "hola"}), finish_reason
+  "tool_calls"/"stop", the [DONE] sentinel. The mapping
+  (src/neopi/openai_compat.nim): mapOaiChunk(data, var OaiAccum) →
+  seq[StreamEvent] — the contract preserved exactly (the reasoning
+  deltas DROPPED, the same as nimgent's adapter today; the thinking
+  kind is the TUI slice's contract extension), the fragments accumulate
+  by tool_calls index, toToolCalls() parses the joined args (the
+  unparsable args surface as JNull — the engine reports a tool failure
+  instead of aborting), the finish reasons map stop→frStop,
+  tool_calls→frToolUse, length→frMaxTokens. Test-first: RED (the module
+  missing) → GREEN; the compile lesson: std/json's getOrDefault returns
+  NIL on a missing key — field() wraps it (nil has no kind: the SIGSEGV
+  was caught by the first test). nimble test verbatim: "[Summary] 98
+  tests run (8.97s): 98 OK, 0 FAILED, 0 SKIPPED" + busted "13 successes"
+  — the two L1 tests replay the real fixtures end-to-end keyless.
