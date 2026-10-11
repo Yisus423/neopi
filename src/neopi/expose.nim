@@ -10,15 +10,16 @@
 ## start of every generate); the execute function refs are luaL_ref'd for
 ## the call and luaL_unref'd after the response is built, so the registry
 ## does not grow per generate call. The Lua loop in the runtime layer owns
-## the turn orchestration and the tool executions, so nimgent never runs its
-## tool loop here — the ref-based execute closures are the Tool-type
-## plumbing that makes Lua tools callable through the provider protocol (the
-## hooks pattern reversed: Lua tool, Nim glue). A Lua error in a tool raises
-## Nim-side, where nimgent's execOne catches it and reports a tool failure to
-## the model.
+## the turn orchestration and the tool executions; they stay on the Lua/Nim
+## side, never inside the provider layer — the single-turn call it drives is
+## provider.nim's `runTurn`, and the ref-based execute closures are the
+## Tool-type plumbing that makes Lua tools callable through the provider
+## protocol (the hooks pattern reversed: Lua tool, Nim glue). A Lua error in
+## a tool raises Nim-side, where the provider's `invokeTool` turns it into a
+## tool failure reported to the model.
 ##
 ## `neopi.provider.setScripted(steps)` swaps the backing provider for a
-## deterministic scripted one (the nimgent scriptedModel pattern) — the test
+## deterministic scripted one (the scripted provider pattern) — the test
 ## surface for in-process specs without network. The swap lasts for the
 ## process lifetime; there is no unswap.
 ##
@@ -93,7 +94,7 @@ func payloadBool(payload: JsonNode, key: string): bool =
 
 func stopReasonOf(r: Response): string =
   ## The response's stop reason in the Lua layer's spelling: a response that
-  ## stopped for tool use reports "toolUse" (nimgent spells the step-limit
+  ## stopped for tool use reports "toolUse" (the provider spells the step-limit
   ## stop `frStepLimit` when the tool loop cannot continue, and the Lua loop
   ## keys on the tool call itself); other reasons map from the finish reason.
   if r.toolCalls.len > 0:
@@ -112,7 +113,7 @@ proc makeLuaToolExecute(L: LuaState,
   ## The neopi Tool execute callback for a Lua-defined tool: call the stored
   ## Lua function through pcall with the args JSON pushed and return its
   ## string result. A Lua error (or a non-string result) raises Nim-side,
-  ## where nimgent's execOne catches it and reports a tool failure to the
+  ## where the provider's invokeTool catches it and reports a tool failure to the
   ## model. The ref is only valid for the generate call that created it: the
   ## generate luaL_unref's it after the response is built, and the closure
   ## dies with the tools seq.
@@ -337,7 +338,7 @@ proc luaProviderGenerate(L: LuaState): cint {.cdecl.} =
 
 proc luaProviderSetScripted(L: LuaState): cint {.cdecl.} =
   ## Lua-side `neopi.provider.setScripted(steps)`: swap the backing provider
-  ## for a deterministic scripted one (the nimgent scriptedModel pattern) —
+  ## for a deterministic scripted one (the scripted provider pattern) —
   ## the test surface for in-process specs without network. A step with
   ## `text` replies with that text; otherwise it replies with its
   ## `toolCalls` ({id, name, args}). An optional `usageInput` number sets the

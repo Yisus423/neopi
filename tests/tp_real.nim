@@ -1,5 +1,7 @@
-## Live streaming check against OpenRouter. Skips itself when no key is set.
-## Reads OPENROUTER_API_KEY from the environment or from a local .env file.
+## Live streaming check against OpenRouter. Skips itself unless NEOPI_LIVE_TEST
+## is set AND a key is found: it is opt-in, so `nimble test` alone stays keyless
+## and offline. Run it with `NEOPI_LIVE_TEST=1 nimble test`. Reads
+## OPENROUTER_API_KEY from the environment or from a local .env file.
 import std/[os, strutils, syncio]
 import neopi/provider
 import unittest2
@@ -23,7 +25,7 @@ suite "real streaming (OpenRouter)":
   test "streams text deltas from a live model":
     loadDotEnv()
     let key = getEnv("OPENROUTER_API_KEY")
-    if key.len == 0:
+    if getEnv("NEOPI_LIVE_TEST").len == 0 or key.len == 0:
       skip()
       return
     let modelId = getEnv("OPENROUTER_MODEL",

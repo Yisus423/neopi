@@ -1,6 +1,6 @@
 ## Tests for the registerTool slice: the runtime registry, the generate
 ## merge, and the executeCall fallback. No API key or network: the provider
-## tests use the scripted swap (the nimgent scriptedModel pattern). The
+## tests use the scripted swap (the scripted provider). The
 ## runtime entry (init.lua) loads the registry onto the neopi table.
 import std/[json, options, os]
 import neopi/[extensibility, lua, provider, session]

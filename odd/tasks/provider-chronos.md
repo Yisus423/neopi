@@ -72,7 +72,7 @@ design).
 - [x] 5. The scripted provider port (L2) without nimgent
 - [x] 6. The Lua surface swap: expose.nim rewired to the new layer; the
       engine and the TUI untouched; the whole suite green keyless
-- [ ] 7. nimgent out of neopi.nimble (and the libpcre build note); tp_real
+- [x] 7. nimgent out of neopi.nimble (and the libpcre build note); tp_real
       → opt-in; AGENTS.md refreshed
 - [ ] 8. Work-unit commits on main; record evidence here
 
@@ -205,3 +205,29 @@ design).
   openAI/openRouter/scriptedProvider) leaves the private transport nil and
   fails at the first turn; the constructors are the only supported path and
   the type's doc says so.
+- The packaging and the docs (2026-10-11, task 7): nimgent left the nimble
+  requires and the test task's libpcre block (the LD_LIBRARY_PATH putEnv) is
+  gone. The proof is the run with the path removed:
+  `env -u LD_LIBRARY_PATH nimble test` → "[Summary] 112 tests run (2.45s):
+  112 OK, 0 FAILED, 0 SKIPPED" + busted "13 successes", exit 0 — nothing in
+  the suite dlopens libpcre any more. The live OpenRouter check became
+  opt-in: tests/tp_real.nim skips unless NEOPI_LIVE_TEST is set AND a key is
+  found, so `nimble test` is keyless and offline (the live test skips in
+  0.00s) while the live evidence is one explicit command:
+  `NEOPI_LIVE_TEST=1 nimble test` → "[Summary] 112 tests run (8.07s): 112 OK,
+  0 FAILED, 0 SKIPPED" with the real turn at 5.60s. It went opt-in because
+  the default suite must not depend on the network or on a key sitting in
+  .env: a slow or flaky turn turns it red for reasons unrelated to the code.
+  AGENTS.md refreshed: the build recipe drops LD_LIBRARY_PATH and names the
+  two sibling checkouts (nimterm, sse), the testing section carries the real
+  numbers (112 unittest tests, 5 specs, 13 busted successes) and the opt-in,
+  and the layer rules describe the four provider modules. The stale nimgent
+  comments in expose.nim/tp_register.nim/tp_expose.nim were reworded to the
+  present (provider.nim's runTurn and invokeTool). README.md lost the libpcre
+  and the "nimgent upstream" limits and gained the three real ones the
+  verification recorded; ARCHITECTURE.md's module table now lists
+  primitives/wire/openai_compat/provider and its first design decision
+  narrates the payoff. `grep -rn nimgent` is clean in src/, tests/,
+  neopi.nimble, nim.cfg, AGENTS.md and the README — the only remaining
+  mentions are the historical records (odd/tasks/*.md and the ROADMAP's
+  slice-1 row, which describes that slice as it was).

@@ -1,6 +1,6 @@
 ## Tests for the exposure: the Lua-callable neopi.provider and neopi.session
 ## tables on the extensibility's state. No API key or network: the provider
-## tests use the scripted swap (the nimgent scriptedModel pattern).
+## tests use the scripted swap (the scripted provider).
 import std/[json, options, os]
 import neopi/[extensibility, lua, provider, session]
 import unittest2

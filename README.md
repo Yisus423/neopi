@@ -50,15 +50,15 @@ config file you own, the `require` mechanism loads what it references.
    runtime at `build/../runtime` automatically; elsewhere set
    `NEOPI_RUNTIME_DIR`.
 
-The run needs `LD_LIBRARY_PATH="$HOME/.local/lib/nimlet"` when libpcre is not
-on the default loader path — nimgent dlopens it at load time (see
-[AGENTS.md](AGENTS.md) for the full build recipe).
+The build needs a disk-backed `TMPDIR` (`/tmp` is a small tmpfs here) and the
+Nim toolchain; the run itself needs nothing beyond the binary and the runtime
+(see [AGENTS.md](AGENTS.md) for the full build recipe).
 
 ## What it is
 
 | Layer | Language | Contents |
 |---|---|---|
-| Core | Nim | provider (anti-corruption layer over nimgent), session tree (append-only JSONL), confined fs/process, hook bus, LuaJIT embedding, agent tools, the TUI |
+| Core | Nim | provider (our own chronos stack: `primitives` + `openai_compat` + the wire transport, with the policy in `provider.nim`), session tree (append-only JSONL), confined fs/process, hook bus, LuaJIT embedding, agent tools, the TUI |
 | Runtime | Lua (`runtime/`, user-modifiable) | `init.lua` (entry + the tool/command registries), `agent.lua` (the loop: streaming, compaction, the steering drain), `tools.lua` (bash/read/edit/write) |
 
 The binary assembles the core, loads the runtime, and drives it. Runtime
@@ -106,8 +106,17 @@ threading.
 
 ## Known limits (honest)
 
-- **libpcre at load time** — nimgent's structured_output import chain dlopens
-  libpcre; the binary needs it on the loader path.
+- **A mid-stream failure is not a `ProviderError`** — a dropped connection or
+  a non-JSON SSE payload surfaces as a transport or parse error: the provider
+  wraps the fetch and the HTTP status, not the body stream. The Lua boundary
+  still turns it into a Lua error instead of aborting the process.
+- **No argument schema validation before a tool runs** — the hook gate (the
+  approval layer) and each tool's own argument checks stand, but the
+  pre-execution JSON-Schema check the previous provider layer ran is not
+  ported.
+- **The stream mapping trusts the wire's tool-call index** — the accumulator
+  grows to the index the gateway sends, so a hostile gateway could ask for a
+  huge allocation.
 - **Lexical confinement** — path checks do not resolve symlinks; a symlink
   inside the workspace pointing outside it is followed.
 - **The abort during a thinking pause** waits for the next delta (the
@@ -115,8 +124,6 @@ threading.
 - **No arg completions, no mouse, no themes** — the select list and the
   transcript are plain; colors are hardcoded.
 - **Linux-only** — LuaJIT linking and the test environment assume Linux.
-- **nimgent upstream** — solo-dev dependency with an exit plan (see
-  [ROADMAP.md](ROADMAP.md)); the swap is one module.
 
 ## License
 

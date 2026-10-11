@@ -16,7 +16,10 @@ honest record of the design decisions.
 
 | Module | Role |
 |---|---|
-| `provider.nim` | The anti-corruption layer over nimgent: `generate`/`stream`/`toolCall`, neopi-owned types and exceptions; nimgent types never leak |
+| `primitives.nim` | The caller-facing provider types and exceptions (`ProviderError`/`CancelledError`, `Message`/`ChatRole`, `Response`, `Tool`, `StreamEvent`/`StreamCallback`, `ScriptStep`); `provider.nim` re-exports it, so `import neopi/provider` keeps the whole surface |
+| `wire.nim` | The transport contract: `WireRequest`/`WireResponse`/`Transport` plus the chronos implementation (`getBodyReader` + `readOnce`, TLS via bearssl) and the in-memory fake the L1 tests drive |
+| `openai_compat.nim` | The OpenAI-compatible protocol: the SSE chunk mapping onto `StreamEvent`/`Response`, `buildChatRequest`/`chatHeaders`, `streamChat` (cancellation + read timeout), the scripted transport |
+| `provider.nim` | The policy: the `Provider`/`Model` objects (`openAI`/`openRouter`/`scriptedProvider`, the injectable transport), the tool round-trip loop (`runTurn`), the hook gates (`invokeTool`); chronos and sse types never leak past wire/openai_compat |
 | `hooks.nim` | The hook bus: `neopi.on` from Lua, `emit` with block/rewrite from return values, pcall containment (a handler error aborts only that handler) |
 | `lua.nim` | The LuaJIT 5.1 FFI bindings: macro-only 5.1 names wrapped Nim-side (`lua_pop`, `lua_pushcfunction`, `lua_getglobal`/`setglobal`, `luaUpvalueIndex = luaGlobalsIndex - i`); selective lib opening — ffi/io/os/debug/jit closed; the loadlib closure (`package.loadlib = nil`, C loader removed) |
 | `fs.nim` | The confined fs primitives (`neopi.fs`: read/write/mkdir/exists/list) + `resolveConfined`, the one confinement source of truth shared with the agent tools |
@@ -46,9 +49,13 @@ lines / 50KB. Converging them is runtime work, not core work.
 
 ## The design decisions (and WHY)
 
-1. **The anti-corruption layer.** nimgent is a dependency with an exit plan:
-   fork the local checkout or replace the wrapper — the swap is one module
-   (`provider.nim`), and callers never see nimgent types.
+1. **The anti-corruption layer paid off.** nimgent is gone and not one caller
+   changed: the swap landed in a single commit and the Lua surface
+   (`expose.nim`) did not move a byte. What the layer did force: because the
+   protocol module needs the caller-facing types while the policy module needs
+   the protocol, the type block had to leave the module that re-exports it
+   (`primitives.nim`). A conversion boundary keeps the callers safe; it does
+   not keep the module count down.
 2. **The loop in Lua (the nvim experiment).** The loop FLOWED in Lua; the
    migration is gradual (nvim moved built-ins to the scriptable layer when
    the C cost more than it gave). The session tree stays Nim core-stable —

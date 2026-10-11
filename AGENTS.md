@@ -24,7 +24,6 @@ Nim 2.2.12 via grabnim current. The environment the commands need:
 ```bash
 PATH="$HOME/.local/share/grabnim/current/bin:$PATH"   # Nim 2.2.12 (grabnim current)
 TMPDIR="$HOME/tmp-nim"                                # disk-backed; the /tmp tmpfs fills
-LD_LIBRARY_PATH="$HOME/.local/lib/nimlet"             # nimgent dlopens libpcre at load time
 ```
 
 Compile with `-o:build/<name>` — NEVER next-to-source (a binary was
@@ -32,20 +31,23 @@ committed once and removed). The build keeps `--threads:on`:
 `nim c --hints:off --threads:on --mm:orc -o:build/neopi src/neopi.nim`. The
 TUI backend is nimterm, a sibling checkout nim.cfg points at
 (`--path:"/home/jesus/proyectos/nimterm/src"` — absolute on purpose: the
-relative form failed the nim.cfg parse). The `nimble test` task sets TMPDIR
-and LD_LIBRARY_PATH itself, so `nimble test` is self-contained; direct
-`nim c` builds need the env above.
+relative form failed the nim.cfg parse); the provider layer's SSE parser is
+the other sibling (`--path:"/home/jesus/proyectos/sse/src"`, the fork seed
+of iceberg-work/sse). The `nimble test` task sets TMPDIR itself, so
+`nimble test` is self-contained; direct `nim c` builds need the env above.
 
 ## Testing
 
-- `nimble test` — self-contained; the Nim suite via unittest2 (81 tests;
-  the live OpenRouter check reads OPENROUTER_API_KEY from the env or .env
-  and self-skips without it).
+- `nimble test` — self-contained and offline: the Nim suite via unittest2
+  (112 tests) plus the busted specs. The live OpenRouter check is opt-in:
+  it skips unless NEOPI_LIVE_TEST is set and a key is found in the env or
+  in .env. Run it with `NEOPI_LIVE_TEST=1 nimble test` — it needs the
+  network and a real turn, so it never gates the default suite.
 - Compile-fresh discipline: compile while you write (a 7-defect class in
   lua.nim came from writing without compiling).
 - The Lua layer: the busted specs run through the test-only runner
-  `./build/busted_main <spec>` (4 spec files, verified green); the
-  `neopi --spec` CLI mode is deferred.
+  `./build/busted_main <spec>` (5 spec files, 13 successes, verified
+  green); the `neopi --spec` CLI mode is deferred.
 - The TUI's pty harness: `openpty` + TIOCSCTTY + TIOCSWINSZ (without the
   winsize, terminalHeight() is 0 and the buffer clamps to 1 row — the only
   footer renders; without TIOCSCTTY, no SIGINT). The harness writes keys to
@@ -66,7 +68,15 @@ and LD_LIBRARY_PATH itself, so `nimble test` is self-contained; direct
 
 ## The layer rules
 
-- nimgent types never leak out of `provider.nim`.
+- The provider layer is ours, in four pieces: `primitives.nim` holds the
+  caller-facing types and exceptions, and `provider.nim` re-exports them
+  (so `import neopi/provider` keeps the whole surface); `openai_compat.nim`
+  holds the OpenAI wire mapping and `streamChat`; `wire.nim` holds the
+  transport contract (`WireRequest`/`WireResponse`/`Transport`) with the
+  chronos implementation and the in-memory fake. `provider.nim` holds the
+  policy: the Provider/Model objects, the tool round-trip loop (`runTurn`)
+  and the hook gates (`invokeTool`). chronos and sse types never leak past
+  `wire.nim`/`openai_compat.nim`.
 - The Lua extension surface
   (`neopi.on`/`fs`/`process`/`provider`/`session`/`registerTool`/`registerCommand`/`ui`)
   stays frozen until real consumers exist. Extensions load from

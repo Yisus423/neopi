@@ -8,17 +8,13 @@ import std/os
 bin           = @["neopi"]
 
 requires "nim >= 2.0.0"
-requires "https://github.com/martineastwood/nimgent"
 requires "chronos >= 4.0.0"
 
 task test, "Run the test suite":
-  # The env the tests need (libpcre for dlopen, a disk-backed TMPDIR); set
-  # here so `nimble test` is self-contained. Existing values win.
+  # The suite's only env need is a disk-backed TMPDIR (/tmp is a small tmpfs);
+  # set here so `nimble test` is self-contained. Existing values win.
   if not existsEnv("TMPDIR"):
     putEnv("TMPDIR", getHomeDir() / "tmp-nim")
-  let libDir = getHomeDir() / ".local" / "lib" / "nimlet"
-  if dirExists(libDir) and not existsEnv("LD_LIBRARY_PATH"):
-    putEnv("LD_LIBRARY_PATH", libDir)
   exec "nim c -r --hints:off --threads:on --mm:orc -o:build/tp_all tests/tp_all.nim"
   # The busted specs for the Lua layer, through the test-only runner (never
   # shipped; a failing spec exits non-zero and fails this task).
