@@ -2,6 +2,7 @@
 ## OPENROUTER_API_KEY.
 import unittest2
 import tp_provider
+import tp_wire
 import tp_lua
 import tp_fs
 import tp_tools

@@ -56,9 +56,9 @@ design).
 
 ## Tasks
 
-- [ ] 1. The ROADMAP restructured: the decoupling phase active, the
+- [x] 1. The ROADMAP restructured: the decoupling phase active, the
       slices named (docs commit)
-- [ ] 2. chronos as a dependency + the wire contract: WireRequest/
+- [x] 2. chronos as a dependency + the wire contract: WireRequest/
       WireResponse/Transport (the injection point) + the FakeTransport
       (L1) — test-first (RED → GREEN)
 - [ ] 3. The SSE layer: adopt iceberg-work/sse (the incremental feed
@@ -78,4 +78,23 @@ design).
 
 ## Evidence
 
-- (in progress)
+- The ROADMAP restructure (bbfd96d) + the pure-Nim search amendment
+  (0d27e4d): chronos + iceberg-work/sse adopted, the OpenAI wire layer
+  ours, the dependency rule (production-proven or trivially absorbable).
+- The wire contract (2026-10-11): chronos in neopi.nimble (the local
+  4.0.4 cache resolves) + the sse sibling checkout (~/proyectos/sse, the
+  nimterm pattern — the fork seed) wired through nim.cfg; the wire
+  contract in src/neopi/wire.nim: WireRequest (value) / WireResponse
+  (status + the chunk iterator: next() yields "" at the EOF, close() is
+  the cancel path) / Transport (the abstract fetch) / FakeTransport (the
+  requests recorded for the assertions, the canned responses served in
+  order) — the injection point the pi study fixed. The methods +
+  chronos's {.async.} compose fine (the concern about the method+async
+  combination did not materialize). Test-first: RED (cannot open file:
+  neopi/wire) → GREEN. The compile lessons: seq.delete is single-arg in
+  Nim 2.2; `waitFor resp.next() == ""` parses as waitFor the whole
+  comparison — the checks parenthesize. One test bug caught (the second
+  fetch without a canned response → the honest AssertionDefect). nimble
+  test verbatim: "[Summary] 88 tests run (3.13s): 88 OK, 0 FAILED, 0
+  SKIPPED" + busted "13 successes" — the wire tests joined the dispatcher
+  (tp_all imports tp_wire).
