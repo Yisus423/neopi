@@ -74,7 +74,7 @@ design).
       engine and the TUI untouched; the whole suite green keyless
 - [x] 7. nimgent out of neopi.nimble (and the libpcre build note); tp_real
       → opt-in; AGENTS.md refreshed
-- [ ] 8. Work-unit commits on main; record evidence here
+- [x] 8. Work-unit commits on main; record evidence here
 
 ## Evidence
 
@@ -137,7 +137,7 @@ design).
   assert masked a timeout raise behind a defect). nimble test verbatim:
   "[Summary] 109 tests run (5.01s): 109 OK, 0 FAILED, 0 SKIPPED" + busted
   "13 successes".
-- The swap (2026-10-11, task 6): nimgent leaves the code. The type block
+- The swap (fe51fed, 2026-10-11, task 6): nimgent leaves the code. The type block
   moved verbatim out of provider.nim into src/neopi/primitives.nim because
   openai_compat.nim needs the caller-facing types (StreamEvent, Response,
   Tool...) while provider.nim must call streamChat — importing back would
@@ -205,7 +205,7 @@ design).
   openAI/openRouter/scriptedProvider) leaves the private transport nil and
   fails at the first turn; the constructors are the only supported path and
   the type's doc says so.
-- The packaging and the docs (2026-10-11, task 7): nimgent left the nimble
+- The packaging and the docs (950bcf1, 2026-10-11, task 7): nimgent left the nimble
   requires and the test task's libpcre block (the LD_LIBRARY_PATH putEnv) is
   gone. The proof is the run with the path removed:
   `env -u LD_LIBRARY_PATH nimble test` → "[Summary] 112 tests run (2.45s):
@@ -231,3 +231,27 @@ design).
   neopi.nimble, nim.cfg, AGENTS.md and the README — the only remaining
   mentions are the historical records (odd/tasks/*.md and the ROADMAP's
   slice-1 row, which describes that slice as it was).
+- The commits and the record (2026-10-11, task 8): the feature landed on main
+  as work units — bbfd96d (the ROADMAP restructured around the decoupling),
+  0d27e4d (the pure-Nim search that settled build-vs-reuse), 766f95c (the
+  wire contract), 6af207e (the SSE mapping + the captured fixtures), 17a5444
+  (the provider on chronos), 433adc1 (the scripted L2 transport), fe51fed
+  (the swap off nimgent), 950bcf1 (the tail: the build, the docs, the live
+  check opt-in), plus this evidence commit. The ROADMAP's Done table now
+  carries the five slices (11, 11.1, 11.2, 11.3 and the tail) and the
+  Remaining list dropped the provider item, so the TUI (#11) is first again.
+  The Engram mirror `odd/provider-chronos/tasks` holds the same 8/8 state
+  with the reservations.
+
+## What the layer looks like now
+
+    primitives.nim     the caller-facing types and exceptions
+    wire.nim           the transport contract (chronos + the in-memory fake)
+    openai_compat.nim  the OpenAI-compatible protocol (mapping, streamChat,
+                       the scripted transport)
+    provider.nim       the policy: Provider/Model, runTurn, invokeTool
+                       (re-exports primitives; expose.nim never moved)
+
+Next: the TUI on the same lessons (the grid with invalid regions, the
+terminal as an interface with a fake backend, chronos's loop as the owner),
+as the ROADMAP's #11.

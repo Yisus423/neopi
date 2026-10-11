@@ -29,12 +29,16 @@ verified basis of each slice.
 | 9. Session resume | `/resume` + the select overlay + the registry swap (`ed4a006`) | pi's SelectList pattern; the swap rebinds the registry pointer the cfunctions read dynamically |
 | 10. The TUI on nimterm | The backend swap: nimterm's widget tree, unicodedb widths, and markdown replace illwill; the async tangle (the timer, the keyPoller) out (`6d4a998`) | The user regretted illwill (the unicode widths, the markdown gap); nimterm's App is the loop owner — the deltas flush direct from the sink, no timer; the local checkout is the fork seed |
 | Fix. The nimterm tail | The dead illwill requires + the dead exitHook out; AGENTS.md/ARCHITECTURE.md refreshed (`71d88dd`) | The port left the tail behind: no module imports illwill anymore, and the docs still described the old recipe and the removed timer |
+| 11. The wire contract on chronos | `WireRequest`/`WireResponse`/`Transport` + the in-memory fake; chronos in the nimble (`766f95c`) | The injection point had to exist in the design, not be added later (the pi `client` pattern): the L1 tests run keyless over the fake, the production transport rides chronos |
+| 11.1. The SSE layer + the real fixtures | iceberg-work/sse adopted + the captured OpenRouter fixtures + the chunk → `StreamEvent` mapping (`6af207e`) | A dependency earns its place or gets absorbed: 588 spec-complete lines instead of writing the state machine; the fixtures replay the real wire (the reasoning field, the fragmented calls) instead of a guess |
+| 11.2. The openai-compatible provider | `buildChatRequest`/`chatHeaders`/`streamChat` on chronos — the cancellation contract + the per-read timeout (`17a5444`); the scripted transport encoding one step per fetch as the real wire (`433adc1`) | The same cancellation contract nimgent gave (expose builds the partial response) plus the timeout it never had; the L2 tests exercise the whole stack with zero nimgent |
+| 11.3. The swap off nimgent | The types out of `provider.nim` into `primitives.nim`, `Message` with the tool round-trip, the loop and the hook gates ported, the live transport defect fixed (`fe51fed`) | The anti-corruption layer absorbed its own replacement: `expose.nim` byte-identical and the 109 pre-existing tests unmodified still pin the contract. The live path had never run and crashed on a nil body reader |
+| Fix. The nimgent tail | The nimble requires and the libpcre path out; the live check opt-in (`NEOPI_LIVE_TEST`); AGENTS/README/ARCHITECTURE refreshed (`950bcf1`) | The build and the claims had to follow the code: `nimble test` is keyless and offline, and the docs still promised libpcre and described the layer as a wrapper over a dependency that no longer exists |
 
 ## Remaining (priority order)
 
 | # | Item | Notes |
 |---|---|---|
-| 10 | **Our own provider layer, on chronos** | The decoupling, provider first: the wire contract with the transport injectable (the pi `client` pattern), the SSE layer adopted (iceberg-work/sse — the incremental feed parser) mapped to our StreamEvent against the recorded OpenRouter fixtures, the scripted provider port, the Lua surface unchanged — the .env dependency leaves `nimble test` (`odd/tasks/provider-chronos.md`) |
 | 11 | **Our own TUI, on the same lessons** | The grid with invalid regions (the per-delta full render is the performance defect), the terminal as an interface with a fake backend (the pi FakeTerminal pattern — the pty harness demotes to smoke), chronos's loop as the owner |
 | 12 | lazy.npi (the lazy plugin manager, the user's plan) | An extension: `neopi.fs.list` + `require` on-trigger — everything against the surface |
 | 13 | The interface study: what else to copy from pi's TUI | The mouse, the themes, the widget borders; the markdown landed with nimterm; the transcript scroll keys pending |
@@ -48,7 +52,7 @@ verified basis of each slice.
 - **The `neopi --spec` CLI mode** — busted 2.3.0's standalone runner + the CLI
   parser fights (verified: the exit code does not reflect failures in this
   configuration). The specs themselves run today through the test-only runner
-  (`tests/busted_main.nim`, 4 spec files, verified green via `nimble test`); the
+  (`tests/busted_main.nim`, 5 spec files, verified green via `nimble test`); the
   CLI-integrated mode waits.
 - **An async API for Lua extensions** — Lua is synchronous; an async surface
   would need coroutines. The core is async inside already (chronos behind
