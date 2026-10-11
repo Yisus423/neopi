@@ -66,10 +66,10 @@ design).
       ~200-line state machine would duplicate it) + the OpenRouter wire
       fixtures (the capture script + the committed fixture) + our mapping
       SSE → StreamEvent — test-first
-- [ ] 4. The openai-compatible provider: the request builder (the dummy
+- [x] 4. The openai-compatible provider: the request builder (the dummy
       keys asserted) + the stream on chronos (the cancellation + the
       timeout) — test-first
-- [ ] 5. The scripted provider port (L2) without nimgent
+- [x] 5. The scripted provider port (L2) without nimgent
 - [ ] 6. The Lua surface swap: expose.nim rewired to the new layer; the
       engine and the TUI untouched; the whole suite green keyless
 - [ ] 7. nimgent out of neopi.nimble (and the libpcre build note); tp_real
@@ -122,3 +122,18 @@ design).
   was caught by the first test). nimble test verbatim: "[Summary] 98
   tests run (8.97s): 98 OK, 0 FAILED, 0 SKIPPED" + busted "13 successes"
   — the two L1 tests replay the real fixtures end-to-end keyless.
+- The scripted L2 transport (2026-10-11): ScriptedTransport in
+  openai_compat.nim — one ScriptStep per fetch, encoded as the real
+  OpenAI wire (scriptChunks: the inverse of the mapping), so the L2
+  tests exercise the FULL stack (the builder → the SSE parse → the
+  mapping → the callback) with zero nimgent. Test-first caught the
+  encoder bug: the JSON chunks went out without the `data: ` prefix (the
+  parser treats the unknown fields per spec — silently ignored; only the
+  [DONE] chunk, which had the prefix, ever mapped). The debug path that
+  found it: the stderr (the async stdout interleaves), the stage-by-stage
+  feed, and an isolated parser test (the parser was correct all along).
+  wire.nim gained newFakeWireResponse (the canned fields stay private to
+  the module) and the base close() is a no-op default (the abstract
+  assert masked a timeout raise behind a defect). nimble test verbatim:
+  "[Summary] 109 tests run (5.01s): 109 OK, 0 FAILED, 0 SKIPPED" + busted
+  "13 successes".

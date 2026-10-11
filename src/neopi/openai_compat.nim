@@ -197,3 +197,42 @@ proc streamChat*(transport: Transport, baseUrl: string, apiKey: string,
   ## waitFor pumps the loop while the stream runs.
   waitFor streamChatAsync(transport, baseUrl, apiKey, model, messages,
     onEvent, system, tools, readTimeoutMs)
+
+type ScriptedTransport* = ref object of Transport
+  ## The L2 test transport: one scripted reply per fetch, encoded as the
+  ## real OpenAI wire (the whole streamChat stack runs under test).
+  steps: seq[ScriptStep]
+  index: int
+
+proc scriptChunks*(step: ScriptStep): seq[string] =
+  ## One scripted step → the SSE wire chunks (the inverse of the mapping:
+  ## the text becomes a content delta, the tool calls the fragments, the
+  ## finish reason follows the shape, the usage rides its chunk).
+  var finish = "stop"
+  if step.toolCalls.len > 0:
+    finish = "tool_calls"
+    for call in step.toolCalls:
+      result.add "data: " & ($(%*{"choices": [{"delta": {"tool_calls": [{
+        "index": 0, "id": call.id, "type": "function", "function": {
+        "name": call.name, "arguments": $(call.args)}}]}}]})) & "\n\n"
+  if step.text.len > 0:
+    result.add "data: " & ($(%*{"choices": [{"delta": {"content":
+      step.text}}]})) & "\n\n"
+  result.add "data: " & ($(%*{"choices": [{"delta": {},
+    "finish_reason": finish}]})) & "\n\n"
+  result.add "data: " & ($(%*{"usage": {"prompt_tokens": step.usageInput,
+    "completion_tokens": 0}})) & "\n\n"
+  result.add "data: [DONE]\n\n"
+
+proc newScriptedTransport*(steps: seq[ScriptStep]): ScriptedTransport =
+  ScriptedTransport(steps: steps, index: 0)
+
+method fetch*(t: ScriptedTransport, req: WireRequest): Future[WireResponse] {.
+    async.} =
+  ## Serve the next scripted step's wire, or raise when the steps run out.
+  if t.index >= t.steps.len:
+    raise newException(ProviderError,
+      "the scripted provider ran out of steps")
+  let step = t.steps[t.index]
+  inc t.index
+  return newFakeWireResponse(200, scriptChunks(step))

@@ -53,6 +53,13 @@ proc newChronosTransport*(): ChronosTransport =
   ## A fresh production transport with its own connection pool.
   ChronosTransport(session: HttpSessionRef.new())
 
+proc newFakeWireResponse*(status: int, chunks: seq[string],
+    headers: seq[(string, string)] = @[]): FakeWireResponse =
+  ## An in-memory response serving the chunks in order (the fake's
+  ## constructor: the fields stay private to the module).
+  FakeWireResponse(status: status, headers: headers, chunks: chunks,
+    index: 0, closed: false)
+
 proc newFakeTransport*(): FakeTransport =
   ## A fresh FakeTransport with no canned responses and no recorded calls.
   FakeTransport(cannedResponses: @[], calls: @[])
@@ -60,8 +67,7 @@ proc newFakeTransport*(): FakeTransport =
 proc canned*(t: FakeTransport, status: int, chunks: seq[string],
     headers: seq[(string, string)] = @[]) =
   ## Queue one canned response: the next fetch serves it.
-  t.cannedResponses.add FakeWireResponse(status: status, headers: headers,
-    chunks: chunks, index: 0, closed: false)
+  t.cannedResponses.add newFakeWireResponse(status, chunks, headers)
 
 proc cannedResponse*(t: FakeTransport, resp: WireResponse) =
   ## Queue a pre-built response (a custom fake, e.g. a slow one).

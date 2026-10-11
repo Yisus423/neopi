@@ -235,3 +235,46 @@ suite "the openai provider on the wire":
     expect ProviderError:
       discard streamChat(fake, "https://x/v1", "test-key", "m", @[],
         proc (e: StreamEvent): bool = true, readTimeoutMs = 10)
+
+suite "the scripted provider transport (L2)":
+  test "the scripted steps stream as the real wire":
+    let t = newScriptedTransport(@[ScriptStep(text: "hello")])
+    var got: seq[StreamEvent] = @[]
+    let r = streamChat(t, "https://x/v1", "k", "m",
+      @[Message(role: roleUser, text: "q")],
+      proc (e: StreamEvent): bool =
+        got.add e
+        true)
+    check r.text == "hello"
+    check r.finishReason == frStop
+    check got[0].kind == seTextDelta
+    check got[0].text == "hello"
+    check got[^1].kind == seFinished
+
+  test "the tool call steps reassemble through the full stack":
+    let t = newScriptedTransport(@[
+      ScriptStep(toolCalls: @[("call-1", "write", %*{"path": "a"})])])
+    let r = streamChat(t, "https://x/v1", "k", "m", @[],
+      proc (e: StreamEvent): bool = true)
+    check r.finishReason == frToolUse
+    check r.toolCalls.len == 1
+    check r.toolCalls[0].id == "call-1"
+    check r.toolCalls[0].name == "write"
+    check r.toolCalls[0].args == parseJson("{\"path\": \"a\"}")
+
+  test "the usageInput rides the response":
+    let t = newScriptedTransport(@[ScriptStep(text: "ok", usageInput: 42)])
+    let r = streamChat(t, "https://x/v1", "k", "m", @[],
+      proc (e: StreamEvent): bool = true)
+    check r.inputTokens == 42
+
+  test "the out-of-steps raises":
+    let t = newScriptedTransport(@[ScriptStep(text: "only")])
+    discard streamChat(t, "https://x/v1", "k", "m", @[],
+      proc (e: StreamEvent): bool = true)
+    try:
+      discard streamChat(t, "https://x/v1", "k", "m", @[],
+        proc (e: StreamEvent): bool = true)
+      fail()
+    except ProviderError as e:
+      check "out of steps" in e.msg
