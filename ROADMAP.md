@@ -34,12 +34,14 @@ verified basis of each slice.
 
 | # | Item | Notes |
 |---|---|---|
-| 10 | lazy.npi (the lazy plugin manager, the user's plan) | An extension: `neopi.fs.list` + `require` on-trigger — everything against the surface |
-| 11 | The interface study: what else to copy from pi's TUI | The mouse, the themes, the widget borders; the markdown landed with nimterm; the transcript scroll keys pending |
-| 12 | Packaging (single-binary distribution) | The runtime ships with the binary |
-| 13 | Fork/clone to new files | Branch-in-place covers the MVP; forking copies the tree |
-| 14 | The tool execution alive during a run | bash runs frozen inside the turn's chunk (the threads/async gap pi and nimlet solve); the abort during a thinking pause waits for the next delta |
-| 15 | grep/find/ls agent tools | If the model needs them |
+| 10 | **Our own provider layer, on chronos** | The decoupling, provider first: the wire contract with the transport injectable (the pi `client` pattern), the SSE parser against the recorded OpenRouter fixtures, the scripted provider port, the Lua surface unchanged — the .env dependency leaves `nimble test` (`odd/tasks/provider-chronos.md`) |
+| 11 | **Our own TUI, on the same lessons** | The grid with invalid regions (the per-delta full render is the performance defect), the terminal as an interface with a fake backend (the pi FakeTerminal pattern — the pty harness demotes to smoke), chronos's loop as the owner |
+| 12 | lazy.npi (the lazy plugin manager, the user's plan) | An extension: `neopi.fs.list` + `require` on-trigger — everything against the surface |
+| 13 | The interface study: what else to copy from pi's TUI | The mouse, the themes, the widget borders; the markdown landed with nimterm; the transcript scroll keys pending |
+| 14 | Packaging (single-binary distribution) | The runtime ships with the binary |
+| 15 | Fork/clone to new files | Branch-in-place covers the MVP; forking copies the tree |
+| 16 | The tool execution alive during a run | bash runs frozen inside the turn's chunk (the threads/async gap pi and nimlet solve); the abort during a thinking pause waits for the next delta |
+| 17 | grep/find/ls agent tools | If the model needs them |
 
 ## Deferred
 
@@ -48,13 +50,9 @@ verified basis of each slice.
   configuration). The specs themselves run today through the test-only runner
   (`tests/busted_main.nim`, 4 spec files, verified green via `nimble test`); the
   CLI-integrated mode waits.
-- **A provider layer replacement of our own** — nimgent is a solo-dev risk:
-  3 of its author's 5 repos were deleted from GitHub (the author pivoted
-  niminal to C++). The local checkout is the fork seed; the anti-corruption
-  layer keeps the swap to one module.
 - **An async API for Lua extensions** — Lua is synchronous; an async surface
-  would need coroutines. The core is async inside already (nimgent's
-  streamText); the timer covers the TUI's responsiveness.
+  would need coroutines. The core is async inside already (chronos behind
+  the provider's waitFor); the key drain covers the TUI's responsiveness.
 - **`neopi.ui.select` (the dialogs API)** — commands ask the TUI for a
   selection (pi's ExtensionUIDialogs); deferred until an extension needs it.
 - **The global `~/.neopi/init.lua`** — the project config loads today; the
