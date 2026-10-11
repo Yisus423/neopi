@@ -70,7 +70,7 @@ design).
       keys asserted) + the stream on chronos (the cancellation + the
       timeout) — test-first
 - [x] 5. The scripted provider port (L2) without nimgent
-- [ ] 6. The Lua surface swap: expose.nim rewired to the new layer; the
+- [x] 6. The Lua surface swap: expose.nim rewired to the new layer; the
       engine and the TUI untouched; the whole suite green keyless
 - [ ] 7. nimgent out of neopi.nimble (and the libpcre build note); tp_real
       → opt-in; AGENTS.md refreshed
@@ -137,3 +137,71 @@ design).
   assert masked a timeout raise behind a defect). nimble test verbatim:
   "[Summary] 109 tests run (5.01s): 109 OK, 0 FAILED, 0 SKIPPED" + busted
   "13 successes".
+- The swap (2026-10-11, task 6): nimgent leaves the code. The type block
+  moved verbatim out of provider.nim into src/neopi/primitives.nim because
+  openai_compat.nim needs the caller-facing types (StreamEvent, Response,
+  Tool...) while provider.nim must call streamChat — importing back would
+  be a cycle. provider.nim re-exports primitives, so `import neopi/provider`
+  keeps the whole surface and expose.nim stays byte-identical (`git diff
+  --name-only` lists only provider/openai_compat/wire/primitives and the two
+  provider test files). ChatRole gained roleTool and Message gained
+  toolCalls/toolCallId (the pi message model), so the tool round-trip rides
+  ordinary Message values instead of a parallel wire type. provider.nim kept
+  the policy — the Provider/Model objects, the ported loop (runTurn) and the
+  hook gates (invokeTool) — and the independent verifier checked it line by
+  line against nimgent.nim:675-745: stop/finished/frStepLimit, one
+  seFinished per whole turn, the assistant message plus one tool message per
+  call appended for the next step, a raising callback or a hook error
+  becoming the tool-result text, and no `stream_text` hook in generate mode.
+  openai_compat.nim gained the roleTool/tool_calls/tool_call_id wire shape,
+  the transport-failure wrapping (a retryable ProviderError) and status/
+  retryable on the non-200 path; ScriptedTransport records its requests, so
+  the round trip is asserted on the wire. Invariant: `grep -rn nimgent src/
+  tests/` finds no import and no dependency — only stale comments in the
+  untouched expose.nim, cleaned in task 7.
+  RED observed (the writer's own evidence was lost to a harness stall): in a
+  scratch worktree at the pre-swap HEAD with the new tests copied in,
+  `nim c -r --hints:off --threads:on --mm:orc -o:build/tp_all
+  tests/tp_all.nim` fails with "tests/tp_provider.nim(51, 19) Error: type
+  mismatch / Expression: openAI("dummy-key", baseUrl =
+  "https://example.test/v1", transport = t)" — exit 1: the injection seam
+  and roleTool do not exist before the swap. GREEN: "[Summary] 112 tests run
+  (5.09s): 112 OK, 0 FAILED, 0 SKIPPED" + busted "13 successes / 0 failures
+  / 0 errors / 0 pending", exit 0 — the 109 pre-existing tests pass
+  unmodified (`git diff -U0 -- tests/` is pure additions, so the contract is
+  pinned by tests that did not move), and the live check ran for real:
+  "real streaming (OpenRouter) neopi provider works . (2.58s)". Two doc
+  comments that contradicted the code (the close path's awaited closeWait
+  and the nil-transport fallback) were corrected with the verification's
+  findings.
+- The live-path defect the swap surfaced (fixed in the same commit): the
+  real transport had never run live — task 4 tested it only with the
+  in-memory fake, and tp_real still rode nimgent. The first live run
+  SIGSEGV'd inside wire.nim's next(): chronos's response carries no reader
+  until getBodyReader() builds the chunked/sized chain, so `resp.reader.read`
+  dereferenced nil. Worse, `read(n)` waits for exactly n bytes — a chunk
+  boundary is not a buffer, so the SSE deltas would have been held back until
+  8KB accumulated. The fix builds the reader in fetch via getBodyReader() and
+  reads with readOnce (what has arrived; 0 at the EOF); closeWait(response)
+  already closes that reader and releases the connection.
+
+### Known limits (recorded from the task 6 verification — none is a regression)
+
+- Mid-stream failures (`resp.next()` on a dropped connection, an SSE payload
+  that is not JSON) escape the Nim boundary as chronos/JSON CatchableErrors,
+  not as ProviderError: the fetch and the HTTP status are wrapped, the body
+  stream is not. The Lua boundary still contains them (expose.nim's generic
+  handler turns them into a Lua error).
+- The argument JSON-Schema validation nimgent ran before each callback
+  (execOne's toolInputFailure) is not ported. The hooks gate and the tools'
+  own argument checks stand, and a bad call reaches the model as a tool
+  failure, but the pre-execution schema check is gone — a validator is a
+  follow-up of its own.
+- The mapping allocates the accumulator up to the wire's tool_calls index
+  (openai_compat.nim:79, `while acc.toolCalls.len <= idx`), so a hostile or
+  buggy gateway can request a huge allocation. Pre-existing (identical at
+  HEAD), found by the verification; worth bounding in the mapping's slice.
+- A Provider built as an object literal (instead of through
+  openAI/openRouter/scriptedProvider) leaves the private transport nil and
+  fails at the first turn; the constructors are the only supported path and
+  the type's doc says so.

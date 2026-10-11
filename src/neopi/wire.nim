@@ -39,8 +39,8 @@ type
 
   ChronosTransport* = ref object of Transport
     ## The production transport: chronos's HTTP client (the streaming body
-    ## reader, TLS via bearssl — no OpenSSL). One session, pooled
-    ## connections.
+    ## reader, TLS via bearssl — no OpenSSL). One session owning the
+    ## connection bookkeeping.
     session: HttpSessionRef
 
   ChronosWireResponse* = ref object of WireResponse
@@ -48,6 +48,7 @@ type
     ## transfer decoded underneath); close hands the connection back.
     resp: HttpClientResponseRef
     request: HttpClientRequestRef
+    reader: HttpBodyReader
 
 proc newChronosTransport*(): ChronosTransport =
   ## A fresh production transport with its own connection pool.
@@ -122,20 +123,25 @@ method fetch*(t: ChronosTransport, req: WireRequest): Future[WireResponse] {.
         headers = req.headers,
         body = req.body.toOpenArrayByte(0, req.body.high)).get()
   let resp = await send(request)
+  # The body reader is created here, not lazily: chronos's response carries no
+  # reader until `getBodyReader` builds the chunked/sized/bounded chain, and
+  # reading the nil field crashes (the live path never ran before).
   return ChronosWireResponse(status: resp.status, resp: resp,
-    request: request)
+    request: request, reader: resp.getBodyReader())
 
 method next*(r: ChronosWireResponse): Future[string] {.async.} =
-  ## The next decoded body chunk, or "" at the EOF.
-  let bytes = await r.resp.reader.read(8192)
-  if bytes.len == 0:
+  ## The next decoded body chunk, or "" at the EOF. `readOnce` returns what
+  ## has already arrived and 0 at the EOF; `read(n)` would wait for a full
+  ## buffer, holding the SSE deltas back.
+  var buffer = newString(8192)
+  let count = await r.reader.readOnce(addr buffer[0], buffer.len)
+  if count <= 0:
     return ""
-  var chunk = newString(bytes.len)
-  if bytes.len > 0:
-    copyMem(chunk[0].addr, bytes[0].unsafeAddr, bytes.len)
-  return chunk
+  buffer.setLen(count)
+  return buffer
 
 method close*(r: ChronosWireResponse) {.gcsafe, raises: [].} =
-  ## Hand the connection back without blocking: the stream loop's cleanup
-  ## awaits closeWait on the normal path, this covers the cancel path.
+  ## Hand the connection and the body reader back without blocking: the two
+  ## closeWait futures are spawned and complete on the next loop pump (the
+  ## method must stay synchronous and non-raising, so it cannot await).
   asyncSpawn allFutures(closeWait(r.resp), closeWait(r.request))

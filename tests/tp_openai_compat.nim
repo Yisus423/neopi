@@ -140,6 +140,13 @@ method next*(r: SlowFakeWireResponse): Future[string] {.async.} =
 proc newSlowResponse(delay: timer.Duration): SlowFakeWireResponse =
   SlowFakeWireResponse(status: 200, delay: delay)
 
+type FailingTransport = ref object of Transport
+  ## The always-failing transport: the failure-wrapping test's seam.
+
+method fetch*(t: FailingTransport, req: WireRequest): Future[WireResponse] {.
+    async.} =
+  raise newException(IOError, "boom")
+
 suite "the openai provider on the wire":
   test "the request builder shapes the chat completions payload":
     let req = buildChatRequest("m", @[
@@ -156,6 +163,29 @@ suite "the openai provider on the wire":
     let bare = buildChatRequest("m", @[])
     check not bare.hasKey("tools")
     check bare["messages"].len == 0
+
+  test "buildChatRequest emits the assistant tool_calls and the tool result":
+    let req = buildChatRequest("m", @[
+      Message(role: roleAssistant, text: "",
+        toolCalls: @[(id: "call-1", name: "add", args: %*{"a": 2, "b": 3})]),
+      Message(role: roleTool, text: "5", toolCallId: "call-1")])
+    let assistant = req["messages"][0]
+    check assistant["role"].getStr == "assistant"
+    check assistant["tool_calls"][0]["id"].getStr == "call-1"
+    check assistant["tool_calls"][0]["type"].getStr == "function"
+    check assistant["tool_calls"][0]["function"]["name"].getStr == "add"
+    let tool = req["messages"][1]
+    check tool["role"].getStr == "tool"
+    check tool["tool_call_id"].getStr == "call-1"
+
+  test "streamChat wraps a transport failure in a retryable ProviderError":
+    let failing = FailingTransport()
+    try:
+      discard streamChat(failing, "https://x/v1", "k", "m", @[],
+        proc (e: StreamEvent): bool = true)
+      fail()
+    except ProviderError as e:
+      check e.retryable == true
 
   test "the chat headers carry the bearer key":
     let headers = chatHeaders("test-key")

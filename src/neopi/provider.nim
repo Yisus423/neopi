@@ -1,252 +1,188 @@
-## Minimal provider primitives for neopi's core: generate, stream, and
-## model-callable tools.
+## The provider policy layer: the Provider/Model objects, the tool
+## round-trip loop, and the hook gates, streaming through openai_compat
+## over the injectable wire transport. The caller-facing types and
+## exceptions live in neopi/primitives (the protocol module names them
+## without importing this one); this module re-exports them, so
+## `import neopi/provider` keeps the whole surface.
 ##
-## This module is neopi's anti-corruption layer over nimgent. Nimgent types and
-## exceptions stay inside this file; callers see neopi-owned types only. The
-## surface is primitives on purpose (the neovim-model boundary): the core
+## The surface is primitives on purpose (the neovim-model boundary): the core
 ## exposes primitives, and composition such as agents and conversations happens
 ## above this layer.
 
 import std/json
 import neopi/hooks
-import nimgent as ng
+import neopi/primitives
+import neopi/openai_compat
+import neopi/wire
+
+export primitives
 
 # Same file-scope typedef as lua.nim/hooks.nim: provider.nim's generated C
 # materializes the HookBus object, whose field holds the opaque state type.
 {.emit: """/*TYPESECTION*/ typedef struct lua_State lua_State;""".}
-import nimgent/providers/openai as ngOpenAI
-import nimgent/providers/openrouter as ngOpenRouter
-import nimgent/testing as ngTesting
+
+const
+  defaultOpenAiBase* = "https://api.openai.com/v1"
+    ## The OpenAI chat-completions base URL. `openAI` appends
+    ## "/chat/completions"; pass `baseUrl` to point at a compatible gateway.
+  defaultOpenRouterBase* = "https://openrouter.ai/api/v1"
+    ## The OpenRouter chat-completions base URL.
+  defaultReadTimeoutMs = 300_000
+    ## The per-read bound on the stream. The previous layer bounded a whole
+    ## request at 300s; 5 silent minutes per read keeps that spirit while
+    ## letting a progressing stream keep going.
 
 type
-  ProviderError* = object of CatchableError
-    ## Raised for provider, transport, or request failures.
-    overflow*: bool   ## True when the request exceeded the context window.
-    retryable*: bool  ## True for 429 / 5xx / transport failures.
-    status*: int      ## HTTP status, or 0 when there was no response.
-
-  CancelledError* = object of ProviderError
-    ## Raised when the caller cancels a stream or request.
-
   Provider* = object
-    ## A provider configuration and its backing adapter. `impl` stays private:
-    ## swapping nimgent for another backend must not touch callers.
+    ## A provider configuration and its backing wire transport. `transport`
+    ## stays private: swapping the backend must not touch callers. Build a
+    ## Provider with `openAI`/`openRouter`/`scriptedProvider`, which always set
+    ## it; the optional `transport` argument on the first two is the injection
+    ## seam the L1/L2 tests use.
     name*: string
     apiKey*: string
     baseUrl*: string
-    impl: ng.Provider
+    transport: Transport
 
   Model* = object
     ## A provider plus the model identifier to request.
     provider*: Provider
     id*: string
 
-  ChatRole* = enum
-    ## Message author role sent to the model.
-    roleSystem = "system"
-    roleUser = "user"
-    roleAssistant = "assistant"
+proc openAI*(apiKey: string, baseUrl = "", transport: Transport = nil): Provider =
+  ## OpenAI-compatible provider over chat completions. `baseUrl` overrides the
+  ## endpoint (a BASE url; "/chat/completions" is appended), so any compatible
+  ## gateway (OpenRouter, DeepInfra, a local server) works. `transport`
+  ## injects the wire transport (the pi `client` option pattern); nil uses the
+  ## production chronos transport. neopi speaks chat completions; the switch
+  ## from the Responses API is intentional.
+  let url = if baseUrl.len > 0: baseUrl else: defaultOpenAiBase
+  let wire = if transport.isNil: Transport(newChronosTransport()) else: transport
+  Provider(name: "openai", apiKey: apiKey, baseUrl: url, transport: wire)
 
-  Message* = object
-    ## One role and its text.
-    role*: ChatRole
-    text*: string
-
-  FinishReason* = enum
-    ## Why the model stopped.
-    frUnknown
-    frEndTurn
-    frToolUse
-    frMaxTokens
-    frStop
-    frStepLimit
-    frCancelled
-
-  Response* = object
-    ## One generated answer with its usage metadata and the tool calls the
-    ## model requested (empty when the model answered without tools).
-    text*: string
-    finishReason*: FinishReason
-    inputTokens*: int
-    outputTokens*: int
-    requestId*: string
-    toolCalls*: seq[tuple[id: string, name: string, args: JsonNode]]
-
-  Tool* = object
-    ## A model-callable tool: JSON Schema in, callback result back. A callback
-    ## that raises reports a tool failure to the model instead of aborting.
-    name*: string
-    description*: string
-    inputSchema*: JsonNode
-    execute*: proc (args: JsonNode): string {.closure.}
-
-  StreamEventKind* = enum
-    ## Kind of normalized streaming event. Thinking deltas are not surfaced yet.
-    seTextDelta
-    seToolCallDelta
-    seFinished
-
-  StreamEvent* = object
-    ## One streaming event: text, a tool-call fragment, or completion.
-    case kind*: StreamEventKind
-    of seTextDelta:
-      text*: string
-    of seToolCallDelta:
-      toolCallId*: string
-      toolName*: string
-      toolArgs*: string  ## Argument fragment; empty when only the name arrived.
-    of seFinished:
-      discard
-
-  StreamCallback* = proc (e: StreamEvent): bool {.closure, gcsafe,
-      raises: [CatchableError].}
-    ## Receives stream events. Return false to cancel the stream, which raises
-    ## CancelledError once the provider call unwinds. A callback may raise
-    ## (the Lua sinks surface their handler errors Nim-side; the stream's
-    ## caller contains them).
-
-  ScriptStep* = object
-    ## One scripted provider reply for application tests. A step with `text`
-    ## replies with that text; otherwise it replies with its tool calls.
-    ## `usageInput` overrides the reply's reported input tokens (0 keeps the
-    ## default zero), so the agent loop's compaction trigger sees a real
-    ## token estimate in tests.
-    text*: string
-    usageInput*: int
-    toolCalls*: seq[tuple[id: string, name: string, args: JsonNode]]
-
-proc openAI*(apiKey: string, baseUrl = ""): Provider =
-  ## OpenAI-compatible provider. `baseUrl` overrides the endpoint, so any
-  ## compatible gateway (OpenRouter, DeepInfra, a local server) works.
-  Provider(name: "openai", apiKey: apiKey, baseUrl: baseUrl,
-    impl: ngOpenAI.openAI(apiKey, baseUrl))
-
-proc openRouter*(apiKey: string): Provider =
-  ## OpenRouter provider using its OpenAI-compatible chat completions API.
-  Provider(name: "openrouter", apiKey: apiKey,
-    impl: ngOpenRouter.openRouter(apiKey))
+proc openRouter*(apiKey: string, transport: Transport = nil): Provider =
+  ## OpenRouter provider over its OpenAI-compatible chat completions API.
+  ## `transport` injects the wire transport; nil uses the production chronos
+  ## transport.
+  let wire = if transport.isNil: Transport(newChronosTransport()) else: transport
+  Provider(name: "openrouter", apiKey: apiKey, baseUrl: defaultOpenRouterBase,
+    transport: wire)
 
 proc scriptedProvider*(steps: seq[ScriptStep]): Provider =
-  ## Deterministic provider for tests: one scripted reply per request.
-  var scripted: seq[ng.ProviderResponse]
-  for step in steps:
-    let usage = ng.Usage(inputTokens: step.usageInput)
-    if step.text.len > 0:
-      scripted.add ngTesting.textResponse(step.text, usage = usage)
-    else:
-      var blocks: seq[ng.ContentBlock]
-      for call in step.toolCalls:
-        blocks.add ng.toolUse(call.id, call.name, call.args)
-      scripted.add ng.ProviderResponse(content: blocks, finishReason: ng.frToolUse,
-        usage: usage)
-  Provider(name: "fake", apiKey: "", baseUrl: "",
-    impl: ngTestIng.FakeProvider(name: "fake", responses: scripted))
+  ## Deterministic provider for tests: one scripted reply per request, served
+  ## through the full streamChat stack over an in-memory transport. The name
+  ## stays "fake" (the exposure tests assert it).
+  Provider(name: "fake", transport: newScriptedTransport(steps))
 
 proc model*(p: Provider, id: string): Model =
   ## Create a model reference for a provider and model ID.
   Model(provider: p, id: id)
 
-proc splitSystem(messages: seq[Message]): tuple[system: string, rest: seq[ng.Message]] =
-  ## Split system-role texts out of the message list. Nimgent accepts one
-  ## system prompt string, so several system messages join with newlines.
+proc splitSystem(messages: seq[Message]): tuple[system: string, rest: seq[Message]] =
+  ## Split system-role texts out of the message list. The wire carries one
+  ## system prompt string, so several system messages join with newlines;
+  ## every other message (including a tool result) passes through untouched.
   for msg in messages:
     case msg.role
     of roleSystem:
       if result.system.len > 0: result.system.add "\n"
       result.system.add msg.text
-    of roleUser:
-      result.rest.add ng.userMessage(msg.text)
-    of roleAssistant:
-      result.rest.add ng.assistantMessage(msg.text)
+    of roleUser, roleAssistant, roleTool:
+      result.rest.add msg
 
-proc mappedTools(tools: seq[Tool], bus: HookBus): seq[ng.Tool] =
-  ## Map neopi tools onto nimgent runtime-schema tools. With a bus, the
-  ## `tool_call` hook can block (a hook_denied denial) or rewrite the
-  ## arguments before the callback, and `tool_result` can rewrite the output
-  ## after it. A callback result becomes both the provider-facing output and
-  ## the retained JSON value.
+proc canExecute(tools: seq[Tool]): bool =
+  ## True when at least one tool carries an execute callback (the tool loop
+  ## can continue only then).
   for t in tools:
-    let tool = t  # explicit copy: a lent loop view cannot be captured
-    result.add ng.rawTool(tool.name, tool.description, tool.inputSchema,
-      proc (context: ng.ToolContext, input: JsonNode): ng.ToolResult =
-        var effective = input
-        if not bus.isNil:
-          var payload = %*{"tool": tool.name}
-          payload["args"] = input
-          let verdict = bus.emit("tool_call", payload)
-          if not verdict.allowed:
-            return ng.toolFailure("hook_denied", verdict.reason)
-          if verdict.patched and not verdict.payload.isNil and
-              verdict.payload.hasKey("args"):
-            effective = verdict.payload["args"]
-        let output = tool.execute(effective)
-        var sent = output
-        if not bus.isNil:
-          let verdict = bus.emit("tool_result",
-            %*{"tool": tool.name, "output": output})
-          if verdict.patched and not verdict.payload.isNil and
-              verdict.payload.hasKey("output"):
-            sent = verdict.payload["output"].getStr
-        ng.ToolResult(output: sent, value: %sent))
+    if not t.execute.isNil:
+      return true
 
-proc toFinishReason(reason: ng.FinishReason): FinishReason =
-  ## Map a nimgent finish reason onto the neopi enum.
-  case reason
-  of ng.frEndTurn: frEndTurn
-  of ng.frToolUse: frToolUse
-  of ng.frMaxTokens: frMaxTokens
-  of ng.frStop: frStop
-  of ng.frStepLimit: frStepLimit
-  of ng.frUnknown: frUnknown
+proc findTool(tools: seq[Tool], name: string): int =
+  ## The index of the tool named `name`, or -1 when it is not registered.
+  result = -1
+  for i, t in tools:
+    if t.name == name:
+      return i
 
-proc toResponse(r: ng.ProviderResponse): Response =
-  ## Map a nimgent response onto the neopi response shape, including the tool
-  ## calls the model requested (the local toolUse blocks).
-  result = Response(text: ng.text(r),
-    finishReason: toFinishReason(r.finishReason),
-    inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens,
-    requestId: r.requestId)
-  for call in r.toolCalls:
-    result.toolCalls.add (id: call.id, name: call.name, args: call.input)
+proc invokeTool(tool: Tool, bus: HookBus, input: JsonNode): string =
+  ## Execute one tool through the hook gates. With a bus, `tool_call` can
+  ## block (the model sees the denial reason — this is the bash approval gate)
+  ## or rewrite the arguments before the callback, and `tool_result` can
+  ## rewrite the output after it. A Lua hook error or a raising callback is
+  ## reported to the model as the failure text, never aborting the turn (the
+  ## failure-as-tool-result contract).
+  try:
+    var effective = input
+    if not bus.isNil:
+      var payload = %*{"tool": tool.name}
+      payload["args"] = input
+      let verdict = bus.emit("tool_call", payload)
+      if not verdict.allowed:
+        return verdict.reason
+      if verdict.patched and not verdict.payload.isNil and
+          verdict.payload.hasKey("args"):
+        effective = verdict.payload["args"]
+    let output = tool.execute(effective)
+    var sent = output
+    if not bus.isNil:
+      let verdict = bus.emit("tool_result",
+        %*{"tool": tool.name, "output": output})
+      if verdict.patched and not verdict.payload.isNil and
+          verdict.payload.hasKey("output"):
+        sent = verdict.payload["output"].getStr
+    return sent
+  except CatchableError as e:
+    return e.msg
 
-proc adaptStream(cb: StreamCallback): ng.StreamCallback =
-  ## Map nimgent stream events onto the neopi callback. Thinking deltas and
-  ## wake events are not surfaced yet; they neither emit nor cancel.
-  proc (ev: ng.StreamEvent): bool =
-    case ev.kind
-    of ng.seTextDelta:
-      cb(StreamEvent(kind: seTextDelta, text: ev.text))
-    of ng.seToolCallDelta:
-      cb(StreamEvent(kind: seToolCallDelta, toolCallId: ev.toolCallId,
-        toolName: ev.toolName, toolArgs: ev.toolArgs))
-    of ng.seFinished:
-      cb(StreamEvent(kind: seFinished))
-    else:
-      true
+proc executeCall(tools: seq[Tool], bus: HookBus, call: ToolCall): string =
+  ## Execute one model-requested call. Unparsable arguments and unknown tool
+  ## names report a failure to the model instead of raising.
+  if call.args.kind == JNull:
+    return "invalid_arguments: the tool arguments are not valid JSON"
+  let idx = findTool(tools, call.name)
+  if idx < 0:
+    return "Unknown tool: " & call.name
+  invokeTool(tools[idx], bus, call.args)
 
-proc hookStream(bus: HookBus, inner: ng.StreamCallback): ng.StreamCallback =
-  ## Wrap a mapped stream callback with the observe-only `stream_text` hook:
-  ## fire the hook on text deltas, then forward the event to the inner
-  ## callback. The hook result cannot cancel; it is discarded, and
-  ## cancellation still flows through the inner callback.
-  proc (ev: ng.StreamEvent): bool =
-    if ev.kind == ng.seTextDelta:
-      discard bus.emit("stream_text", %*{"text": ev.text})
-    inner(ev)
-
-proc translate(e: ref CatchableError) {.noinline, noreturn.} =
-  ## Re-raise a failure as a neopi-owned exception at the boundary. Failures
-  ## nimgent does not own pass through unchanged.
-  if e of ng.CancelledError:
-    raise newException(CancelledError, e.msg)
-  if e of ng.ProviderError:
-    let source = cast[ref ng.ProviderError](e)
-    let translated = newException(ProviderError, e.msg)
-    translated.overflow = source.overflow
-    translated.retryable = source.retryable
-    translated.status = source.status
-    raise translated
-  raise e
+proc runTurn(m: Model, system: string, conversation: seq[Message],
+             tools: seq[Tool], maxSteps: Positive, bus: HookBus,
+             onEvent: StreamCallback): Response =
+  ## The tool round-trip loop: stream one model turn, execute the requested
+  ## calls while the loop can continue, feed the assistant call and the tool
+  ## results back, and stop at `maxSteps` (the cap reports frStepLimit when the
+  ## model still asked for tools). In generate mode (`onEvent` nil) no event
+  ## is forwarded and no hook fires; in stream mode the per-step finish is
+  ## swallowed and exactly one seFinished is emitted for the whole turn. A
+  ## cancellation (onEvent returning false) unwinds without any seFinished.
+  if conversation.len == 0:
+    raise newException(ProviderError, "the request needs at least one message")
+  var messages = conversation
+  var step = 1
+  while true:
+    let inner = proc (e: StreamEvent): bool =
+      if onEvent.isNil:
+        return true
+      if e.kind == seFinished:
+        return true
+      if e.kind == seTextDelta and not bus.isNil:
+        discard bus.emit("stream_text", %*{"text": e.text})
+      onEvent(e)
+    result = streamChat(m.provider.transport, m.provider.baseUrl,
+      m.provider.apiKey, m.id, messages, inner, system = system, tools = tools,
+      readTimeoutMs = defaultReadTimeoutMs)
+    let stop = result.toolCalls.len == 0 or not canExecute(tools)
+    if stop or step >= maxSteps:
+      if not stop:
+        result.finishReason = frStepLimit
+      break
+    messages.add Message(role: roleAssistant, text: result.text,
+      toolCalls: result.toolCalls)
+    for call in result.toolCalls:
+      messages.add Message(role: roleTool,
+        text: executeCall(tools, bus, call), toolCallId: call.id)
+    inc step
+  if not onEvent.isNil:
+    discard onEvent(StreamEvent(kind: seFinished))
 
 proc generate*(m: Model, prompt: string, tools: seq[Tool] = @[],
                maxSteps: Positive = 1, system = "", bus: HookBus = nil): Response =
@@ -254,26 +190,15 @@ proc generate*(m: Model, prompt: string, tools: seq[Tool] = @[],
   ## `maxSteps` caps model turns; 1 means no continuation after a tool call.
   ## With a bus, tool calls and results fire the `tool_call`/`tool_result`
   ## hooks.
-  try:
-    toResponse(ng.generateText(
-      ng.LanguageModel(provider: m.provider.impl, id: m.id),
-      prompt = prompt, system = system, tools = mappedTools(tools, bus),
-      maxSteps = maxSteps))
-  except CatchableError as e:
-    translate(e)
+  runTurn(m, system, @[Message(role: roleUser, text: prompt)], tools, maxSteps,
+    bus, nil)
 
 proc generate*(m: Model, messages: seq[Message], tools: seq[Tool] = @[],
                maxSteps: Positive = 1, bus: HookBus = nil): Response =
   ## One text completion from an ordered message list. With a bus, tool calls
   ## and results fire the `tool_call`/`tool_result` hooks.
   let split = splitSystem(messages)
-  try:
-    toResponse(ng.generateText(
-      ng.LanguageModel(provider: m.provider.impl, id: m.id),
-      messages = split.rest, system = split.system,
-      tools = mappedTools(tools, bus), maxSteps = maxSteps))
-  except CatchableError as e:
-    translate(e)
+  runTurn(m, split.system, split.rest, tools, maxSteps, bus, nil)
 
 proc stream*(m: Model, prompt: string, onEvent: StreamCallback,
              tools: seq[Tool] = @[], maxSteps: Positive = 1, system = "",
@@ -281,18 +206,8 @@ proc stream*(m: Model, prompt: string, onEvent: StreamCallback,
   ## Stream text deltas, with tool round-trips when the model calls a tool.
   ## The response holds the full text once the stream finishes. With a bus,
   ## text deltas fire the observe-only `stream_text` hook.
-  try:
-    let adapted =
-      if not bus.isNil:
-        hookStream(bus, adaptStream(onEvent))
-      else:
-        adaptStream(onEvent)
-    toResponse(ng.streamText(
-      ng.LanguageModel(provider: m.provider.impl, id: m.id),
-      adapted, prompt = prompt, system = system,
-      tools = mappedTools(tools, bus), maxSteps = maxSteps))
-  except CatchableError as e:
-    translate(e)
+  runTurn(m, system, @[Message(role: roleUser, text: prompt)], tools, maxSteps,
+    bus, onEvent)
 
 proc stream*(m: Model, messages: seq[Message], onEvent: StreamCallback,
              tools: seq[Tool] = @[], maxSteps: Positive = 1,
@@ -300,15 +215,4 @@ proc stream*(m: Model, messages: seq[Message], onEvent: StreamCallback,
   ## Stream text deltas from an ordered message list. With a bus, text
   ## deltas fire the observe-only `stream_text` hook.
   let split = splitSystem(messages)
-  try:
-    let adapted =
-      if not bus.isNil:
-        hookStream(bus, adaptStream(onEvent))
-      else:
-        adaptStream(onEvent)
-    toResponse(ng.streamText(
-      ng.LanguageModel(provider: m.provider.impl, id: m.id),
-      adapted, messages = split.rest, system = split.system,
-      tools = mappedTools(tools, bus), maxSteps = maxSteps))
-  except CatchableError as e:
-    translate(e)
+  runTurn(m, split.system, split.rest, tools, maxSteps, bus, onEvent)

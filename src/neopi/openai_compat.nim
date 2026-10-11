@@ -7,7 +7,7 @@
 import std/json
 import chronos
 import neopi/wire
-import neopi/provider except CancelledError
+import neopi/primitives except CancelledError
 import sse
 
 type
@@ -108,16 +108,31 @@ proc roleStr(r: ChatRole): string =
   of roleSystem: "system"
   of roleUser: "user"
   of roleAssistant: "assistant"
+  of roleTool: "tool"
 
 proc buildChatRequest*(model: string, messages: seq[Message], system = "",
     tools: seq[Tool] = @[], stream = true): JsonNode =
   ## The chat-completions request body. The system message leads when set;
-  ## the tools key stays out when there are none (the wire omits it).
+  ## the tools key stays out when there are none (the wire omits it). An
+  ## assistant message's requested tool calls ride a `tool_calls` array, and
+  ## a tool result message carries its `tool_call_id`; the plain-message
+  ## output stays byte-identical.
   var msgs = newJArray()
   if system.len > 0:
     msgs.add %*{"role": "system", "content": system}
   for m in messages:
-    msgs.add %*{"role": roleStr(m.role), "content": m.text}
+    var entry = newJObject()
+    entry["role"] = %roleStr(m.role)
+    entry["content"] = %m.text
+    if m.toolCalls.len > 0:
+      var calls = newJArray()
+      for call in m.toolCalls:
+        calls.add %*{"id": call.id, "type": "function", "function":
+          {"name": call.name, "arguments": $call.args}}
+      entry["tool_calls"] = calls
+    if m.toolCallId.len > 0:
+      entry["tool_call_id"] = %m.toolCallId
+    msgs.add entry
   result = %*{"model": model, "messages": msgs, "stream": stream}
   if tools.len > 0:
     var arr = newJArray()
@@ -133,7 +148,7 @@ proc chatHeaders*(apiKey: string): seq[(string, string)] =
     ("Content-Type", "application/json")]
 
 proc streamChatAsync*(transport: Transport, baseUrl: string, apiKey: string,
-    model: string, messages: seq[Message], onEvent: provider.StreamCallback,
+    model: string, messages: seq[Message], onEvent: primitives.StreamCallback,
     system = "", tools: seq[Tool] = @[], readTimeoutMs = 0):
     Future[Response] {.async: (raises: [CatchableError]).} =
   ## One streamed model turn over the wire: the SSE parser and the mapping
@@ -144,7 +159,17 @@ proc streamChatAsync*(transport: Transport, baseUrl: string, apiKey: string,
   let wireReq = WireRequest(url: baseUrl & "/chat/completions",
     httpMethod: "POST", headers: chatHeaders(apiKey),
     body: $buildChatRequest(model, messages, system, tools))
-  let resp = await transport.fetch(wireReq)
+  var resp: WireResponse
+  try:
+    resp = await transport.fetch(wireReq)
+  except CancelledError:
+    raise
+  except ProviderError:
+    raise
+  except CatchableError as e:
+    var err = newException(ProviderError, "the transport failed: " & e.msg)
+    err.retryable = true
+    raise err
   if resp.status != 200:
     var errBody = ""
     for _ in 0 ..< 32:
@@ -154,8 +179,11 @@ proc streamChatAsync*(transport: Transport, baseUrl: string, apiKey: string,
       errBody.add chunk
       if errBody.len > 8192:
         break
-    raise newException(ProviderError,
+    var err = newException(ProviderError,
       "the provider returned " & $resp.status & ": " & errBody)
+    err.status = resp.status
+    err.retryable = resp.status == 429 or resp.status >= 500
+    raise err
   var acc: OaiAccum
   var parser = initSSEParser()
   try:
@@ -180,7 +208,8 @@ proc streamChatAsync*(transport: Transport, baseUrl: string, apiKey: string,
           continue
         for e in mapOaiChunk(ev.data, acc):
           if not onEvent(e):
-            raise newException(provider.CancelledError, "the stream was cancelled")
+            raise newException(primitives.CancelledError,
+              "the stream was cancelled")
       if acc.done:
         break
     discard onEvent(StreamEvent(kind: seFinished))
@@ -191,7 +220,7 @@ proc streamChatAsync*(transport: Transport, baseUrl: string, apiKey: string,
     requestId: acc.requestId, toolCalls: acc.toToolCalls())
 
 proc streamChat*(transport: Transport, baseUrl: string, apiKey: string,
-    model: string, messages: seq[Message], onEvent: provider.StreamCallback,
+    model: string, messages: seq[Message], onEvent: primitives.StreamCallback,
     system = "", tools: seq[Tool] = @[], readTimeoutMs = 0): Response =
   ## The blocking boundary (the shape the Lua surface calls): chronos's
   ## waitFor pumps the loop while the stream runs.
@@ -200,20 +229,24 @@ proc streamChat*(transport: Transport, baseUrl: string, apiKey: string,
 
 type ScriptedTransport* = ref object of Transport
   ## The L2 test transport: one scripted reply per fetch, encoded as the
-  ## real OpenAI wire (the whole streamChat stack runs under test).
+  ## real OpenAI wire (the whole streamChat stack runs under test). Every
+  ## request is recorded for the assertions: the second fetch's body is what
+  ## the tool round-trip test parses.
   steps: seq[ScriptStep]
   index: int
+  requests*: seq[WireRequest]
 
 proc scriptChunks*(step: ScriptStep): seq[string] =
   ## One scripted step → the SSE wire chunks (the inverse of the mapping:
-  ## the text becomes a content delta, the tool calls the fragments, the
-  ## finish reason follows the shape, the usage rides its chunk).
+  ## the text becomes a content delta, the tool calls the fragments at their
+  ## own index, the finish reason follows the shape, the usage rides its
+  ## chunk).
   var finish = "stop"
   if step.toolCalls.len > 0:
     finish = "tool_calls"
-    for call in step.toolCalls:
+    for i, call in step.toolCalls:
       result.add "data: " & ($(%*{"choices": [{"delta": {"tool_calls": [{
-        "index": 0, "id": call.id, "type": "function", "function": {
+        "index": i, "id": call.id, "type": "function", "function": {
         "name": call.name, "arguments": $(call.args)}}]}}]})) & "\n\n"
   if step.text.len > 0:
     result.add "data: " & ($(%*{"choices": [{"delta": {"content":
@@ -225,11 +258,14 @@ proc scriptChunks*(step: ScriptStep): seq[string] =
   result.add "data: [DONE]\n\n"
 
 proc newScriptedTransport*(steps: seq[ScriptStep]): ScriptedTransport =
-  ScriptedTransport(steps: steps, index: 0)
+  ## The scripted transport with no recorded requests yet.
+  ScriptedTransport(steps: steps, index: 0, requests: @[])
 
 method fetch*(t: ScriptedTransport, req: WireRequest): Future[WireResponse] {.
     async.} =
-  ## Serve the next scripted step's wire, or raise when the steps run out.
+  ## Record the request and serve the next scripted step's wire, or raise
+  ## when the steps run out.
+  t.requests.add req
   if t.index >= t.steps.len:
     raise newException(ProviderError,
       "the scripted provider ran out of steps")

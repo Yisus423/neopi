@@ -1,4 +1,5 @@
 import std/json
+import neopi/openai_compat
 import neopi/provider
 import unittest2
 
@@ -42,6 +43,34 @@ suite "provider primitives":
         $(args["a"].getInt + args["b"].getInt))
     let r = m.generate("what is 2 plus 3?", tools = @[addTool], maxSteps = 2)
     check r.text == "2 + 3 is 5"
+
+  test "the tool round-trip replays the calls on the wire":
+    let t = newScriptedTransport(@[
+      ScriptStep(toolCalls: @[("call-1", "add", %*{"a": 2, "b": 3})]),
+      ScriptStep(text: "2 + 3 is 5")])
+    let m = openAI("dummy-key", baseUrl = "https://example.test/v1",
+      transport = t).model("test")
+    let addTool = Tool(
+      name: "add",
+      description: "Add two numbers",
+      inputSchema: %*{"type": "object",
+        "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+        "required": ["a", "b"]},
+      execute: proc (args: JsonNode): string =
+        $(args["a"].getInt + args["b"].getInt))
+    let r = m.generate("what is 2 plus 3?", tools = @[addTool], maxSteps = 2)
+    check r.text == "2 + 3 is 5"
+    check t.requests.len == 2
+    let body = parseJson(t.requests[1].body)
+    let msgs = body["messages"]
+    let last = msgs.len - 1
+    let toolMsg = msgs[last]
+    check toolMsg["role"].getStr == "tool"
+    check toolMsg["tool_call_id"].getStr == "call-1"
+    check toolMsg["content"].getStr == "5"
+    let assistant = msgs[last - 1]
+    check assistant["role"].getStr == "assistant"
+    check assistant["tool_calls"][0]["function"]["name"].getStr == "add"
 
   test "a raising tool callback reports a failure to the model":
     let m = scriptedProvider(@[
