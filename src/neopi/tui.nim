@@ -338,9 +338,13 @@ proc tuiOnEventCB(L: LuaState): cint {.cdecl.} =
   let event = jsonOfStack(L, 1)
   if event.kind == JObject and event.hasKey("text"):
     let delta = event["text"].getStr("")
-    state[].transcriptW.transcript.apply(AgentUiEvent(kind: ueTextDelta,
-      text: delta))
-    state[].transcriptW.invalidateLines()
+    # The WIDGET's apply, not the model's: the model bumps the mutated item's
+    # `revision`, the widget clears `linesValid`, and the per-item line caches
+    # compare against that revision — so only the tail item re-renders. The
+    # model's apply plus `invalidateLines()` (the sledgehammer) reset EVERY
+    # cache revision and re-wrapped the whole transcript per streamed token:
+    # 74 ms at 50 entries and 6.6 s at 5000, measured by bench/tui_bench.nim.
+    state[].transcriptW.apply(AgentUiEvent(kind: ueTextDelta, text: delta))
   let abort = feedKeys(state)
   flushFrame(state)
   lua_pushboolean(L, cint(ord(not abort)))

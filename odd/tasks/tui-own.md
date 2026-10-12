@@ -159,9 +159,35 @@ The basis, so the plan is not built on the ROADMAP note's assumptions
   it is a task-2/3 item. The peak RSS (28.2 MB at 5000 entries) is already
   inside the <50 MB target.
 
-  What this buys task 2: the replacement does not need a better canvas — the
-  canvas, the damaged-row present (frame.nim:17) and the flat full render
-  are already good. It needs a GRANULAR line invalidation owned by us (the
-  tail-only delta) and a footer that stops scanning the history per frame.
-  Both are a few lines, which makes a stopgap on top of nimterm viable
-  while the replacement proceeds for the trust reason alone.
+  **The fix (same day, one line of OURS).** The second finding is that the
+  sledgehammer is in our code. nimterm's transcript MODEL bumps the mutated
+  item's `revision` on every event (transcript.nim:73, 85, 104, ...) and
+  `ensureLayout` re-renders only the items whose revision changed
+  (widgets/transcript.nim:233) — but neopi's sink called the MODEL's apply
+  and then `invalidateLines()`, which resets EVERY cache revision
+  (widgets/transcript.nim:88). Calling the WIDGET's apply instead
+  (widgets/transcript.nim:212 — it clears `linesValid` and leaves the
+  per-item caches to the revision check) is the entire fix: one line in
+  `tuiOnEventCB` (src/neopi/tui.nim). Re-measured with the same harness,
+  whose delta now runs the sink's own path and carries a correctness guard
+  (the delta must reach the transcript AND appear on the presented canvas —
+  a cheaper delta that stops rendering would be a wrong fix):
+
+  | entries | delta before | delta after | speedup |
+  | --- | --- | --- | --- |
+  | 50 | 74.6 ms | 7.96 ms | 9x |
+  | 500 | 680.4 ms | 12.05 ms | 56x |
+  | 5000 | 6588.5 ms | 54.87 ms | 120x |
+
+  The delta is now bounded by the frame, not by the transcript. What still
+  grows with the transcript is the FRAME itself (`idle` 7.6 → 47.7 ms), and
+  that is ours as well: `refreshFooter` walks `sess.history()` per frame.
+  It is the next work unit, and the harness already carries its baseline.
+
+  What this means for task 2: the performance argument for replacing the
+  interface is now GONE — the canvas, the damaged-row present and the flat
+  full render were already good, and the one real defect was our own
+  invalidation call. The replacement stands on the trust reason alone
+  (leaving the last niminal component), which is the honest reason it had
+  from the start. The footer's per-frame history scan is a small, separable
+  fix in our file.

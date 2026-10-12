@@ -165,6 +165,17 @@ proc measure(entries, frames: int, path: string, reportFirstFrame: bool) =
     let t0 = getMonoTime()
     st.app.render()
     render.add msSince(t0)
+  # The delta path must mirror the sink (src/neopi/tui.nim's tuiOnEventCB
+  # calls the WIDGET's apply) and it must still RENDER: a cheaper delta that
+  # drops the text would be a wrong fix, so it is verified once here, outside
+  # the timed region, against the presented canvas.
+  st.transcriptW.apply(AgentUiEvent(kind: ueTextDelta, text: deltaText))
+  flushFrame(addr st)
+  if not st.transcriptW.transcript.items[^1].text.endsWith(deltaText):
+    quit("tui_bench: the delta did not reach the transcript")
+  if not st.app.frame.plainText.contains("streamed"):
+    quit("tui_bench: the delta did not render")
+
   # The delta metric must measure the SAME work every sample: `apply` on a
   # text delta appends to the last item, so left alone the transcript (and
   # the cost) grows sample after sample — the first version of this harness
@@ -176,9 +187,7 @@ proc measure(entries, frames: int, path: string, reportFirstFrame: bool) =
   let deltaStart = getMonoTime()
   while delta.len < frames and msSince(deltaStart) < budgetMs:
     let t0 = getMonoTime()
-    st.transcriptW.transcript.apply(AgentUiEvent(kind: ueTextDelta,
-      text: deltaText))
-    st.transcriptW.invalidateLines()
+    st.transcriptW.apply(AgentUiEvent(kind: ueTextDelta, text: deltaText))
     flushFrame(addr st)
     delta.add msSince(t0)
     st.transcriptW.transcript.items.setLen(tailLen)
