@@ -39,7 +39,7 @@ verified basis of each slice.
 
 | # | Item | Notes |
 |---|---|---|
-| 11 | **Our own TUI, on the same lessons** | MEASURED (odd/tasks/tui-own.md): the defect is the all-or-nothing line-cache invalidation per streamed delta (74 ms at 50 entries, 6.6 s at 5000), NOT the full render — that is flat at ~7.2 ms. To build: a granular invalidation and a footer that stops scanning the history per frame (both currently O(transcript)), then the terminal as an interface with a fake backend (nimterm already models both) and chronos owning the loop (the host-owned pattern nimterm documents). The trust reason stands on its own: nimterm is the last niminal component |
+| 11 | **Pin the sibling dependencies (nimterm, sse)** | `nim.cfg` points at ABSOLUTE local paths (`~/proyectos/nimterm/src`, `~/proyectos/sse/src`), so a fresh clone does not build. Make them reproducible dependencies: a pinned `requires` (the fork we control, or upstream at a fixed commit) plus a lock, or a vendored copy. Same class of decision the provider layer made, the other way round — depend deliberately instead of owning |
 | 12 | lazy.npi (the lazy plugin manager, the user's plan) | An extension: `neopi.fs.list` + `require` on-trigger — everything against the surface |
 | 13 | The interface study: what else to copy from pi's TUI | The mouse, the themes, the widget borders; the markdown landed with nimterm; the transcript scroll keys pending |
 | 14 | Packaging (single-binary distribution) | The runtime ships with the binary |
@@ -47,6 +47,26 @@ verified basis of each slice.
 | 16 | The tool execution alive during a run | bash runs frozen inside the turn's chunk (the threads/async gap pi and nimlet solve); the abort during a thinking pause waits for the next delta |
 | 17 | grep/find/ls agent tools | If the model needs them |
 | 18 | The provider's recorded follow-ups | The known limits the swap's verification left: wrap a mid-stream failure as `ProviderError` (trigger: the first Nim consumer or a retry policy); port the argument JSON-Schema validation (trigger: malformed model args, or the extension tool surface growing); bound the wire's `tool_calls` index (`openai_compat.nim:79` — cheap, no trigger). They ride the TUI slice (#11) because it reopens the provider's event contract for the thinking delta, so it touches the same files |
+
+## Reconsidered
+
+- **The TUI replacement, cancelled 2026-10-11** (it was #11 here; the plan is
+  kept in `odd/tasks/tui-own.md`). The stated reason was performance: "the
+  per-delta full render is the performance defect". MEASURED
+  (`bench/tui_bench.nim`, the numbers in that task file): the full render is
+  FLAT at ~7.2 ms from 50 to 5000 entries — nimterm's per-item line caches
+  and its row-differential present were already right — and the one real
+  defect was OURS: the stream sink called the transcript model's `apply` and
+  then `invalidateLines()`, re-wrapping the whole transcript per streamed
+  token (6588 ms at 5000 entries). One line fixed that (13.4 ms) and a second
+  one of our own (the footer walked the session history per frame) made the
+  frame flat (46.7 → 7.2 ms). With the performance case gone the replacement
+  stood on ownership alone, and the risk it targeted — the dependency
+  vanishing — is already mitigated: the code is on our GitHub, checked out
+  locally, MIT, and a fork patch is the tool for a needed change, not a
+  rewrite. The HARNESS STAYS as the regression gate (it caught a 120x that
+  113 tests did not). **Revisit if** we need a change inside nimterm that a
+  fork patch cannot carry cleanly, or if the fork drifts from what we need.
 
 ## Deferred
 

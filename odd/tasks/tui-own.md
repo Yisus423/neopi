@@ -11,9 +11,25 @@ the performance defect") is a HYPOTHESIS read off the code, not a
 measurement, and this feature's first task exists to settle it with numbers
 before anything is rewritten.
 
-This is a work in progress: the first source write happens after the
-measurement harness, and the slices below task 2 are provisional until the
-harness and the scope decision land.
+## Decision (2026-10-11): do NOT replace nimterm
+
+This feature started with a measurement because the reason for the
+replacement was a hypothesis read off the code. The hypothesis is dead and
+the replacement is cancelled; the reasoning is in the ROADMAP's
+"Reconsidered" section. What survives this file is the harness
+(`nimble bench`) as the interface's regression gate, its baseline numbers,
+and the two fixes it produced — both in OUR code, ~15 lines in total, worth
+120x and 6.5x at 5000 entries.
+
+The honest summary of why: the canvas, the row-differential present and the
+flat full render were already right; the one real defect was our own
+invalidation call; and the risk the replacement targeted (a dependency
+vanishing) is already mitigated by the fork, so owning ~20 modules of
+terminal rendering would have bought the ability to patch something we can
+already patch, at the price of re-deriving markdown, unicode widths,
+selection, search, mouse and four terminal protocols. **Revisit if** we need
+a change inside nimterm that a fork patch cannot carry cleanly, or if the
+fork drifts from what we need.
 
 ## What the reconnaissance found (2026-10-11, read-only)
 
@@ -54,6 +70,10 @@ The basis, so the plan is not built on the ROADMAP note's assumptions
   is empty, so AGENTS.md's pty bullet is stale (a docs item for this slice).
 
 ## Tasks
+
+This file is kept as the record of what was planned and measured; tasks 2-6
+below are cancelled by the decision above. They stay here on purpose: the
+plan and its numbers are what a future reader needs to re-judge it.
 
 - [x] 1. The measurement harness and the baseline: `bench/tui_bench.nim` (a
       standalone binary, `-o:build/tui_bench`, plus a `nimble bench` task)
