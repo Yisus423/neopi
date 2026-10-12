@@ -184,6 +184,31 @@ The basis, so the plan is not built on the ROADMAP note's assumptions
   that is ours as well: `refreshFooter` walks `sess.history()` per frame.
   It is the next work unit, and the harness already carries its baseline.
 
+  **The frame fix (same day, ours, ~15 lines).** `refreshFooter` walked
+  `sess.history()` on every frame — that was the entire growth of the
+  `idle`/`key` columns. The totals are now memoized in the `TuiState` behind
+  an explicit validity key: the session's identity (a `/resume` swap rebinds
+  it), the active branch's tip and the entry count. Every way usage arrives
+  here changes one of the three (`append` grows the count, `navigateTo` moves
+  the tip, entries are never edited in place). The pure `footerText` keeps
+  the honest walk as the reference, and tests/tp_tui.nim ("the footer")
+  compares the memoized line against it after appends AND after a navigate
+  that leaves the entry count unchanged — the case a count-only key would get
+  wrong.
+
+  | entries | idle before | idle after | delta before | delta after |
+  | --- | --- | --- | --- | --- |
+  | 50 | 7.55 | 7.20 | 74.6 | 7.54 |
+  | 500 | 11.14 | 7.23 | 680.4 | 8.11 |
+  | 5000 | 46.73 | 7.21 | 6588.5 | 13.40 |
+
+  The frame is now FLAT at ~7.2 ms from 50 to 5000 entries, and the peak RSS
+  fell from 28.2 to 23.5 MB at 5000 (the per-frame `history()` seq is gone).
+  Counting from the first measurement, at 5000 entries the streamed token
+  went 6588 → 54.9 → 13.4 ms and the frame 46.7 → 7.2 ms. **Nothing in the
+  interface grows with the transcript any more**, and the suite pins the new
+  totals test: 113 tests green.
+
   What this means for task 2: the performance argument for replacing the
   interface is now GONE — the canvas, the damaged-row present and the flat
   full render were already good, and the one real defect was our own

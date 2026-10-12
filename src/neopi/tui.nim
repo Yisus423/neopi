@@ -118,6 +118,19 @@ method paint*(screen: NeopiScreen, canvas: var Canvas) =
   canvas.writeAnsiText(0, footerRow, screen.footerW.text, defaultStyle(), w)
 
 type
+  FooterTokens = object
+    ## The memoized branch-scoped token totals behind the footer. The key is
+    ## everything `footerText` reads from the session: its identity (a
+    ## `/resume` swap rebinds it), the active branch's tip and the total entry
+    ## count. Every way usage arrives in this codebase changes one of them
+    ## (`append` grows the count, `navigateTo` moves the tip, entries are
+    ## never edited in place), so a matching key means the totals stand.
+    sess: pointer
+    tip: int
+    entries: int
+    tokensIn: int
+    tokensOut: int
+
   TuiState* = object
     ## The TUI's live pieces: the nimterm widgets (the transcript, the input,
     ## the footer), the session and interpreter they bind, and the workspace
@@ -134,6 +147,7 @@ type
     menu*: Menu
     statusLine*: string
     streaming*: string
+    footerTokens: FooterTokens
     quit*: bool
     appReady*: bool
     screen*: NeopiScreen
@@ -149,26 +163,52 @@ proc initTuiState*(provider, model: string, sess: Session,
     root: root, transcriptW: transcriptW, inputW: inputW, footerW: footerW,
     statusLine: "", streaming: "", quit: false)
 
-proc footerText*(state: TuiState, working: bool): string =
-  ## The footer's text: the provider, model, and the session's cumulative
-  ## token usage; `working` appends the stream's flight indicator (pi's).
-  var tokensIn = 0
-  var tokensOut = 0
-  if not state.sess.isNil:
-    for entry in state.sess.history():
+proc branchTokens(sess: Session): tuple[tokensIn, tokensOut: int] =
+  ## The active branch's cumulative token usage: the honest walk over the
+  ## history. `refreshFooter` memoizes this; the pure `footerText` calls it.
+  if not sess.isNil:
+    for entry in sess.history():
       if entry.kind == ekAssistant:
-        tokensIn += entry.usageInput
-        tokensOut += entry.usageOutput
-  result = state.provider & "/" & state.model & " | in " & $tokensIn &
-    " | out " & $tokensOut
+        result.tokensIn += entry.usageInput
+        result.tokensOut += entry.usageOutput
+
+proc footerTokens(state: ptr TuiState): tuple[tokensIn, tokensOut: int] =
+  ## The memoized branch totals. The walk is O(entries) and this runs on
+  ## every frame, which made the FRAME itself grow with the transcript (7.6 ms
+  ## at 50 entries to 47.7 ms at 5000 — bench/tui_bench.nim); the memo is
+  ## O(1) while the key holds, which is every frame of a stream (the deltas
+  ## touch the transcript, not the session's entries).
+  let key = if state[].sess.isNil: nil else: cast[pointer](state[].sess)
+  let tip = if state[].sess.isNil: 0 else: state[].sess.currentId
+  let count = if state[].sess.isNil: 0 else: state[].sess.entries.len
+  if state[].footerTokens.sess == key and state[].footerTokens.tip == tip and
+      state[].footerTokens.entries == count:
+    return (state[].footerTokens.tokensIn, state[].footerTokens.tokensOut)
+  let totals = branchTokens(state[].sess)
+  state[].footerTokens = FooterTokens(sess: key, tip: tip, entries: count,
+    tokensIn: totals.tokensIn, tokensOut: totals.tokensOut)
+  totals
+
+proc footerLine(provider, model: string,
+                totals: tuple[tokensIn, tokensOut: int],
+                working: bool): string =
+  ## The footer's text: the provider, model, and the cumulative token usage;
+  ## `working` appends the stream's flight indicator (pi's).
+  result = provider & "/" & model & " | in " & $totals.tokensIn &
+    " | out " & $totals.tokensOut
   if working:
     result &= " | working"
 
+proc footerText*(state: TuiState, working: bool): string =
+  ## The footer's text from a state value (the pure path: it always walks).
+  footerLine(state.provider, state.model, branchTokens(state.sess), working)
+
 proc refreshFooter*(state: ptr TuiState) =
   ## Redraw the footer line (the nimlet pattern: the footer refreshes on the
-  ## state changes, not on a timer). TextWidget exposes the text field.
+  ## state changes, not on a timer), through the memoized totals.
   let working = state[].streaming.len > 0
-  state[].footerW.text = footerText(state[], working)
+  state[].footerW.text = footerLine(state[].provider, state[].model,
+    footerTokens(state), working)
 
 proc buildScreen*(state: ptr TuiState): Widget =
   ## The widget tree: the transcript (its own scroll viewport follows the

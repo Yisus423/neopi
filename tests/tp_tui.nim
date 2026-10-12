@@ -1,7 +1,8 @@
 ## Tests for the TUI over nimterm: the session-to-transcript adapter, the
-## sessions listing, the /resume builtin with its menu, and the registry
-## swap. The terminal itself is not tested here (the pty harness covers it
-## end-to-end); these tests run without a terminal.
+## sessions listing, the /resume builtin with its menu, the registry swap, and
+## the footer's memoized totals. The terminal itself is not tested here — the
+## render path is measured headlessly by bench/tui_bench.nim — so these tests
+## run without a terminal.
 import std/[json, options, os, strutils, times]
 import nimterm
 import nimterm/transcript
@@ -253,3 +254,44 @@ suite "the turn drive":
     check turnContinues(parseJson("{\"continueLoop\":false}"), true)
     check not turnContinues(parseJson("{}"), false)
     check not turnContinues(newJNull(), false)
+
+suite "the footer":
+  test "the totals are the branch's and the memo notices every change":
+    # `refreshFooter` memoizes the branch's token totals (the walk is
+    # O(entries) and it runs per frame — bench/tui_bench.nim). The pure
+    # `footerText` always walks, so it is the reference this test compares
+    # against; the interesting case is a NAVIGATE, which moves the branch tip
+    # while the entry count stays the same.
+    let root = freshWorkspace("neopi-tp-tui-footer")
+    let path = freshSessionPath("footer")
+    try:
+      let sess = newSession(path)
+      sess.append SessionEntry(kind: ekUser, text: "one")
+      sess.append SessionEntry(kind: ekAssistant, text: "first", model: "m",
+        provider: "p", usageInput: 10, usageOutput: 4, stopReason: "stop")
+      sess.append SessionEntry(kind: ekToolResult, toolCallId: "c1",
+        toolName: "read", output: "x", isError: false)
+      sess.append SessionEntry(kind: ekAssistant, text: "second", model: "m",
+        provider: "p", usageInput: 20, usageOutput: 6, stopReason: "stop")
+      var st = initTuiState("p", "m", sess, root)
+      refreshFooter(addr st)
+      check st.footerW.text == "p/m | in 30 | out 10"
+      check st.footerW.text == footerText(st, false)
+
+      sess.navigateTo(2)
+      refreshFooter(addr st)
+      check st.footerW.text == "p/m | in 10 | out 4"
+      check st.footerW.text == footerText(st, false)
+
+      sess.append SessionEntry(kind: ekAssistant, text: "third", model: "m",
+        provider: "p", usageInput: 1, usageOutput: 2, stopReason: "stop")
+      refreshFooter(addr st)
+      check st.footerW.text == "p/m | in 11 | out 6"
+      check st.footerW.text == footerText(st, false)
+
+      st.streaming = "partial"
+      refreshFooter(addr st)
+      check st.footerW.text == "p/m | in 11 | out 6 | working"
+    finally:
+      removeDir(root)
+      removeFile(path)
