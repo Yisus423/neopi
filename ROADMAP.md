@@ -34,12 +34,15 @@ verified basis of each slice.
 | 11.2. The openai-compatible provider | `buildChatRequest`/`chatHeaders`/`streamChat` on chronos — the cancellation contract + the per-read timeout (`17a5444`); the scripted transport encoding one step per fetch as the real wire (`433adc1`) | The same cancellation contract nimgent gave (expose builds the partial response) plus the timeout it never had; the L2 tests exercise the whole stack with zero nimgent |
 | 11.3. The swap off nimgent | The types out of `provider.nim` into `primitives.nim`, `Message` with the tool round-trip, the loop and the hook gates ported, the live transport defect fixed (`fe51fed`) | The anti-corruption layer absorbed its own replacement: `expose.nim` byte-identical and the 109 pre-existing tests unmodified still pin the contract. The live path had never run and crashed on a nil body reader |
 | Fix. The nimgent tail | The nimble requires and the libpcre path out; the live check opt-in (`NEOPI_LIVE_TEST`); AGENTS/README/ARCHITECTURE refreshed (`950bcf1`) | The build and the claims had to follow the code: `nimble test` is keyless and offline, and the docs still promised libpcre and described the layer as a wrapper over a dependency that no longer exists |
+| Fix. The dependency pin | chronos + our nimterm fork + sse resolve through nimble by git URL and commit; `nim.cfg` has no path at all; `binDir` is `build/`; config.nims' dead `../nimgent` loop out (`11688bc`) | A fresh clone could not build (absolute local paths) and the versions were whatever the checkouts happened to be. The same "depend deliberately" call the provider layer made, the other way round: a commit pin is exact, `nimble develop` still overrides it, and the installed copy is provably the pinned commit |
 
 ## Remaining (priority order)
 
+The numbers are stable identifiers, not a dense sequence: #10 and #11 left this
+list (see Done).
+
 | # | Item | Notes |
 |---|---|---|
-| 11 | **Pin the sibling dependencies (nimterm, sse)** | `nim.cfg` points at ABSOLUTE local paths (`~/proyectos/nimterm/src`, `~/proyectos/sse/src`), so a fresh clone does not build. Make them reproducible dependencies: a pinned `requires` (the fork we control, or upstream at a fixed commit) plus a lock, or a vendored copy. Same class of decision the provider layer made, the other way round — depend deliberately instead of owning |
 | 12 | lazy.npi (the lazy plugin manager, the user's plan) | An extension: `neopi.fs.list` + `require` on-trigger — everything against the surface |
 | 13 | The interface study: what else to copy from pi's TUI | The mouse, the themes, the widget borders; the markdown landed with nimterm; the transcript scroll keys pending |
 | 14 | Packaging (single-binary distribution) | The runtime ships with the binary |
