@@ -10,6 +10,14 @@ bin           = @["neopi"]
 requires "nim >= 2.0.0"
 requires "chronos >= 4.0.0"
 
+task bench, "Run the TUI measurement harness (headless, no terminal)":
+  # Same env need as the tests: the disk-backed TMPDIR (/tmp is a small
+  # tmpfs). The harness renders through a fake backend, so it needs no
+  # terminal.
+  if not existsEnv("TMPDIR"):
+    putEnv("TMPDIR", getHomeDir() / "tmp-nim")
+  exec "nim c -r --hints:off --threads:on --mm:orc -o:build/tui_bench bench/tui_bench.nim"
+
 task test, "Run the test suite":
   # The suite's only env need is a disk-backed TMPDIR (/tmp is a small tmpfs);
   # set here so `nimble test` is self-contained. Existing values win.

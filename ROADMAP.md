@@ -39,7 +39,7 @@ verified basis of each slice.
 
 | # | Item | Notes |
 |---|---|---|
-| 11 | **Our own TUI, on the same lessons** | The grid with invalid regions (the per-delta full render is the performance defect), the terminal as an interface with a fake backend (the pi FakeTerminal pattern — the pty harness demotes to smoke), chronos's loop as the owner |
+| 11 | **Our own TUI, on the same lessons** | MEASURED (odd/tasks/tui-own.md): the defect is the all-or-nothing line-cache invalidation per streamed delta (74 ms at 50 entries, 6.6 s at 5000), NOT the full render — that is flat at ~7.2 ms. To build: a granular invalidation and a footer that stops scanning the history per frame (both currently O(transcript)), then the terminal as an interface with a fake backend (nimterm already models both) and chronos owning the loop (the host-owned pattern nimterm documents). The trust reason stands on its own: nimterm is the last niminal component |
 | 12 | lazy.npi (the lazy plugin manager, the user's plan) | An extension: `neopi.fs.list` + `require` on-trigger — everything against the surface |
 | 13 | The interface study: what else to copy from pi's TUI | The mouse, the themes, the widget borders; the markdown landed with nimterm; the transcript scroll keys pending |
 | 14 | Packaging (single-binary distribution) | The runtime ships with the binary |

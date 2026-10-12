@@ -45,6 +45,13 @@ of iceberg-work/sse). The `nimble test` task sets TMPDIR itself, so
   network and a real turn, so it never gates the default suite.
 - Compile-fresh discipline: compile while you write (a 7-defect class in
   lua.nim came from writing without compiling).
+- The TUI measurement harness: `nimble bench` builds and runs
+  `bench/tui_bench.nim` (or `build/tui_bench [entries] [frames]`). It renders
+  headless through a fake nimterm backend — no terminal needed — sweeps the
+  transcript size, and prints one greppable line per size. The numbers it
+  produced live in odd/tasks/tui-own.md. Bound it with an explicit
+  `entries`/`frames` when you are exploring a slow path: the delta cost
+  scales with the transcript.
 - The Lua layer: the busted specs run through the test-only runner
   `./build/busted_main <spec>` (5 spec files, 13 successes, verified
   green); the `neopi --spec` CLI mode is deferred.
