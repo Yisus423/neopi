@@ -26,15 +26,21 @@ PATH="$HOME/.local/share/grabnim/current/bin:$PATH"   # Nim 2.2.12 (grabnim curr
 TMPDIR="$HOME/tmp-nim"                                # disk-backed; the /tmp tmpfs fills
 ```
 
-Compile with `-o:build/<name>` — NEVER next-to-source (a binary was
-committed once and removed). The build keeps `--threads:on`:
-`nim c --hints:off --threads:on --mm:orc -o:build/neopi src/neopi.nim`. The
-TUI backend is nimterm, a sibling checkout nim.cfg points at
-(`--path:"/home/jesus/proyectos/nimterm/src"` — absolute on purpose: the
-relative form failed the nim.cfg parse); the provider layer's SSE parser is
-the other sibling (`--path:"/home/jesus/proyectos/sse/src"`, the fork seed
-of iceberg-work/sse). The `nimble test` task sets TMPDIR itself, so
-`nimble test` is self-contained; direct `nim c` builds need the env above.
+Dependencies are PINNED in `neopi.nimble`: chronos plus two packages by git
+URL and commit — `Yisus423/nimterm` (our fork; the TUI) and
+`iceberg-work/sse` (the provider layer's SSE parser — the PACKAGE is named
+`server_sent_events` while its module is `sse`). Never a sibling checkout,
+never an absolute path. `nimble build` (or `nimble test`) resolves and
+installs them once; after that a direct
+`nim c --hints:off --threads:on --mm:orc -o:build/neopi src/neopi.nim` works
+too, because Nim's `nimblePath` finds installed packages. Build with
+`nimble build` — `binDir` is `build/`, so nothing lands next to the source (a
+binary was committed once and removed). To co-develop a dependency, override
+the pin with the local checkout: `nimble develop ~/proyectos/nimterm`. The
+`nimble test` task sets TMPDIR itself, so `nimble test` is self-contained;
+direct `nim c` builds need the env above. A COLD full build takes minutes
+(the nimcache is invalidated whenever the dependency paths change); warm
+rebuilds are seconds.
 
 ## Testing
 

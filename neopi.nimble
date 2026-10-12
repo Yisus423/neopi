@@ -3,12 +3,21 @@ author        = "jesus"
 description   = "Minimal coding agent core: provider primitives + Lua extensibility"
 license       = "MIT"
 srcDir        = "src"
+binDir        = "build"
 
 import std/os
 bin           = @["neopi"]
 
 requires "nim >= 2.0.0"
 requires "chronos >= 4.0.0"
+# Pinned by commit, never a local path: a fresh clone resolves these itself.
+# nimterm is OUR fork (upstream `martineastwood/nimterm` is the one that got
+# deleted once); the SSE parser's package name is `server_sent_events` even
+# though its module is `sse`.
+requires "https://github.com/Yisus423/nimterm#f7e518e"
+requires "https://github.com/iceberg-work/sse#87934ce"
+requires "https://github.com/Yisus423/nimterm#f7e518e"
+requires "https://github.com/iceberg-work/sse#87934ce"
 
 task bench, "Run the TUI measurement harness (headless, no terminal)":
   # Same env need as the tests: the disk-backed TMPDIR (/tmp is a small
