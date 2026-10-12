@@ -46,6 +46,7 @@ verified basis of each slice.
 | 15 | Fork/clone to new files | Branch-in-place covers the MVP; forking copies the tree |
 | 16 | The tool execution alive during a run | bash runs frozen inside the turn's chunk (the threads/async gap pi and nimlet solve); the abort during a thinking pause waits for the next delta |
 | 17 | grep/find/ls agent tools | If the model needs them |
+| 18 | The provider's recorded follow-ups | The known limits the swap's verification left: wrap a mid-stream failure as `ProviderError` (trigger: the first Nim consumer or a retry policy); port the argument JSON-Schema validation (trigger: malformed model args, or the extension tool surface growing); bound the wire's `tool_calls` index (`openai_compat.nim:79` — cheap, no trigger). They ride the TUI slice (#11) because it reopens the provider's event contract for the thinking delta, so it touches the same files |
 
 ## Deferred
 
