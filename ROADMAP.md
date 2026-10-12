@@ -38,11 +38,12 @@ verified basis of each slice.
 
 ## Remaining (priority order)
 
-The numbers are stable identifiers, not a dense sequence: #10 and #11 left this
-list (see Done).
+The numbers are stable identifiers, not a dense sequence or a rank: the ORDER
+of the table is the priority (#10 and #11 left this list — see Done).
 
 | # | Item | Notes |
 |---|---|---|
+| 19 | Pi's extension examples + the interface UX | Porting pi's `examples/extensions/*` onto `neopi.on`/`fs`/`process`/`provider`/`session`/`registerTool`/`registerCommand`/`ui` is the "real consumers exist" bar AGENTS.md sets for the frozen surface — it proves the API and finds its gaps, in Lua, without touching the core. The interface UX (#13) rides with it: the same extensions are what a real user runs. Takes precedence over #12 |
 | 12 | lazy.npi (the lazy plugin manager, the user's plan) | An extension: `neopi.fs.list` + `require` on-trigger — everything against the surface |
 | 13 | The interface study: what else to copy from pi's TUI | The mouse, the themes, the widget borders; the markdown landed with nimterm; the transcript scroll keys pending |
 | 14 | Packaging (single-binary distribution) | The runtime ships with the binary |
