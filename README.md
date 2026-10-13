@@ -41,8 +41,10 @@ config file you own, the `require` mechanism loads what it references.
    Keys: **Enter** sends (or runs `/commands`, or steers while the model
    works); **Esc** aborts the stream (the partial turn renders marked) or
    clears the composer; **Ctrl+C** exits; **PgUp/PgDn** scroll the
-   transcript; **/resume** opens the sessions picker (Enter loads, Esc
-   cancels). The transcript renders the deltas live — the model's thinking
+   transcript; **Ctrl+O** expands or collapses the tool output; **/resume**
+   opens the sessions picker (Enter loads, Esc cancels). Dragging the mouse
+   over the transcript selects text, and the selection copies to the
+   clipboard. The transcript renders the deltas live — the model's thinking
    pauses don't freeze it (an asyncdispatch timer, no threading).
 
    The palette follows the terminal: the color depth (truecolor, 256, 16,

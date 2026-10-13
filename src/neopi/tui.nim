@@ -12,7 +12,7 @@
 
 import std/[algorithm, json, os, strutils, times]
 import nimterm
-import nimterm/[events as ntevents, transcript as nttranscript]
+import nimterm/[events as ntevents, term, transcript as nttranscript]
 import neopi/lua
 import neopi/session
 from neopi/hooks import lua_error
@@ -147,6 +147,10 @@ type
     menu*: Menu
     statusLine*: string
     streaming*: string
+    clipboard*: proc (text: string)
+      ## Where the transcript's `copy` action lands. `initTuiState` points it
+      ## at the terminal's clipboard and the specs replace it, so the copy is
+      ## observable without an escape sequence reaching stdout.
     footerTokens: FooterTokens
     quit*: bool
     appReady*: bool
@@ -161,7 +165,33 @@ proc initTuiState*(provider, model: string, sess: Session,
   let footerW = newText("")
   result = TuiState(provider: provider, model: model, sess: sess, lua: nil,
     root: root, transcriptW: transcriptW, inputW: inputW, footerW: footerW,
-    statusLine: "", streaming: "", quit: false)
+    statusLine: "", streaming: "", quit: false, clipboard: copyToClipboard)
+
+proc transcriptRoutedKey*(key: Key): bool =
+  ## Whether a key belongs to the transcript while the editor keeps focus:
+  ## Page Up/Page Down scroll its viewport (the mouse wheel does it too,
+  ## through the hit path) and Ctrl-O toggles the compact and expanded forms.
+  ## The editor's own cursor keys — home, end, Ctrl-B, Ctrl-F — are
+  ## deliberately absent: nimterm's InputWidget binds all four for text
+  ## navigation, so routing them here would break editing to fix scrolling,
+  ## and pi keeps them with the editor for the same reason.
+  result = key in {keyPageUp, keyPageDown, keyCtrlO}
+
+proc routeTranscriptKey*(state: ptr TuiState, event: UiEvent): bool =
+  ## Give a transcript-owned key to the transcript before the focused editor
+  ## sees it, so paging and the expand toggle answer while the composer keeps
+  ## focus. The verdict is the predicate above and NEVER the widget's
+  ## response: nimterm's TranscriptWidget scrolls on the page keys and still
+  ## answers `eventIgnored` (its scroll branches carry no `return`), so a
+  ## caller that trusted `handled` would let the editor consume the key as
+  ## well. Both key paths share this rule — the app's global `onEvent` while
+  ## the loop runs and the streaming `feedKeys`.
+  if event.kind != uiKey or not transcriptRoutedKey(event.key):
+    return false
+  if state[].transcriptW.isNil:
+    return false
+  discard state[].transcriptW.handle(event)
+  true
 
 proc branchTokens(sess: Session): tuple[tokensIn, tokensOut: int] =
   ## The active branch's cumulative token usage: the honest walk over the
@@ -268,9 +298,11 @@ proc feedKeys*(state: ptr TuiState): bool =
           queueSteering(state[].lua, draft)
           state[].inputW.clear()
       else:
-        # The editing keys stay alive during the run (the draft builds so
-        # steering is typable): the same dispatch the app loop runs.
-        discard state[].inputW.handle(event)
+        # The transcript's keys answer during the run too (the shared rule),
+        # and then the editing keys stay alive (the draft builds so steering
+        # is typable): the same dispatch the app loop runs.
+        if not routeTranscriptKey(state, event):
+          discard state[].inputW.handle(event)
 
 proc flushFrame*(state: ptr TuiState) =
   ## Present the current frame (the transcript's changes) without the app
@@ -525,6 +557,25 @@ proc sendTurn*(state: ptr TuiState, L: LuaState) =
   state[].transcriptW.invalidateLines()
   refreshFooter(state)
 
+proc handleTuiAction*(state: ptr TuiState, L: LuaState,
+                      action: UiAction): bool =
+  ## Dispatch one widget action, returning whether the TUI owns it. `submit`
+  ## sends the composer's text through the turn drive (the commands,
+  ## /resume, or the turn) and `copy` lands the transcript's drag selection
+  ## on the clipboard — nimterm emits `copy` when a selection is released,
+  ## and the action callback used to drop every kind but `submit`. Anything
+  ## else is not ours, so the caller can leave it alone.
+  case action.kind
+  of "submit":
+    sendTurn(state, L)
+    true
+  of "copy":
+    if not state[].clipboard.isNil:
+      state[].clipboard(action.value)
+    true
+  else:
+    false
+
 # stacktrace off: the ui callbacks' frames a lua_error longjmp abandons (see
 # the note at the file top).
 {.push stacktrace: off.}
@@ -636,7 +687,7 @@ proc tuiLoop*(sess: Session, L: LuaState, provider, model: string,
         return eventHandled
       if not state.screen.menu.isNil and state.screen.menu.items.len > 0:
         case event.key
-        of keyUp, keyDown:
+        of keyUp, keyDown, keyPageUp, keyPageDown:
           let response = state.screen.menu.handle(event)
           app.invalidate()
           if response.handled: return response
@@ -653,13 +704,20 @@ proc tuiLoop*(sess: Session, L: LuaState, provider, model: string,
           return eventHandled
         else:
           discard
+      # The transcript owns the page keys and the expand toggle before the
+      # focused editor sees them (the shared rule `feedKeys` runs too). The
+      # menu above keeps precedence while it is open, so paging belongs to it
+      # instead of scrolling the transcript behind it.
+      if routeTranscriptKey(addr state, event):
+        app.invalidate()
+        return eventHandled
     return eventIgnored
 
   app.onAction = proc (app: var App, action: UiAction) =
-    ## The focused widget's actions: the input's submit dispatches (the
-    ## commands, /resume, or the turn).
-    if action.kind == "submit":
-      sendTurn(addr state, L)
+    ## The focused widget's actions: the composer's submit drives the turn
+    ## (the commands, /resume, or the turn) and the transcript's drag
+    ## selection lands on the clipboard.
+    discard handleTuiAction(addr state, L, action)
 
   app.run()
   return ""

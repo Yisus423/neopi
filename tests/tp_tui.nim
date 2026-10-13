@@ -314,3 +314,64 @@ suite "the footer":
       check not currentTheme.colors
     finally:
       setTheme(saved)
+
+  test "the transcript's keys are exactly the page keys and the expand toggle":
+    check transcriptRoutedKey(keyPageUp)
+    check transcriptRoutedKey(keyPageDown)
+    check transcriptRoutedKey(keyCtrlO)
+    # The editor's cursor keys are never stolen: nimterm's InputWidget binds
+    # home, end, Ctrl-B and Ctrl-F for text navigation, so routing them to the
+    # transcript would break editing to fix scrolling.
+    check not transcriptRoutedKey(keyHome)
+    check not transcriptRoutedKey(keyEnd)
+    check not transcriptRoutedKey(keyCtrlB)
+    check not transcriptRoutedKey(keyCtrlF)
+    check not transcriptRoutedKey(keyChar)
+    check not transcriptRoutedKey(keyEnter)
+
+  test "the widget tree alone never gives the page keys to the transcript":
+    # The reason tuiLoop routes them in its global onEvent instead of trusting
+    # the tree: nimterm's dispatch walks from the focused widget UP TO ITS
+    # PARENTS, and the transcript is a SIBLING of the focused input.
+    var st = initTuiState("p", "m", nil)
+    let screen = buildScreen(addr st)
+    for i in 0 ..< 60:
+      st.transcriptW.appendStatus("line " & $i)
+    st.transcriptW.invalidateLines()
+    var canvas = newCanvas(size(40, 10))
+    screen.render(canvas, rect(0, 0, 40, 10))
+    var app = newApp(nil, screen)
+    app.focus(Widget(st.inputW))
+    let tail = st.transcriptW.viewport.offset
+    check tail > 0  # otherwise the assertion below would be vacuous
+    app.dispatch(UiEvent(kind: uiKey, key: keyPageUp))
+    check st.transcriptW.viewport.offset == tail
+
+  test "the routed page key scrolls the transcript while the editor keeps focus":
+    var st = initTuiState("p", "m", nil)
+    let screen = buildScreen(addr st)
+    for i in 0 ..< 60:
+      st.transcriptW.appendStatus("line " & $i)
+    st.transcriptW.invalidateLines()
+    var canvas = newCanvas(size(40, 10))
+    screen.render(canvas, rect(0, 0, 40, 10))
+    let tail = st.transcriptW.viewport.offset
+    check tail > 0
+    check routeTranscriptKey(addr st, UiEvent(kind: uiKey, key: keyPageUp))
+    check st.transcriptW.viewport.offset < tail
+    # A key that belongs to the editor is never claimed by the transcript.
+    check not routeTranscriptKey(addr st, UiEvent(kind: uiKey, key: keyHome))
+
+  test "the transcript's copy action reaches the clipboard instead of being dropped":
+    var st = initTuiState("p", "m", nil)
+    var copied = ""
+    st.clipboard = proc (text: string) =
+      copied = text
+    check handleTuiAction(addr st, nil,
+      UiAction(kind: "copy", value: "the selection"))
+    check copied == "the selection"
+    # An action the TUI does not own is reported as unhandled, and the
+    # clipboard stays untouched.
+    check not handleTuiAction(addr st, nil,
+      UiAction(kind: "select", value: "x"))
+    check copied == "the selection"
