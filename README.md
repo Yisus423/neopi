@@ -45,6 +45,11 @@ config file you own, the `require` mechanism loads what it references.
    cancels). The transcript renders the deltas live — the model's thinking
    pauses don't freeze it (an asyncdispatch timer, no threading).
 
+   The palette follows the terminal: the color depth (truecolor, 256, 16,
+   and off for `NO_COLOR` or a dumb terminal) and the background reported by
+   `COLORFGBG`. Set `NEOPI_THEME=dark` or `NEOPI_THEME=light` to force one
+   (anything else, including unset, keeps the automatic choice).
+
 3. Verify: the final text prints to stdout and a session file lands in
    `.neopi/sessions/run-<timestamp>.jsonl`. A build from the repo finds the
    runtime at `build/../runtime` automatically; elsewhere set

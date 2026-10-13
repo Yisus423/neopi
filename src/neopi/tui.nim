@@ -585,12 +585,34 @@ proc exposeUi*(L: LuaState) =
   lua_setfield(L, -2, "ui")
   lua_pop(L, 1)
 
+proc installTuiTheme*(requested: string, depth: ColorDepth): Theme =
+  ## Resolve and install the theme the TUI paints with, returning what was
+  ## installed. `requested` names a builtin theme ("dark" or "light",
+  ## trimmed and case-insensitive); anything else — empty or unknown alike —
+  ## resolves exactly like unset, so nimterm's auto policy decides the
+  ## background (COLORFGBG) and `depth` decides the color encoding. The
+  ## normalization is not cosmetic: `compileBuiltinTheme` answers
+  ## `ok = false` for a name that is not a builtin, and installing that
+  ## would wipe the colors instead of falling back.
+  var name = requested.strip.toLowerAscii
+  if name != "dark" and name != "light":
+    name = "auto"
+  let (ok, theme) = compileBuiltinTheme(name, depth)
+  if ok:
+    setTheme(theme)
+    return theme
+  currentTheme
+
 proc tuiLoop*(sess: Session, L: LuaState, provider, model: string,
               root = ""): string =
   ## Run the TUI: nimterm's App is the loop owner; the send path runs the
   ## same agent.run chunk the print mode uses; the sink flushes the frame
   ## live during the turn's waitFor and feeds the keys for the abort.
   ## Returns "" on a clean exit or the loop's failure message.
+  # The theme goes in before anything renders: nimterm's module default is
+  # the dark 256 palette unconditionally, so without this the TUI ignores a
+  # light background, a color-less terminal and a truecolor one alike.
+  discard installTuiTheme(getEnv("NEOPI_THEME"), detectDepth())
   var state = initTuiState(provider, model, sess, root)
   exposeTuiSink(L, addr state, model)
   let screenWidget = buildScreen(addr state)

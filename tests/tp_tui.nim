@@ -295,3 +295,22 @@ suite "the footer":
     finally:
       removeDir(root)
       removeFile(path)
+
+  test "the theme is installed from the request, and a bad request behaves like unset":
+    let saved = currentTheme
+    try:
+      check installTuiTheme("light", cd256).name == "light"
+      check currentTheme.name == "light"
+      check currentTheme.colors
+      # The request is normalized: case and padding do not decide the theme.
+      check installTuiTheme(" DARK ", cd256).name == "dark"
+      check currentTheme.name == "dark"
+      # A name that is not a builtin resolves exactly like an unset one, so
+      # nimterm's auto policy (COLORFGBG) still decides.
+      check installTuiTheme("banana", cd256).name ==
+        installTuiTheme("", cd256).name
+      # A terminal without color support gets no colors, whatever the name.
+      check not installTuiTheme("light", cdNone).colors
+      check not currentTheme.colors
+    finally:
+      setTheme(saved)
