@@ -168,7 +168,7 @@ commits"); a task closes only with one.
 
 | ID | Task | Spec | Route | Commit |
 |---|---|---|---|---|
-| T9 | The plumbing, in two work units. **T9a**: the app owns dispatch and render — `wireApp` extracts the loop's callbacks so they are testable, the stream sink **posts** agent events instead of drawing by hand, `pumpApp`/`presentApp` replace `feedKeys`/`flushFrame`/`drainGapKeys`, the turn sets `working` (a field nothing ever wrote, so the `| working` indicator never reached a frame), the abort request becomes observable, and a submit while the turn runs queues steering instead of recursing into a nested turn. **T9b**: the incremental transcript sync — deferred, because dropping the per-turn rebuild needs a three-line fork patch to nimterm (`appendItem`; `linesValid` is private and `setTranscript` is a full rebuild), and bumping the pinned revision is a dependency decision rather than a unilateral one. **`addSource`/`EventSource` is NOT in T9**: it presumes a loop free to poll, which is ROADMAP #16's wall — the sink is called from *inside* the blocked turn | S8 | inline | `refactor(tui): the app owns the dispatch and the frame` — `1bb3ff5` |
+| T9 | The plumbing, in two work units. **T9a**: the app owns dispatch and render — `wireApp` extracts the loop's callbacks so they are testable, the stream sink **posts** agent events instead of drawing by hand, `pumpApp`/`presentApp` replace `feedKeys`/`flushFrame`/`drainGapKeys`, the turn sets `working` (a field nothing ever wrote, so the `| working` indicator never reached a frame), the abort request becomes observable, and a submit while the turn runs queues steering instead of recursing into a nested turn. **T9b**: the incremental transcript sync — DONE, with the fork's `appendItem` (`800bf7f`) and the pin bumped with it. The full rebuild replaced every item once per turn, so the items' view state went with it: an expanded tool collapsed and a pending approval disappeared from the UI. `syncTranscript` appends only what is past a watermark, and the full path (`seedTranscript`) stays for a fresh screen and for a branch that moved back. The streamed text is provisional, so the run is closed in the widget (`postRunFinished`) before the sync appends the real entry. **`addSource`/`EventSource` is NOT in T9**: it presumes a loop free to poll, which is ROADMAP #16's wall — the sink is called from *inside* the blocked turn | S8 | inline | `1bb3ff5` (T9a) + `0e976bd` (T9b), the fork `800bf7f`, the pin `ea0d956` and the procedure `39078a1` |
 | T5 | The thinking: the reasoning deltas reach the transcript as `ueThinkingDelta` and the collapsed label becomes the pi-shaped one | S8 | worker | `feat(tui): the reasoning deltas render as the collapsed thinking item` |
 | T6 | The dialogs: `neopi.ui.select` / `neopi.ui.confirm` as **events** — the question renders and its answer arrives through the event source, with no handler blocking on a wait | S8, S9 | worker | `feat(ui): the extension dialogs land on nimterm's question widget` |
 | T8 | Approvals: the transcript's `approval` action bridged to the `tool_call` verdict as an event, not a synchronous prompt | S8, S9 | worker | `feat(tui): the tool gate can ask the user` |
@@ -385,9 +385,34 @@ owner, and T9's plumbing is the part of it that this slice consumes.
   assembling what it claimed to. The narrow `grep` that missed the constructor
   is also a lesson worth keeping: after a rename, grep the bare identifier, not
   the access pattern.
-- **Open.** Two things still outside the cut: T7 (the transcript search, which
-  stood on T4's batch to place it and now stands alone) and T10 (the standing
-  UX regression gate — failure (3) above is its argument). **Batch 2 is next
-  and untouched**: T9 (the plumbing), T5 (the thinking), T6 (the dialogs) and
-  T8 (the approvals). The commit standing is settled: the user pre-authorized
-  the work-unit commits on `main`, which is the repository's own convention.
+- **Evidence — T9b closed (`0e976bd`), and the pin arc with it.** The value it
+  delivered is not the one that opened the task: the per-turn rebuild replaced
+  every transcript item, so it discarded what the items carry — an expanded tool
+  collapsed and a pending approval disappeared from the UI, and a test now pins
+  that premise before pinning the fix. The full rewrap of a 5000-entry
+  transcript, the thing the fork patch removes, costs about 7 ms *per turn*:
+  real, and unfeelable. The patch (`nimterm` `800bf7f`: `appendItem`) was pushed
+  and verified with `ls-remote` instead of assumed, and bumping the pin exposed
+  a reproducibility hole ROADMAP #11 believed closed — nimble keeps the previous
+  revision alongside the new one under the SAME version, so `nimblePath` had
+  two candidates for the module and the winner was decided by hash ordering
+  (`757d0d4f` before `d4c4f347`). `nimble uninstall` cannot fix that (these
+  copies arrived as dependencies: `no packages to delete`); the cache now holds
+  one copy, chosen by reading `vcsRevision`, and `AGENTS.md` documents the step
+  plus the Nim caches that keep naming the removed path. The ambiguity was not
+  theoretical: the language server had resolved nimterm to the stale copy and
+  lost its context with hundreds of `cannot open file: nimterm` errors when it
+  disappeared, while the compiler happened to pick the pinned one.
+- **Evidence — T9b's two failed gates, both the parent's, and neither a design
+  error.** (1) Inserting the watermark clobbered the `working` field's
+  declaration and left its doc orphaned on the new field; (2) four Nim caches
+  still named the removed copy and the build died with `cannot open:
+  <removed>/nimterm.nim`. Both are the class of thing a build catches and a
+  reading does not, which is now the third slice where that sentence holds.
+- **Open.** Batch 2 continues with T5 (the thinking), T6 (the dialogs) and T8
+  (the approvals): T9a and T9b are closed. Two things stay outside the cut: T7
+  (the transcript search) and T10 (the standing UX regression gate, whose
+  argument is the real regression the harness caught during T3a). Operational
+  reminder for the next dependency bump: the `vcsRevision` guard and the Nim
+  cache cleanup are in `AGENTS.md`, and neither was theory — the bump this
+  slice required produced both failures.
