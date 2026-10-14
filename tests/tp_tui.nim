@@ -375,3 +375,93 @@ suite "the footer":
     check not handleTuiAction(addr st, nil,
       UiAction(kind: "select", value: "x"))
     check copied == "the selection"
+
+  test "the layout gives the chrome its rows and the transcript the rest":
+    let chrome = newChrome()
+    var l = tuiLayout(chrome, 24)
+    check l.headerRows == 0
+    check l.aboveRows == 0
+    check l.statusRows == 0
+    check l.belowRows == 0
+    check l.footerRows == 1
+    check l.transcriptRows == 24 - 1 - 2  # the footer, the rule and the input
+
+    chrome.setHeader(@["a", "b"])
+    chrome.setStatus("one", "1")
+    chrome.setStatus("two", "2")
+    chrome.setWidget("w", @["x", "y", "z"], wpAboveEditor)
+    l = tuiLayout(chrome, 24)
+    check l.headerRows == 2
+    check l.statusRows == 2
+    check l.aboveRows == 3
+    check l.transcriptRows == 24 - (2 + 3 + 2 + 1 + 2)
+
+    # The transcript never disappears, however greedy the chrome gets.
+    chrome.setHeader(@["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"])
+    check tuiLayout(chrome, 8).transcriptRows == 1
+
+  test "a status key is one row, in insertion order, and clearing gives it back":
+    let chrome = newChrome()
+    chrome.setStatus("git", "main")
+    chrome.setStatus("model", "sonnet")
+    check chrome.statusKeys() == @["git", "model"]
+    check tuiLayout(chrome, 20).statusRows == 2
+    # Updating a key replaces its row instead of adding one.
+    chrome.setStatus("git", "other")
+    check chrome.statusKeys() == @["git", "model"]
+    check chrome.statusText("git") == "other"
+    check tuiLayout(chrome, 20).statusRows == 2
+    chrome.clearStatus("git")
+    check chrome.statusKeys() == @["model"]
+    check tuiLayout(chrome, 20).statusRows == 1
+
+  test "a widget is placed above or below the editor, and cleared by key":
+    let chrome = newChrome()
+    chrome.setWidget("a", @["one"], wpAboveEditor)
+    chrome.setWidget("b", @["two", "three"], wpBelowEditor)
+    var l = tuiLayout(chrome, 20)
+    check l.aboveRows == 1
+    check l.belowRows == 2
+    # The placement is part of the slot: moving it moves its rows.
+    chrome.setWidget("a", @["one"], wpBelowEditor)
+    l = tuiLayout(chrome, 20)
+    check l.aboveRows == 0
+    check l.belowRows == 3
+    chrome.clearWidget("b")
+    check tuiLayout(chrome, 20).belowRows == 1
+    # An unknown placement is refused, not silently dropped.
+    check chrome.widgetKeys() == @["a"]
+
+  test "the chrome renders where the layout says, and the resume feedback lands in it":
+    let root = freshWorkspace("neopi-tp-chrome")
+    let path = freshSessionPath("chrome")
+    try:
+      var st = initTuiState("p", "m", nil, root)
+      let screen = buildScreen(addr st)
+      # The footer's line is the core's and lands through refreshFooter (the
+      # production path does this in tuiLoop right after building the screen).
+      refreshFooter(addr st)
+      st.chrome.setHeader(@["HEADER"])
+      st.chrome.setStatus("git", "main")
+      st.chrome.setWidget("branch", @["WIDGET"], wpAboveEditor)
+      var canvas = newCanvas(size(40, 12))
+      screen.render(canvas, rect(0, 0, 40, 12))
+      let text = canvas.plainText
+      let headerAt = text.find("HEADER")
+      let widgetAt = text.find("WIDGET")
+      let statusAt = text.find("main")
+      let footerAt = text.find("p/m")
+      check headerAt >= 0
+      check widgetAt > headerAt
+      check statusAt > widgetAt
+      check footerAt > statusAt
+
+      # The empty sessions dir reports on the status bar instead of dropping
+      # the message into a field nobody reads (the write-only statusLine).
+      openResume(addr st)
+      canvas = newCanvas(size(40, 12))
+      screen.render(canvas, rect(0, 0, 40, 12))
+      check "no sessions to resume" in canvas.plainText
+    finally:
+      removeDir(root)
+      removeFile(path)

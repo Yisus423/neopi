@@ -94,7 +94,7 @@ The Lua extension surface (what scripts see), plus the user config entrypoint:
 | `neopi.session` | `append(kind, payload)` / `history()` / `navigate(id)` | the session tree, colon syntax |
 | `neopi.registerTool` | `registerTool(name, description, schema, execute)` | extensions add tools the model calls |
 | `neopi.registerCommand` | `registerCommand(name, description, execute)` | extensions add `/commands`; the output renders as the status line |
-| `neopi.ui` | `status(text)` / `widget(name, text)` | extensions drive the TUI's status and widget lines (no-ops without the TUI) |
+| `neopi.ui` | `header(lines)` / `status(key, text)` / `widget(key, lines, opts)` | the extension chrome: a header block, one keyed row per status key, and blocks placed above or below the composer (`opts.placement`); a nil line list clears the slot, and all three are no-ops without the TUI |
 
 Extensions load from `.neopi/init.lua` (the nvim model: one config file you
 own; `require('extensions.echo')` resolves through `package.path` extended
