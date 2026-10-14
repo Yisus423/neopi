@@ -168,7 +168,7 @@ commits"); a task closes only with one.
 
 | ID | Task | Spec | Route | Commit |
 |---|---|---|---|---|
-| T9 | The plumbing: `addSource`/`post`/`AgentUiEvent` replace `flushFrame`/`feedKeys`/`drainGapKeys`/`applySession`-per-turn; the turn posts agent events instead of pumping frames by hand | S8 | worker | `refactor(tui): the agent drives the loop through the event source` |
+| T9 | The plumbing, in two work units. **T9a**: the app owns dispatch and render — `wireApp` extracts the loop's callbacks so they are testable, the stream sink **posts** agent events instead of drawing by hand, `pumpApp`/`presentApp` replace `feedKeys`/`flushFrame`/`drainGapKeys`, the turn sets `working` (a field nothing ever wrote, so the `| working` indicator never reached a frame), the abort request becomes observable, and a submit while the turn runs queues steering instead of recursing into a nested turn. **T9b**: the incremental transcript sync — deferred, because dropping the per-turn rebuild needs a three-line fork patch to nimterm (`appendItem`; `linesValid` is private and `setTranscript` is a full rebuild), and bumping the pinned revision is a dependency decision rather than a unilateral one. **`addSource`/`EventSource` is NOT in T9**: it presumes a loop free to poll, which is ROADMAP #16's wall — the sink is called from *inside* the blocked turn | S8 | inline | `refactor(tui): the app owns the dispatch and the frame` — `1bb3ff5` |
 | T5 | The thinking: the reasoning deltas reach the transcript as `ueThinkingDelta` and the collapsed label becomes the pi-shaped one | S8 | worker | `feat(tui): the reasoning deltas render as the collapsed thinking item` |
 | T6 | The dialogs: `neopi.ui.select` / `neopi.ui.confirm` as **events** — the question renders and its answer arrives through the event source, with no handler blocking on a wait | S8, S9 | worker | `feat(ui): the extension dialogs land on nimterm's question widget` |
 | T8 | Approvals: the transcript's `approval` action bridged to the `tool_call` verdict as an event, not a synchronous prompt | S8, S9 | worker | `feat(tui): the tool gate can ask the user` |
@@ -347,6 +347,44 @@ owner, and T9's plumbing is the part of it that this slice consumes.
   (`buildScreen`) instead of papering over it; (4) `neopi.hasUI` read nil — a
   Lua stack index, the boolean being set while `-2` was the `ui` table and not
   `neopi`. None of the four was visible by reading the code.
+- **L10 (verbatim):** "sigue por aca" — after the first stretch closed, the
+  user chose to continue in this session rather than open a fresh one ("ya
+  tienes lo aprendido en cache, una sesión nueva sería lo mismo").
+- **Correction — T9's line was wrong about `addSource`, and it splits.**
+  Reading nimterm's loop settles it: `EventSource`/`addSource` are polled by the
+  loop, so they presume a loop that is free. neopi's sink is called from
+  *inside* the turn's blocking `evalJson`, so the loop is not running and there
+  is nothing to poll: the event vocabulary is adoptable now, the source model
+  is ROADMAP #16's. T9a is therefore the dispatch/render ownership and T9b (the
+  incremental sync, to retire the per-turn transcript rebuild) is deferred
+  behind a dependency decision — dropping that rebuild cleanly needs
+  `appendItem` in nimterm, whose `linesValid` is private and whose
+  `setTranscript` clears every cache, and bumping the pinned revision is not
+  the parent's call to make alone.
+- **Evidence — a third dead field, found while scoping T9.**
+  `TuiState.streaming` was read by `refreshFooter` and written non-empty by
+  **nobody**: production only initialised it to `""` and reset it to `""`, and
+  the only thing that ever set it was a test. So the footer's `| working`
+  indicator never reached a frame — the same class as `statusLine` (a test
+  asserting a field that production never writes, and a README promising the
+  behaviour). T9a fixes it by making the field mean what it is read for.
+- **Evidence — T9a closed (`1bb3ff5`), and the tooling changed mid-task.** The
+  skills' own gap surfaced first: `.codegraph` was reported as Lua-only and the
+  language server was not loaded, so the session had been grepping Nim — and
+  grepping is what *nearly* hid the bench's dependence on `flushFrame` (it was
+  found by breaking it). With the Nim-parsing codegraph fork and nimlangserver
+  active, both questions became one call: codegraph listed `flushFrame` with
+  "3 callers in `bench/tui_bench.nim`, `src/neopi/tui.nim`" and `feedKeys` with
+  2, and `nimCheckFile` returned diagnostics **in seconds instead of a build** —
+  it caught a `streaming: ""` left in the constructor that a 60-second build
+  would have reported, and a dead `sessionRegistryKey` nobody knew about. Two
+  reds were observed in this task, both the parent's: the 131-test run failed on
+  `st.inputW.text == ""` and `#neopi.steeringQueue == 1` because the test's
+  fake-app helper never focused the input, and nimterm routes keys from the
+  focused widget — production does it in `tuiLoop`, so the helper was not
+  assembling what it claimed to. The narrow `grep` that missed the constructor
+  is also a lesson worth keeping: after a rename, grep the bare identifier, not
+  the access pattern.
 - **Open.** Two things still outside the cut: T7 (the transcript search, which
   stood on T4's batch to place it and now stands alone) and T10 (the standing
   UX regression gate — failure (3) above is its argument). **Batch 2 is next
