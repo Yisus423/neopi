@@ -7,12 +7,12 @@
 ## runs anywhere. What it measures is what the streaming path actually pays
 ## per frame on a synthetic transcript of N entries:
 ##
-##   idle     one `flushFrame` on an unchanged transcript (the frame loop)
+##   idle     one `presentApp` on an unchanged transcript (the frame loop)
 ##   render   `App.render` — the app loop's own clear + full tree render +
 ##            present, the path the loop takes when it owns the process
-##   delta    one streamed text delta applied to the transcript plus a
-##            `flushFrame` (the exact sequence the stream sink runs per event)
-##   key      one key dispatched through the app plus a `flushFrame` (the
+##   delta    one streamed text delta posted as an agent event, the app's
+##            dispatch of it, and a `presentApp` (what the stream sink runs)
+##   key      one key dispatched through the app plus a `presentApp` (the
 ##            input path's latency)
 ##
 ## plus the in-process time to the first frame and the peak RSS. The sizes
@@ -145,7 +145,7 @@ proc measure(entries, frames: int, path: string, reportFirstFrame: bool) =
   st.app = newApp(backend, screen)
   st.appReady = true
   for _ in 0 ..< warmupFrames:
-    flushFrame(addr st)
+    presentApp(addr st)
   if reportFirstFrame:
     echo "bench first_frame_ms=", fmt(msSince(harnessStart)),
       " session_build_ms=", fmt(msSince(built))
@@ -158,7 +158,7 @@ proc measure(entries, frames: int, path: string, reportFirstFrame: bool) =
   let idleStart = getMonoTime()
   while idle.len < frames and msSince(idleStart) < budgetMs:
     let t0 = getMonoTime()
-    flushFrame(addr st)
+    presentApp(addr st)
     idle.add msSince(t0)
   let renderStart = getMonoTime()
   while render.len < frames and msSince(renderStart) < budgetMs:
@@ -170,7 +170,7 @@ proc measure(entries, frames: int, path: string, reportFirstFrame: bool) =
   # drops the text would be a wrong fix, so it is verified once here, outside
   # the timed region, against the presented canvas.
   st.transcriptW.apply(AgentUiEvent(kind: ueTextDelta, text: deltaText))
-  flushFrame(addr st)
+  presentApp(addr st)
   if not st.transcriptW.transcript.items[^1].text.endsWith(deltaText):
     quit("tui_bench: the delta did not reach the transcript")
   if not st.app.frame.plainText.contains("streamed"):
@@ -188,7 +188,7 @@ proc measure(entries, frames: int, path: string, reportFirstFrame: bool) =
   while delta.len < frames and msSince(deltaStart) < budgetMs:
     let t0 = getMonoTime()
     st.transcriptW.apply(AgentUiEvent(kind: ueTextDelta, text: deltaText))
-    flushFrame(addr st)
+    presentApp(addr st)
     delta.add msSince(t0)
     st.transcriptW.transcript.items.setLen(tailLen)
     if tailLen > 0:
@@ -197,7 +197,7 @@ proc measure(entries, frames: int, path: string, reportFirstFrame: bool) =
   while key.len < frames and msSince(keyStart) < budgetMs:
     let t0 = getMonoTime()
     st.app.dispatch(UiEvent(kind: uiKey, key: keyChar, text: "x"))
-    flushFrame(addr st)
+    presentApp(addr st)
     key.add msSince(t0)
 
   echo "bench entries=", entries, " budget_ms=", fmt(budgetMs),

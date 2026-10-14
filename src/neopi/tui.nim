@@ -334,7 +334,15 @@ type
       ## Where `ui.title` writes. `initTuiState` points it at the terminal's
       ## OSC 2 and the specs replace it, so the title is observable without an
       ## escape sequence reaching the test's stdout.
-    streaming*: string
+    working*: bool
+      ## Whether the turn drive is running. The footer's working token reads it
+      ## and it decides that a submit is steering rather than another turn —
+      ## and note that until this slice nothing ever set it, so the indicator
+      ## never reached a frame.
+    abortRequested*: bool
+      ## The Esc/Ctrl+C the app answered while the turn ran: the sink reads it
+      ## and cancels the stream, so the abort is a fact of the state instead of
+      ## a value travelling out of a key loop.
     clipboard*: proc (text: string)
       ## Where the transcript's `copy` action lands. `initTuiState` points it
       ## at the terminal's clipboard and the specs replace it, so the copy is
@@ -378,8 +386,9 @@ proc initTuiState*(provider, model: string, sess: Session,
   let footerW = newText("")
   result = TuiState(provider: provider, model: model, sess: sess, lua: nil,
     root: root, transcriptW: transcriptW, inputW: inputW, footerW: footerW,
-    streaming: "", quit: false, clipboard: copyToClipboard,
+    quit: false, clipboard: copyToClipboard,
     workingText: "", title: "", titleWriter: terminalTitleWriter,
+    working: false, abortRequested: false,
     chrome: newChrome())
 
 proc transcriptRoutedKey*(key: Key): bool =
@@ -399,8 +408,8 @@ proc routeTranscriptKey*(state: ptr TuiState, event: UiEvent): bool =
   ## response: nimterm's TranscriptWidget scrolls on the page keys and still
   ## answers `eventIgnored` (its scroll branches carry no `return`), so a
   ## caller that trusted `handled` would let the editor consume the key as
-  ## well. Both key paths share this rule — the app's global `onEvent` while
-  ## the loop runs and the streaming `feedKeys`.
+  ## well. Both key paths share this rule — the app's global `onEvent` and the
+  ## app's own dispatch, which is what pumps the keys while the turn runs.
   if event.kind != uiKey or not transcriptRoutedKey(event.key):
     return false
   if state[].transcriptW.isNil:
@@ -453,14 +462,14 @@ proc footerText*(state: TuiState, working: bool): string =
 proc refreshFooter*(state: ptr TuiState) =
   ## Redraw the footer line (the nimlet pattern: the footer refreshes on the
   ## state changes, not on a timer), through the memoized totals.
-  let working = state[].streaming.len > 0
+  let working = state[].working
   state[].footerW.text = footerLine(state[].provider, state[].model,
     footerTokens(state), working, state[].workingText)
 
 proc buildScreen*(state: ptr TuiState): Widget =
   ## The widget tree: the transcript (its own scroll viewport follows the
   ## tail), the input, and the footer. The screen is wired into the state on
-  ## the way out: `flushFrame` draws through `state.screen`, so a builder that
+  ## the way out: `presentApp` draws through `state.screen`, so a builder that
   ## left the state unwired would present an empty frame — the measurement
   ## harness's own self-check caught exactly that.
   state[].transcriptW = newTranscriptWidget()
@@ -474,7 +483,6 @@ proc buildScreen*(state: ptr TuiState): Widget =
   result = Widget(screen)
 
 const tuiStateRegistryKey = "neopi.tui.state"
-const sessionRegistryKey = "neopi.session"
 
 proc appendUserLine*(state: ptr TuiState, text: string) =
   ## Append a user entry to the transcript widget and mark the lines stale.
@@ -517,52 +525,39 @@ proc queueSteering(L: LuaState, text: string) =
   lua_rawseti(L, -2, n + 1)
   lua_pop(L, 2)
 
-proc feedKeys*(state: ptr TuiState): bool =
-  ## Drain the backend's pending key events without blocking (called from
-  ## the stream sink while the app loop is inside the turn's waitFor, and
-  ## from the turn drive's between-turns gap) and return whether an abort
-  ## (Esc/Ctrl+C) was seen. This is the piece that keeps the keys alive
-  ## without a timer: the waitFor pumps the dispatch, and the sink and the
-  ## gap poll the keys here. The editing keys forward to the input widget
-  ## (nimlet's composer-alive pattern): the draft builds during the run, so
-  ## steering is typable at all.
-  result = false
+proc postDelta*(state: ptr TuiState, text: string) =
+  ## Hand one streamed delta to the app's queue as an agent event. The app owns
+  ## the transcript update and the frame: this only says what happened. Going
+  ## through the queue instead of drawing here is what gives the render path a
+  ## single owner, and the widget's `apply` keeps the per-item line caches
+  ## (the model's apply plus `invalidateLines` was the sledgehammer that reset
+  ## every cache revision and re-wrapped the whole transcript per token: 6.6 s
+  ## at 5000 entries, the number bench/tui_bench.nim measured).
   if not state[].appReady:
     return
-  while true:
-    let event = state[].app.backend.readEvent(0)
-    if event.kind == uiNone:
-      break
-    if event.kind == uiKey:
-      if event.key == keyEscape or event.key == keyCtrlC:
-        return true
-      elif event.key == keyEnter:
-        # The steering while streaming: queue the input's text.
-        let draft = state[].inputW.text
-        if draft.len > 0 and not state[].lua.isNil:
-          queueSteering(state[].lua, draft)
-          state[].inputW.clear()
-      else:
-        # The transcript's keys answer during the run too (the shared rule),
-        # and then the editing keys stay alive (the draft builds so steering
-        # is typable): the same dispatch the app loop runs.
-        if not routeTranscriptKey(state, event):
-          discard state[].inputW.handle(event)
+  state[].app.post(agentEvent(AgentUiEvent(kind: ueTextDelta, text: text)))
 
-proc flushFrame*(state: ptr TuiState) =
-  ## Present the current frame (the transcript's changes) without the app
-  ## loop: the stream sink calls this so the deltas render live during the
-  ## turn's waitFor. appReady guards the pre-run frames (the widget tree
-  ## renders through the app's canvas only while the app exists). The screen
-  ## owns the layout, so this draws through it instead of repeating the rows
-  ## here — the two used to drift apart by hand.
+proc pumpApp*(state: ptr TuiState): bool =
+  ## Drain everything pending through the app's own dispatch — the keys, the
+  ## resume menu, the transcript's keys and the agent events all take the one
+  ## path — and report whether the user asked to abort the turn. The app
+  ## renders as it goes (a key forces a frame, the rest wait for the frame
+  ## budget), so this is the whole loop and not half of it.
+  if not state[].appReady:
+    return state[].abortRequested
+  while state[].app.step(0):
+    discard
+  state[].abortRequested
+
+proc presentApp*(state: ptr TuiState) =
+  ## Present the frame through the app, which owns the canvas, the dirty flag
+  ## and the frame budget. The stream sink used to clear, render and present by
+  ## hand, which is how it could present a frame nothing had invalidated.
   refreshFooter(state)
-  if state[].appReady:
-    state[].app.frame.clear()
-    if not state[].screen.isNil:
-      state[].screen.render(state[].app.frame,
-        rect(0, 0, state[].app.size.w, state[].app.size.h))
-    state[].app.backend.present(state[].app.frame)
+  if not state[].appReady:
+    return
+  state[].app.invalidate()
+  state[].app.flush()
 
 
 proc sessionLabel*(path: string): string =
@@ -634,7 +629,7 @@ proc resumeSession*(state: ptr TuiState, L: LuaState, path: string) =
     return
   state[].menu = nil
   if not state[].screen.isNil: state[].screen.menu = nil
-  state[].streaming = ""
+  state[].working = false
   setCoreStatus(state, "")
   # Rebuild the transcript from the loaded session and refresh.
   applySession(state[].transcriptW.transcript, state[].sess.history())
@@ -646,24 +641,16 @@ proc resumeSession*(state: ptr TuiState, L: LuaState, path: string) =
 {.push stacktrace: off.}
 
 proc tuiOnEventCB(L: LuaState): cint {.cdecl.} =
-  ## The stream sink's C callback: the first upvalue is the TUI state
-  ## pointer; apply the {text = delta} event to the transcript, feed the
-  ## pending keys (the abort check), flush the frame live, and return false
-  ## when the user aborted (the stream's cancel — the same contract as
-  ## ever).
+  ## The stream sink's C callback: the first upvalue is the TUI state pointer.
+  ## It hands the delta to the app as an agent event, lets the app dispatch —
+  ## which is what drains the keys and renders — and answers false when the
+  ## user asked to abort, the stream's cancel contract (the same as ever).
   let state = cast[ptr TuiState](lua_touserdata(L, luaUpvalueIndex(1)))
   let event = jsonOfStack(L, 1)
   if event.kind == JObject and event.hasKey("text"):
-    let delta = event["text"].getStr("")
-    # The WIDGET's apply, not the model's: the model bumps the mutated item's
-    # `revision`, the widget clears `linesValid`, and the per-item line caches
-    # compare against that revision — so only the tail item re-renders. The
-    # model's apply plus `invalidateLines()` (the sledgehammer) reset EVERY
-    # cache revision and re-wrapped the whole transcript per streamed token:
-    # 74 ms at 50 entries and 6.6 s at 5000, measured by bench/tui_bench.nim.
-    state[].transcriptW.apply(AgentUiEvent(kind: ueTextDelta, text: delta))
-  let abort = feedKeys(state)
-  flushFrame(state)
+    postDelta(state, event["text"].getStr(""))
+  let abort = pumpApp(state)
+  presentApp(state)
   lua_pushboolean(L, cint(ord(not abort)))
   result = 1
 
@@ -672,9 +659,9 @@ proc tuiOnEventCB(L: LuaState): cint {.cdecl.} =
 proc exposeTuiSink*(L: LuaState, state: ptr TuiState, model: string) =
   ## Expose the TUI's stream sink and the model on the `neopi` table, where
   ## the loop's chunk references them: `_tuiOnEvent` is the Lua function
-  ## carrying the TUI state pointer as its first upvalue (it applies the
-  ## deltas to the transcript, feeds the keys for the abort, and flushes
-  ## the frame live) and `_tuiModel` is the model as a Lua string. Also
+  ## carrying the TUI state pointer as its first upvalue (it hands the deltas
+  ## to the app as agent events, lets the app dispatch and render, and answers
+  ## the abort) and `_tuiModel` is the model as a Lua string. Also
   ## binds the TUI state pointer in the registry (the "neopi.tui.state"
   ## key) and creates the steering queue: the Lua array table the sink
   ## fills (Enter while streaming) and the loop drains between turns.
@@ -746,22 +733,21 @@ proc steeringQueueLen(L: LuaState): int =
   lua_pop(L, 1)
 
 proc drainGapKeys(state: ptr TuiState, L: LuaState): bool =
-  ## The between-turns gap: drain the backend's pending keys (the keys
-  ## alive between turns — Esc aborts the drive, Enter queues the
-  ## steering, the editing keys build the draft), flush the frame, and
-  ## return whether steering was queued (it asks for another turn — pi's
-  ## model; the next turn's drainSteering delivers it).
+  ## The between-turns gap: let the app drain the pending keys (Esc asks for
+  ## the abort, Enter queues steering, the editing keys build the draft) and
+  ## present the frame, then report whether steering was queued — it asks for
+  ## another turn, pi's model, and the next turn's drainSteering delivers it.
   let before = steeringQueueLen(L)
-  discard feedKeys(state)
-  flushFrame(state)
+  discard pumpApp(state)
+  presentApp(state)
   result = steeringQueueLen(L) > before
 
 proc sendTurn*(state: ptr TuiState, L: LuaState) =
   ## Dispatch the input's text: /resume opens the menu, other /-prefixed
   ## inputs run through the runtime's registry, and plain text becomes a
-  ## user entry + the turn drive: one turn per evalJson, the keys alive
-  ## between turns (nimlet's while-true — no step cap: the user steers and
-  ## aborts).
+  ## user entry + the turn drive: one turn per evalJson, with the app draining
+  ## keys and events between turns (nimlet's while-true — no step cap: the user
+  ## steers and aborts).
   let text = state[].inputW.text
   if text.len == 0:
     return
@@ -776,13 +762,14 @@ proc sendTurn*(state: ptr TuiState, L: LuaState) =
     return
   appendUserLine(state, text)
   state[].inputW.clear()
-  refreshFooter(state)
   # The turn drive: agent.runTurn(neopi.session, {model, onEvent}) — one
-  # call per turn, the keys alive between turns. The sink and the model
-  # come off the neopi table.
+  # call per turn. `working` is up for the whole drive, which is what the
+  # footer's token reads and what makes a submit steer instead of recursing.
   let chunk = "local agent = require('agent'); " &
     "return agent.runTurn(neopi.session, " &
     "{model = neopi._tuiModel, onEvent = neopi._tuiOnEvent})"
+  state[].working = true
+  state[].abortRequested = false
   while true:
     var response: JsonNode
     try:
@@ -794,17 +781,16 @@ proc sendTurn*(state: ptr TuiState, L: LuaState) =
     # sink already streamed the assistant text).
     applySession(state[].transcriptW.transcript, state[].sess.history())
     state[].transcriptW.invalidateLines()
-    refreshFooter(state)
-    # The gap between turns: the keys alive.
+    # The gap between turns: the app drains the keys and presents.
     let steered = drainGapKeys(state, L)
-    if not turnContinues(response, steered):
+    if state[].abortRequested or not turnContinues(response, steered):
       break
-  state[].streaming = ""
+  state[].working = false
   # Rebuild the transcript from the session (the assistant/tool entries the
-  # turns appended) and refresh.
+  # turns appended) and present.
   applySession(state[].transcriptW.transcript, state[].sess.history())
   state[].transcriptW.invalidateLines()
-  refreshFooter(state)
+  presentApp(state)
 
 proc handleTuiAction*(state: ptr TuiState, L: LuaState,
                       action: UiAction): bool =
@@ -1065,12 +1051,80 @@ proc installTuiTheme*(requested: string, depth: ColorDepth): Theme =
     return theme
   currentTheme
 
+proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
+  ## Attach the TUI's app callbacks, in one place, so the keys, the agent
+  ## events and the widget actions all take the path the app owns — and so the
+  ## wiring is testable without a terminal, which the loop itself could not be.
+  ##
+  ## The precedence, in order: the agent events from the stream land in the
+  ## transcript; while the turn runs Esc and Ctrl+C are the abort request, which
+  ## is what cancels the stream (exiting there would drop the partial turn);
+  ## Ctrl+C alone exits; the resume menu keeps its keys while it is open, paging
+  ## included; Esc with nothing running clears the composer, which is what the
+  ## README promises; and the transcript owns its page keys before the focused
+  ## editor sees them.
+  app.onEvent = proc (app: var App, event: UiEvent): EventResponse =
+    if event.kind == uiAgent:
+      state[].transcriptW.apply(event.agent)
+      app.invalidate()
+      return eventHandled
+    if event.kind != uiKey:
+      return eventIgnored
+    if state[].working and
+        (event.key == keyEscape or event.key == keyCtrlC):
+      state[].abortRequested = true
+      return eventHandled
+    if event.key == keyCtrlC:
+      app.running = false
+      return eventHandled
+    if not state[].screen.isNil and not state[].screen.menu.isNil and
+        state[].screen.menu.items.len > 0:
+      case event.key
+      of keyUp, keyDown, keyPageUp, keyPageDown:
+        let response = state[].screen.menu.handle(event)
+        app.invalidate()
+        if response.handled: return response
+      of keyEnter:
+        let menu = state[].screen.menu
+        if menu.items.len > 0:
+          let picked = menu.items[menu.selected]
+          resumeSession(state, L, picked.description)
+        return eventHandled
+      of keyEscape:
+        state[].screen.menu = nil
+        state[].menu = nil
+        app.invalidate()
+        return eventHandled
+      else:
+        discard
+    if event.key == keyEscape:
+      state[].inputW.clear()
+      app.invalidate()
+      return eventHandled
+    if routeTranscriptKey(state, event):
+      app.invalidate()
+      return eventHandled
+    eventIgnored
+
+  app.onAction = proc (app: var App, action: UiAction) =
+    ## A submit while the turn runs is steering, not another turn: the drive is
+    ## already inside `evalJson` and a nested turn would recurse into it. The
+    ## rest goes to the shared action dispatch.
+    if action.kind == "submit" and state[].working:
+      let draft = state[].inputW.text
+      if draft.len > 0 and not L.isNil:
+        queueSteering(L, draft)
+      state[].inputW.clear()
+      app.invalidate()
+      return
+    discard handleTuiAction(state, L, action)
+
 proc tuiLoop*(sess: Session, L: LuaState, provider, model: string,
               root = ""): string =
   ## Run the TUI: nimterm's App is the loop owner; the send path runs the
-  ## same agent.run chunk the print mode uses; the sink flushes the frame
-  ## live during the turn's waitFor and feeds the keys for the abort.
-  ## Returns "" on a clean exit or the loop's failure message.
+  ## same agent.run chunk the print mode uses, and the stream sink hands the
+  ## app its events and lets it dispatch and present while the turn's waitFor
+  ## pumps it. Returns "" on a clean exit or the loop's failure message.
   # The theme goes in before anything renders: nimterm's module default is
   # the dark 256 palette unconditionally, so without this the TUI ignores a
   # light background, a color-less terminal and a truecolor one alike.
@@ -1079,55 +1133,13 @@ proc tuiLoop*(sess: Session, L: LuaState, provider, model: string,
   exposeTuiSink(L, addr state, model)
   let screenWidget = buildScreen(addr state)
   var app = newApp(newPlatformBackend(fullscreen = true), screenWidget)
-  # The sink renders through this copy: the widgets are refs (the same
-  # objects), and the backend presents the copied canvas — safe because the
-  # sink runs on the same thread (the turn's waitFor pumps the dispatch).
+  # The app owns the frame from here: the sink hands it events and lets it
+  # dispatch and present, and the turn's waitFor is what pumps it.
   state.app = app
   state.appReady = true
   app.focus(Widget(state.inputW))
   refreshFooter(addr state)
-
-  app.onEvent = proc (app: var App, event: UiEvent): EventResponse =
-    ## The global keys before the widgets: Ctrl+C exits; the select menu
-    ## (when open) is the input's controller: Up/Down move, Enter picks
-    ## (the swap), Esc closes.
-    if event.kind == uiKey:
-      if event.key == keyCtrlC:
-        app.running = false
-        return eventHandled
-      if not state.screen.menu.isNil and state.screen.menu.items.len > 0:
-        case event.key
-        of keyUp, keyDown, keyPageUp, keyPageDown:
-          let response = state.screen.menu.handle(event)
-          app.invalidate()
-          if response.handled: return response
-        of keyEnter:
-          let menu = state.screen.menu
-          if menu.items.len > 0:
-            let picked = menu.items[menu.selected]
-            resumeSession(addr state, L, picked.description)
-          return eventHandled
-        of keyEscape:
-          state.screen.menu = nil
-          state.menu = nil
-          app.invalidate()
-          return eventHandled
-        else:
-          discard
-      # The transcript owns the page keys and the expand toggle before the
-      # focused editor sees them (the shared rule `feedKeys` runs too). The
-      # menu above keeps precedence while it is open, so paging belongs to it
-      # instead of scrolling the transcript behind it.
-      if routeTranscriptKey(addr state, event):
-        app.invalidate()
-        return eventHandled
-    return eventIgnored
-
-  app.onAction = proc (app: var App, action: UiAction) =
-    ## The focused widget's actions: the composer's submit drives the turn
-    ## (the commands, /resume, or the turn) and the transcript's drag
-    ## selection lands on the clipboard.
-    discard handleTuiAction(addr state, L, action)
+  wireApp(addr state, L, app)
 
   app.run()
   return ""

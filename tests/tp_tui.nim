@@ -44,6 +44,37 @@ proc loadRuntimeEntry(L: LuaState) =
     escapeLua(dir / "?.lua;" & dir / "?/init.lua") & ";' .. package.path")
   runScript(L, "require('init')")
 
+type
+  TuiFakeBackend = ref object of TerminalBackend
+    ## A terminal that replays queued events and keeps every frame it was
+    ## presented: the app's wiring is testable without a terminal (the pattern
+    ## the measurement harness uses).
+    events: seq[UiEvent]
+    frames: seq[string]
+
+method size(backend: TuiFakeBackend): Size = size(40, 10)
+
+method readEvent(backend: TuiFakeBackend, timeoutMs: int): UiEvent =
+  if backend.events.len == 0:
+    return UiEvent(kind: uiNone)
+  result = backend.events[0]
+  backend.events.delete(0)
+
+method present(backend: TuiFakeBackend, frame: Canvas) =
+  backend.frames.add frame.plainText
+
+proc wireFakeApp(state: ptr TuiState): TuiFakeBackend =
+  ## Assemble the app the way `tuiLoop` does, on a fake backend: `buildScreen`
+  ## wires the state, the input takes the focus (the composer owns the keys at
+  ## start, which is what makes a key reach it through the app's dispatch) and
+  ## the caller adds the callbacks with `wireApp`. Without production's
+  ## assembly there is no queue, no dispatch and no frame.
+  result = TuiFakeBackend()
+  let screen = buildScreen(state)
+  state[].app = newApp(result, screen)
+  state[].app.focus(Widget(state[].inputW))
+  state[].appReady = true
+
 suite "the transcript adapter":
   test "the session entries map onto nimterm's transcript items":
     let entries = @[
@@ -227,7 +258,7 @@ suite "the turn drive":
       # The scripted provider: the first turn answers with a write tool
       # call, the second with the final text. The TUI drives one turn per
       # evalJson; the sink binds the model and exercises the stream path
-      # (the headless state has no app — feedKeys and flushFrame guard it).
+      # (the headless state has no app — pumpApp and presentApp guard it).
       runScript(L, """
         neopi.provider.setScripted({
           {toolCalls = {{id = "call-1", name = "write",
@@ -332,6 +363,104 @@ suite "the turn drive":
       removeDir(root)
       removeFile(path)
 
+  test "the working indicator reaches a presented frame while the turn runs":
+    let root = freshWorkspace("neopi-tp-working")
+    let path = freshSessionPath("working")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      runScript(L, """neopi.provider.setScripted({{text = "ok"}})""")
+      st.inputW.setText("go")
+      sendTurn(addr st, L)
+      # The turn holds `working` for its whole drive, so at least one presented
+      # frame carried the indicator. It never did before: production wrote the
+      # field nowhere and only a test ever set it.
+      check backend.frames.len > 0
+      var sawWorking = false
+      for frame in backend.frames:
+        if "| working" in frame: sawWorking = true
+      check sawWorking
+      # And the flag is down once the drive is over.
+      check not st.working
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "Esc clears the composer when idle and asks to abort when the turn runs":
+    let root = freshWorkspace("neopi-tp-esc")
+    let path = freshSessionPath("esc")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      st.inputW.setText("a draft")
+      backend.events.add UiEvent(kind: uiKey, key: keyEscape)
+      check not pumpApp(addr st)
+      # Nothing was running: the key cleared the composer, which is what the
+      # README promises, and it asked to abort nothing.
+      check st.inputW.text == ""
+      check not st.abortRequested
+      # With the turn running, the same key is the abort request.
+      st.working = true
+      st.inputW.setText("a draft")
+      backend.events.add UiEvent(kind: uiKey, key: keyEscape)
+      check pumpApp(addr st)
+      check st.abortRequested
+      # The draft survives an abort: it was not a submit.
+      check st.inputW.text == "a draft"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "a submit while the turn runs queues steering instead of a nested turn":
+    let root = freshWorkspace("neopi-tp-steer")
+    let path = freshSessionPath("steer")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      st.working = true
+      st.inputW.setText("keep going")
+      backend.events.add UiEvent(kind: uiKey, key: keyEnter)
+      discard pumpApp(addr st)
+      # The submit became a steering message: a nested turn would recurse into
+      # the drive that is already running.
+      check st.inputW.text == ""
+      check evalJson(L, "return #neopi.steeringQueue").getInt == 1
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "a posted agent event reaches the transcript and the presented frame":
+    var st = initTuiState("p", "m", nil)
+    let backend = wireFakeApp(addr st)
+    wireApp(addr st, nil, st.app)
+    postDelta(addr st, "streamed text")
+    discard pumpApp(addr st)
+    check st.transcriptW.transcript.items.len == 1
+    check st.transcriptW.transcript.items[0].text == "streamed text"
+    check backend.frames.len > 0
+    check "streamed text" in backend.frames[^1]
+
 suite "the footer":
   test "the totals are the branch's and the memo notices every change":
     # `refreshFooter` memoizes the branch's token totals (the walk is
@@ -366,7 +495,7 @@ suite "the footer":
       check st.footerW.text == "p/m | in 11 | out 6"
       check st.footerW.text == footerText(st, false)
 
-      st.streaming = "partial"
+      st.working = true
       refreshFooter(addr st)
       check st.footerW.text == "p/m | in 11 | out 6 | working"
     finally:
