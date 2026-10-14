@@ -5,17 +5,29 @@ private project: the public API is frozen until real consumers exist.
 
 ## CodeGraph and the Nim language server
 
-The `.codegraph/` index exists and indexes ONLY the Lua layer (it has no
-parser for Nim — verified: "Files by Language: lua 4" of ~20 repo files).
-Use it BEFORE grep for the runtime Lua code:
+The `.codegraph/` index covers the Lua layer AND, since the Nim-parser fork,
+the Nim sources: `codegraph explore "<question>"` answers most code questions
+(the symbols, their verbatim source and the call paths between them) for both.
+Use it BEFORE grep, and reach for the language server when you need
+diagnostics:
 
-- **CodeGraph (Lua)**: `codegraph explore "<question>"` or the MCP tool —
-  the symbols and call paths of runtime/*.lua and tests/spec/*.lua.
-- **nimlangserver MCP (Nim)**: the nimFindSymbols/nimFindReferences tools for
-  symbol search and references, nimCheckProject/nimCheckFile for diagnostics —
-  configured in .pi/mcp.json (native pi project config; local-only, not
-  versioned; loaded at session start, /mcp inspects in-session).
-- **grep/find**: the fallback when the two above cannot answer.
+- **CodeGraph (Lua + Nim)**: `codegraph explore "<question>"` or the MCP tool
+  — the symbols and call paths of `runtime/*.lua`, `tests/spec/*.lua`,
+  `src/neopi/*.nim`, `tests/*.nim` and `bench/*.nim`. "Blast radius" on a
+  symbol lists its callers, which is how a rename finds the harness that
+  depends on it instead of breaking it.
+- **nimlangserver MCP (Nim)**: nimFindSymbols for symbol search,
+  nimFindReferences for references (it takes a file/line/column — the symbol
+  under the cursor), and nimCheckProject/nimCheckFile for diagnostics. The
+  check is the fast loop: diagnostics in seconds instead of paying a full
+  build to find a typo. Configured in .pi/mcp.json (native pi project config;
+  local-only, not versioned; loaded at session start, /mcp inspects
+  in-session) — verify it is actually loaded, because a session without it
+  silently falls back to grep.
+- **grep/find**: the fallback when the two above cannot answer. After renaming
+  a symbol, grep the **bare identifier**, not the access pattern:
+  `\.streaming` misses the constructor's `streaming: ""`, and the build will
+  be what finds it.
 
 ## The build recipe (exact)
 
