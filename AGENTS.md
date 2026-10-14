@@ -64,10 +64,14 @@ guarantee. `nimble uninstall` does NOT help: it only removes what
 `nimble install` brought in, and dependencies fail with `Failed uninstall -
 no packages to delete`. The step: read `vcsRevision` inside each installed
 copy's `nimblemeta.json`, delete the one that is not the pinned commit (guard:
-exactly one candidate, and it must live under `~/.nimble/pkgs2/`), then
-re-verify with a probe that calls a symbol only the pinned revision has. **The
-`vcsRevision` is what proves the copy is the pin; the version number does not,
-because it is the same in both.**
+exactly one candidate, and it must live under `~/.nimble/pkgs2/`), clear the
+Nim caches whose dependency lists still name the removed path
+(`~/.cache/nim/<target>_d` — otherwise the build dies with `cannot open:
+<removed>/nimterm.nim`, and the language server loses its context too, which
+shows up as hundreds of `cannot open file: nimterm` errors), and re-verify with
+a probe that calls a symbol only the pinned revision has. **The `vcsRevision`
+is what proves the copy is the pin; the version number does not, because it is
+the same in both.**
 
 ## Testing
 
