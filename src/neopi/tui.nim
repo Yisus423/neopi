@@ -339,6 +339,11 @@ type
       ## and it decides that a submit is steering rather than another turn —
       ## and note that until this slice nothing ever set it, so the indicator
       ## never reached a frame.
+    syncedId*: int
+      ## How far the transcript has been brought up to the session: the highest
+      ## entry id it already shows. It tracks what is *displayed*, whoever put
+      ## it there — the sync appends only what is past it, and the turn's own
+      ## user line advances it so the same entry is never added twice.
     abortRequested*: bool
       ## The Esc/Ctrl+C the app answered while the turn ran: the sink reads it
       ## and cancels the stream, so the abort is a fact of the state instead of
@@ -389,6 +394,7 @@ proc initTuiState*(provider, model: string, sess: Session,
     quit: false, clipboard: copyToClipboard,
     workingText: "", title: "", titleWriter: terminalTitleWriter,
     working: false, abortRequested: false,
+    syncedId: 0,
     chrome: newChrome())
 
 proc transcriptRoutedKey*(key: Key): bool =
@@ -466,6 +472,41 @@ proc refreshFooter*(state: ptr TuiState) =
   state[].footerW.text = footerLine(state[].provider, state[].model,
     footerTokens(state), working, state[].workingText)
 
+proc seedTranscript*(state: ptr TuiState) =
+  ## Rebuild the transcript from the session and remember how far it goes. This
+  ## is the full path, for a fresh screen and for a branch change — a session
+  ## swap or a `navigateTo` — where the entries are not a continuation of what
+  ## is rendered.
+  if state[].sess.isNil:
+    state[].syncedId = 0
+    return
+  let entries = state[].sess.history()
+  applySession(state[].transcriptW.transcript, entries)
+  state[].transcriptW.invalidateLines()
+  state[].syncedId = 0
+  for entry in entries:
+    if entry.id > state[].syncedId:
+      state[].syncedId = entry.id
+
+proc syncTranscript*(state: ptr TuiState) =
+  ## Bring the transcript up to the session by appending only what the session
+  ## gained, so the items already rendered keep everything they carry: a tool
+  ## the user expanded, an approval waiting for an answer, the selection. The
+  ## turn used to run a full rebuild, which replaced every item and so threw
+  ## all of that away (measured by the test that pins the premise).
+  ##
+  ## A branch that moved back is not a continuation, so it takes the full path:
+  ## `navigateTo`, and a session swap whose ids start below the watermark.
+  if state[].sess.isNil:
+    return
+  if state[].sess.currentId < state[].syncedId:
+    seedTranscript(state)
+    return
+  for entry in state[].sess.history():
+    if entry.id > state[].syncedId:
+      state[].transcriptW.appendItem(adapterItem(entry))
+      state[].syncedId = entry.id
+
 proc buildScreen*(state: ptr TuiState): Widget =
   ## The widget tree: the transcript (its own scroll viewport follows the
   ## tail), the input, and the footer. The screen is wired into the state on
@@ -473,9 +514,7 @@ proc buildScreen*(state: ptr TuiState): Widget =
   ## left the state unwired would present an empty frame — the measurement
   ## harness's own self-check caught exactly that.
   state[].transcriptW = newTranscriptWidget()
-  if not state[].sess.isNil:
-    applySession(state[].transcriptW.transcript, state[].sess.history())
-    state[].transcriptW.invalidateLines()
+  seedTranscript(state)
   let screen = NeopiScreen(transcriptW: state[].transcriptW,
     inputW: state[].inputW, footerW: state[].footerW, menu: nil,
     chrome: state[].chrome)
@@ -560,6 +599,18 @@ proc presentApp*(state: ptr TuiState) =
   state[].app.flush()
 
 
+proc postRunFinished*(state: ptr TuiState) =
+  ## Close the streamed run in the widget. The deltas were provisional — the
+  ## session carries the entry they belong to — and a run that never ends would
+  ## leave its pending item behind, so the sync would append the real entry
+  ## beside it and the same text would show twice. The event goes through the
+  ## queue like every other one, and the pump right after is what settles the
+  ## widget state before the sync reads it.
+  if not state[].appReady:
+    return
+  state[].app.post(agentEvent(AgentUiEvent(kind: ueRunFinished)))
+  discard pumpApp(state)
+
 proc sessionLabel*(path: string): string =
   ## The label for one session file: the first user entry's text (truncated
   ## to 40 chars), or the file name when the session has no user entry or
@@ -631,9 +682,8 @@ proc resumeSession*(state: ptr TuiState, L: LuaState, path: string) =
   if not state[].screen.isNil: state[].screen.menu = nil
   state[].working = false
   setCoreStatus(state, "")
-  # Rebuild the transcript from the loaded session and refresh.
-  applySession(state[].transcriptW.transcript, state[].sess.history())
-  state[].transcriptW.invalidateLines()
+  # The loaded session is a new tree: rebuild and re-watermark.
+  seedTranscript(state)
   refreshFooter(state)
 
 # stacktrace off: the ui/sink callbacks' frames a lua_error longjmp abandons
@@ -761,6 +811,9 @@ proc sendTurn*(state: ptr TuiState, L: LuaState) =
     appendStatusLine(state, "cannot append: " & e.msg)
     return
   appendUserLine(state, text)
+  # The widget already shows this entry, so the watermark moves with it: it
+  # tracks what the transcript displays, whoever put it there.
+  state[].syncedId = state[].sess.currentId
   state[].inputW.clear()
   # The turn drive: agent.runTurn(neopi.session, {model, onEvent}) — one
   # call per turn. `working` is up for the whole drive, which is what the
@@ -777,19 +830,18 @@ proc sendTurn*(state: ptr TuiState, L: LuaState) =
     except LuaError as e:
       appendStatusLine(state, "the loop failed: " & e.msg)
       break
-    # The transcript rebuilds per turn: the tool results render live (the
-    # sink already streamed the assistant text).
-    applySession(state[].transcriptW.transcript, state[].sess.history())
-    state[].transcriptW.invalidateLines()
+    # The turn's run is over: the streamed text was provisional and the session
+    # now carries the entry it belongs to. Closing the run in the widget first
+    # is what lets the sync append the real entry instead of leaving both.
+    postRunFinished(state)
+    syncTranscript(state)
     # The gap between turns: the app drains the keys and presents.
     let steered = drainGapKeys(state, L)
     if state[].abortRequested or not turnContinues(response, steered):
       break
   state[].working = false
-  # Rebuild the transcript from the session (the assistant/tool entries the
-  # turns appended) and present.
-  applySession(state[].transcriptW.transcript, state[].sess.history())
-  state[].transcriptW.invalidateLines()
+  postRunFinished(state)
+  syncTranscript(state)
   presentApp(state)
 
 proc handleTuiAction*(state: ptr TuiState, L: LuaState,

@@ -461,6 +461,102 @@ suite "the turn drive":
     check backend.frames.len > 0
     check "streamed text" in backend.frames[^1]
 
+  test "a full transcript rebuild discards the view state the items carry":
+    # The premise of the incremental sync, verified before building on it: the
+    # rebuild replaces every item, so what the user did to them is gone. A
+    # collapsed tool comes back collapsed and a pending approval disappears
+    # from the UI (and the transcript only answers an approval key for an item
+    # that still carries the flag).
+    let root = freshWorkspace("neopi-tp-rebuild")
+    let path = freshSessionPath("rebuild")
+    try:
+      let sess = newSession(path)
+      sess.append SessionEntry(kind: ekUser, text: "go")
+      sess.append SessionEntry(kind: ekAssistant, text: "calling", model: "m",
+        provider: "p", stopReason: "toolUse")
+      sess.append SessionEntry(kind: ekToolResult, toolCallId: "c1",
+        toolName: "read", output: "one\ntwo\nthree\nfour", isError: false)
+      var st = initTuiState("p", "m", sess, root)
+      discard buildScreen(addr st)
+      refreshFooter(addr st)
+      # The user expands the tool output with the transcript's own Ctrl-O.
+      check st.transcriptW.handle(UiEvent(kind: uiKey, key: keyCtrlO)).handled
+      var expanded = 0
+      for item in st.transcriptW.transcript.items:
+        if item.expanded: inc expanded
+      check expanded == 1
+      st.transcriptW.transcript.items[^1].approvalRequired = true
+      # The full rebuild (what the turn used to run) replaces the items.
+      applySession(st.transcriptW.transcript, sess.history())
+      st.transcriptW.invalidateLines()
+      expanded = 0
+      for item in st.transcriptW.transcript.items:
+        if item.expanded: inc expanded
+      check expanded == 0
+      check not st.transcriptW.transcript.items[^1].approvalRequired
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "the incremental sync appends what arrived and keeps the view state":
+    let root = freshWorkspace("neopi-tp-sync")
+    let path = freshSessionPath("sync")
+    try:
+      let sess = newSession(path)
+      sess.append SessionEntry(kind: ekUser, text: "go")
+      sess.append SessionEntry(kind: ekAssistant, text: "calling", model: "m",
+        provider: "p", stopReason: "toolUse")
+      sess.append SessionEntry(kind: ekToolResult, toolCallId: "c1",
+        toolName: "read", output: "one\ntwo\nthree\nfour", isError: false)
+      var st = initTuiState("p", "m", sess, root)
+      discard buildScreen(addr st)
+      refreshFooter(addr st)
+      check st.transcriptW.transcript.items.len == 3
+      check st.transcriptW.handle(UiEvent(kind: uiKey, key: keyCtrlO)).handled
+      st.transcriptW.transcript.items[^1].approvalRequired = true
+      # A new entry arrives (the next turn appends it) and the sync brings the
+      # transcript up to date without touching what is already rendered.
+      sess.append SessionEntry(kind: ekAssistant, text: "done", model: "m",
+        provider: "p", stopReason: "stop")
+      syncTranscript(addr st)
+      check st.transcriptW.transcript.items.len == 4
+      check st.transcriptW.transcript.items[^1].text == "done"
+      var expanded = 0
+      for item in st.transcriptW.transcript.items:
+        if item.expanded: inc expanded
+      check expanded == 1
+      check st.transcriptW.transcript.items[2].approvalRequired
+      # Syncing again changes nothing: it appends only what is new.
+      syncTranscript(addr st)
+      check st.transcriptW.transcript.items.len == 4
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "a branch that moved back is rebuilt instead of appended":
+    # `navigateTo` (and a session swap) takes the tip to an earlier entry, so
+    # the entries are not a continuation of what is rendered: the sync has to
+    # rebuild rather than append onto a branch the user left.
+    let root = freshWorkspace("neopi-tp-branch")
+    let path = freshSessionPath("branch")
+    try:
+      let sess = newSession(path)
+      sess.append SessionEntry(kind: ekUser, text: "first")
+      let firstId = sess.currentId
+      sess.append SessionEntry(kind: ekAssistant, text: "second", model: "m",
+        provider: "p", stopReason: "stop")
+      var st = initTuiState("p", "m", sess, root)
+      discard buildScreen(addr st)
+      refreshFooter(addr st)
+      check st.transcriptW.transcript.items.len == 2
+      sess.navigateTo(firstId)
+      syncTranscript(addr st)
+      check st.transcriptW.transcript.items.len == 1
+      check st.transcriptW.transcript.items[0].text == "first"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
 suite "the footer":
   test "the totals are the branch's and the memo notices every change":
     # `refreshFooter` memoizes the branch's token totals (the walk is
