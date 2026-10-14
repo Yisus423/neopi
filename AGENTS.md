@@ -54,6 +54,21 @@ direct `nim c` builds need the env above. A COLD full build takes minutes
 (the nimcache is invalidated whenever the dependency paths change); warm
 rebuilds are seconds.
 
+**After bumping a pin, leave exactly one copy installed.** nimble keeps the
+older revision *alongside* the new one (`~/.nimble/pkgs2/<pkg>-<version>-<hash>`:
+two entries with the SAME `<version>`), and Nim's `nimblePath` then has two
+candidates for the module, so the `requires` line stops deciding what compiles.
+Verified on the `f7e518e` → `800bf7f` bump: the new copy won only because its
+hash sorts first (`757d0d4f` before `d4c4f347`) — a coincidence, not a
+guarantee. `nimble uninstall` does NOT help: it only removes what
+`nimble install` brought in, and dependencies fail with `Failed uninstall -
+no packages to delete`. The step: read `vcsRevision` inside each installed
+copy's `nimblemeta.json`, delete the one that is not the pinned commit (guard:
+exactly one candidate, and it must live under `~/.nimble/pkgs2/`), then
+re-verify with a probe that calls a symbol only the pinned revision has. **The
+`vcsRevision` is what proves the copy is the pin; the version number does not,
+because it is the same in both.**
+
 ## Testing
 
 - `nimble test` — self-contained and offline: the Nim suite via unittest2
