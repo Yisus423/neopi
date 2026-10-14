@@ -47,4 +47,30 @@ describe("neopi.ui", function()
       neopi.ui.widget("w", "a", {colour = "red"})
     end)
   end)
+
+  it("the transient, working and title slots are no-ops without the TUI", function()
+    -- The headless flag is the one read an extension can act on.
+    assert.are.equal(false, neopi.hasUI)
+    assert.are.equal(nil, neopi.ui.notify("ignored"))
+    assert.are.equal(nil, neopi.ui.notify("ignored", "error"))
+    assert.are.equal(nil, neopi.ui.working("thinking"))
+    assert.are.equal(nil, neopi.ui.title("neopi"))
+    -- Clearing is the missing or nil argument, the same shape everywhere.
+    assert.are.equal(nil, neopi.ui.notify())
+    assert.are.equal(nil, neopi.ui.notify(nil))
+    assert.are.equal(nil, neopi.ui.working())
+    assert.are.equal(nil, neopi.ui.working(nil))
+    assert.are.equal(nil, neopi.ui.title())
+    assert.are.equal(nil, neopi.ui.title(nil))
+  end)
+
+  it("the transient line refuses an unknown level", function()
+    assert.has_error(function() neopi.ui.notify(123) end)
+    assert.has_error(function() neopi.ui.notify("x", 123) end)
+    -- A typo in the level must not silently become "info": the severity is
+    -- what the row is painted with.
+    assert.has_error(function() neopi.ui.notify("x", "sideways") end)
+    assert.has_error(function() neopi.ui.working(123) end)
+    assert.has_error(function() neopi.ui.title(123) end)
+  end)
 end)

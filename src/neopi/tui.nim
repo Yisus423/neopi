@@ -10,7 +10,7 @@
 ## key polling, the per-line colors) is replaced by nimterm's event loop,
 ## widgets, unicodedb widths, and markdown renderer.
 
-import std/[algorithm, json, os, strutils, tables, times]
+import std/[algorithm, json, os, strutils, syncio, tables, times]
 import nimterm
 import nimterm/[events as ntevents, term, transcript as nttranscript]
 import neopi/lua
@@ -87,6 +87,11 @@ type
     placement*: WidgetPlacement
     lines*: seq[string]
 
+  NotifyLevel* = enum
+    ## The severity of a `ui.notify` line. It is not decoration: the row is
+    ## painted with the theme token the level names.
+    nlInfo, nlWarning, nlError
+
   Chrome* = ref object
     ## The extension-filled chrome: the header rows, the keyed status rows and
     ## the placed widget blocks. It is held by reference and shared between the
@@ -99,11 +104,13 @@ type
     statusRows: Table[string, string]
     widgetOrder: seq[string]
     widgetSlots: Table[string, WidgetSlot]
+    notifyText: string
+    notifyLevel: NotifyLevel
 
   TuiLayout* = object
     ## The rows each block of the screen owns, as `tuiLayout` computes them.
-    headerRows*, transcriptRows*, aboveRows*, statusRows*, belowRows*,
-      footerRows*, inputRows*: int
+    headerRows*, transcriptRows*, aboveRows*, notifyRows*, statusRows*,
+      belowRows*, footerRows*, inputRows*: int
 
   NeopiScreen* = ref object of Widget
     ## The TUI's root widget (the nimlet pattern — nimterm_screen): the paint
@@ -160,6 +167,33 @@ proc statusText*(chrome: Chrome, key: string): string =
   ## The text of one status row (empty when the key is not set).
   chrome.statusRows.getOrDefault(key)
 
+proc setNotify*(chrome: Chrome, text: string, level: NotifyLevel) =
+  ## Show one transient line. It is not a status key because its lifetime is
+  ## the action, not the session: the core clears it on the next submit.
+  chrome.notifyText = text
+  chrome.notifyLevel = level
+
+proc clearNotify*(chrome: Chrome) =
+  ## Drop the transient line.
+  chrome.notifyText = ""
+
+proc notifyLine*(chrome: Chrome): string =
+  ## The transient line's text (empty when there is none).
+  if chrome.isNil: "" else: chrome.notifyText
+
+proc notifySeverity*(chrome: Chrome): NotifyLevel =
+  ## The transient line's severity, which picks its theme token.
+  if chrome.isNil: nlInfo else: chrome.notifyLevel
+
+proc notifyStyle*(level: NotifyLevel): Style =
+  ## The theme token one severity paints with. The level exists so the row can
+  ## say how bad it is, not only what it says — and so the token comes from the
+  ## active theme instead of a hardcoded color.
+  case level
+  of nlInfo: currentTheme.text
+  of nlWarning: currentTheme.warning
+  of nlError: currentTheme.error
+
 proc setWidget*(chrome: Chrome, key: string, lines: seq[string],
                 placement: WidgetPlacement) =
   ## Set one placed block. The placement is part of the slot, so moving a
@@ -199,10 +233,13 @@ proc tuiLayout*(chrome: Chrome, height: int): TuiLayout =
   result.belowRows =
     if chrome.isNil: 0 else: chrome.widgetLines(wpBelowEditor).len
   result.statusRows = if chrome.isNil: 0 else: chrome.statusOrder.len
+  result.notifyRows =
+    if chrome.isNil or chrome.notifyText.len == 0: 0 else: 1
   result.footerRows = 1
   result.inputRows = composerRows
   let fixed = result.headerRows + result.aboveRows + result.belowRows +
-    result.statusRows + result.footerRows + result.inputRows
+    result.notifyRows + result.statusRows + result.footerRows +
+    result.inputRows
   result.transcriptRows = max(1, height - fixed)
 
 method children*(screen: NeopiScreen): seq[Widget] =
@@ -245,6 +282,10 @@ method paint*(screen: NeopiScreen, canvas: var Canvas) =
     for line in chrome.widgetLines(wpBelowEditor):
       canvas.writeAnsiText(0, row, line, defaultStyle(), w)
       inc row
+    if chrome.notifyLine().len > 0:
+      canvas.writeAnsiText(0, row, chrome.notifyLine(),
+        notifyStyle(chrome.notifySeverity()), w)
+      inc row
     for key in chrome.statusKeys():
       canvas.writeAnsiText(0, row, chrome.statusText(key), defaultStyle(), w)
       inc row
@@ -284,6 +325,15 @@ type
     chrome*: Chrome
       ## The extension-filled chrome (the header rows, the keyed status rows and
       ## the placed blocks), shared by reference with the root widget.
+    workingText*: string
+      ## The extension's override for the footer's working token
+      ## (`ui.working`); empty means the default.
+    title*: string
+      ## The last title `ui.title` set, kept so the state can be read back.
+    titleWriter*: proc (text: string)
+      ## Where `ui.title` writes. `initTuiState` points it at the terminal's
+      ## OSC 2 and the specs replace it, so the title is observable without an
+      ## escape sequence reaching the test's stdout.
     streaming*: string
     clipboard*: proc (text: string)
       ## Where the transcript's `copy` action lands. `initTuiState` points it
@@ -293,6 +343,31 @@ type
     quit*: bool
     appReady*: bool
     screen*: NeopiScreen
+
+proc terminalTitleWriter(text: string) =
+  ## The default title sink: OSC 2, the sequence a terminal reads to name its
+  ## window. nimterm owns the terminal, so this writes through its writer and
+  ## only while the screen is up — the escape must not land in the print mode's
+  ## stdout, where it would be noise in a pipe.
+  if not gTermActive:
+    return
+  termWrite("\e]2;" & text & "\a")
+  stdout.flushFile()
+
+proc setWorking*(state: ptr TuiState, text: string) =
+  ## Replace the token the footer appends while the stream is in flight; an
+  ## empty text restores the default. The footer's line itself stays the
+  ## core's, so an extension can name the work but not take the line over.
+  state[].workingText = text
+
+proc setTitle*(state: ptr TuiState, text: string) =
+  ## Name the terminal window and remember it; an empty text hands the title
+  ## back to the terminal. The write goes through the state's writer, which the
+  ## specs replace — that is what keeps an escape out of their output, and what
+  ## makes the title observable at all.
+  state[].title = text
+  if not state[].titleWriter.isNil:
+    state[].titleWriter(text)
 
 proc initTuiState*(provider, model: string, sess: Session,
                    root = ""): TuiState =
@@ -304,6 +379,7 @@ proc initTuiState*(provider, model: string, sess: Session,
   result = TuiState(provider: provider, model: model, sess: sess, lua: nil,
     root: root, transcriptW: transcriptW, inputW: inputW, footerW: footerW,
     streaming: "", quit: false, clipboard: copyToClipboard,
+    workingText: "", title: "", titleWriter: terminalTitleWriter,
     chrome: newChrome())
 
 proc transcriptRoutedKey*(key: Key): bool =
@@ -360,24 +436,26 @@ proc footerTokens(state: ptr TuiState): tuple[tokensIn, tokensOut: int] =
 
 proc footerLine(provider, model: string,
                 totals: tuple[tokensIn, tokensOut: int],
-                working: bool): string =
+                working: bool, workingText = ""): string =
   ## The footer's text: the provider, model, and the cumulative token usage;
-  ## `working` appends the stream's flight indicator (pi's).
+  ## `working` appends the stream's flight indicator (pi's), whose text
+  ## `ui.working` may replace.
   result = provider & "/" & model & " | in " & $totals.tokensIn &
     " | out " & $totals.tokensOut
   if working:
-    result &= " | working"
+    result &= " | " & (if workingText.len > 0: workingText else: "working")
 
 proc footerText*(state: TuiState, working: bool): string =
   ## The footer's text from a state value (the pure path: it always walks).
-  footerLine(state.provider, state.model, branchTokens(state.sess), working)
+  footerLine(state.provider, state.model, branchTokens(state.sess), working,
+    state.workingText)
 
 proc refreshFooter*(state: ptr TuiState) =
   ## Redraw the footer line (the nimlet pattern: the footer refreshes on the
   ## state changes, not on a timer), through the memoized totals.
   let working = state[].streaming.len > 0
   state[].footerW.text = footerLine(state[].provider, state[].model,
-    footerTokens(state), working)
+    footerTokens(state), working, state[].workingText)
 
 proc buildScreen*(state: ptr TuiState): Widget =
   ## The widget tree: the transcript (its own scroll viewport follows the
@@ -420,6 +498,14 @@ proc setCoreStatus*(state: ptr TuiState, text: string) =
     state[].chrome.clearStatus(coreStatusKey)
   else:
     state[].chrome.setStatus(coreStatusKey, text)
+
+proc clearTransient*(state: ptr TuiState) =
+  ## Drop the messages that belong to the last action: the core's own status
+  ## and the extension's transient line. The next submit starts from a clean
+  ## chrome, so nothing stale outlives the action it reported.
+  setCoreStatus(state, "")
+  if not state[].chrome.isNil:
+    state[].chrome.clearNotify()
 
 proc queueSteering(L: LuaState, text: string) =
   ## Append the draft text to neopi.steeringQueue (the Lua array table the
@@ -606,6 +692,9 @@ proc exposeTuiSink*(L: LuaState, state: ptr TuiState, model: string) =
   lua_setfield(L, -2, "_tuiModel")
   lua_createtable(L, 0, 0)
   lua_setfield(L, -2, "steeringQueue")
+  # The TUI is up: this is the flag headless modes read as false.
+  lua_pushboolean(L, 1)
+  lua_setfield(L, -2, "hasUI")
   lua_pop(L, 1)
 
 proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
@@ -676,7 +765,7 @@ proc sendTurn*(state: ptr TuiState, L: LuaState) =
   let text = state[].inputW.text
   if text.len == 0:
     return
-  setCoreStatus(state, "")
+  clearTransient(state)
   if text.startsWith("/"):
     runCommand(state, L, text)
     return
@@ -739,6 +828,81 @@ proc handleTuiAction*(state: ptr TuiState, L: LuaState,
 # stacktrace off: the ui callbacks' frames a lua_error longjmp abandons (see
 # the note at the file top).
 {.push stacktrace: off.}
+
+proc readLevel(L: LuaState, index: cint): NotifyLevel =
+  ## Read the notify level, defaulting to info. An unknown level is refused: a
+  ## typo that quietly fell back to "info" would hide the severity the
+  ## extension meant to show.
+  if lua_type(L, index) == luaTNil:
+    return nlInfo
+  if lua_type(L, index) != luaTString:
+    raiseLuaError(L,
+      "the notify level must be \"info\", \"warning\" or \"error\"")
+  case $lua_tolstring(L, index, nil)
+  of "info": nlInfo
+  of "warning": nlWarning
+  of "error": nlError
+  else:
+    raiseLuaError(L,
+      "the notify level must be \"info\", \"warning\" or \"error\"")
+
+proc luaUiNotify(L: LuaState): cint {.cdecl.} =
+  ## Lua-side `neopi.ui.notify(text, level)`: show one transient line, painted
+  ## with the level's theme token. The core clears it on the next submit, and a
+  ## nil or empty text clears it now. A no-op without the TUI.
+  let state = cast[ptr TuiState](getRegistryPointer(L, tuiStateRegistryKey))
+  let shape = "neopi.ui.notify expects (text: string|nil, level?: string)"
+  if lua_gettop(L) > 2:
+    raiseLuaError(L, shape)
+  var text = ""
+  if lua_gettop(L) >= 1 and lua_type(L, 1) != luaTNil:
+    if lua_type(L, 1) != luaTString:
+      raiseLuaError(L, shape)
+    text = $lua_tolstring(L, 1, nil)
+  var level = nlInfo
+  if lua_gettop(L) >= 2:
+    level = readLevel(L, 2)
+  if not state.isNil and not state[].chrome.isNil:
+    if text.len == 0:
+      state[].chrome.clearNotify()
+    else:
+      state[].chrome.setNotify(text, level)
+  lua_pushnil(L)
+  result = 1
+
+proc luaUiWorking(L: LuaState): cint {.cdecl.} =
+  ## Lua-side `neopi.ui.working(text)`: replace the token the footer appends
+  ## while the stream is in flight; nil or an empty text restores "working". A
+  ## no-op without the TUI.
+  let state = cast[ptr TuiState](getRegistryPointer(L, tuiStateRegistryKey))
+  if lua_gettop(L) > 1:
+    raiseLuaError(L, "neopi.ui.working expects (text: string|nil)")
+  var text = ""
+  if lua_gettop(L) == 1 and lua_type(L, 1) != luaTNil:
+    if lua_type(L, 1) != luaTString:
+      raiseLuaError(L, "neopi.ui.working expects (text: string|nil)")
+    text = $lua_tolstring(L, 1, nil)
+  if not state.isNil:
+    setWorking(state, text)
+  lua_pushnil(L)
+  result = 1
+
+proc luaUiTitle(L: LuaState): cint {.cdecl.} =
+  ## Lua-side `neopi.ui.title(text)`: name the terminal window (OSC 2); nil or
+  ## an empty text hands the title back to the terminal. A no-op without the
+  ## TUI, where no writer is bound and the state only records it.
+  let state = cast[ptr TuiState](getRegistryPointer(L, tuiStateRegistryKey))
+  if lua_gettop(L) > 1:
+    raiseLuaError(L, "neopi.ui.title expects (text: string|nil)")
+  var text = ""
+  if lua_gettop(L) == 1 and lua_type(L, 1) != luaTNil:
+    if lua_type(L, 1) != luaTString:
+      raiseLuaError(L, "neopi.ui.title expects (text: string|nil)")
+    text = $lua_tolstring(L, 1, nil)
+  if not state.isNil:
+    setTitle(state, text)
+  lua_pushnil(L)
+  result = 1
 
 proc readLineList(L: LuaState, index: cint, what: string): seq[string] =
   ## Read a line list off the stack: a string is one line and a table is its
@@ -861,14 +1025,26 @@ proc exposeUi*(L: LuaState) =
     lua_pop(L, 1)
     raise newException(LuaError,
       "the ui primitives require the neopi table (call newHookBus first)")
-  lua_createtable(L, 0, 3)
+  lua_createtable(L, 0, 7)
   lua_pushcfunction(L, luaUiHeader)
   lua_setfield(L, -2, "header")
   lua_pushcfunction(L, luaUiStatus)
   lua_setfield(L, -2, "status")
   lua_pushcfunction(L, luaUiWidget)
   lua_setfield(L, -2, "widget")
+  lua_pushcfunction(L, luaUiNotify)
+  lua_setfield(L, -2, "notify")
+  lua_pushcfunction(L, luaUiWorking)
+  lua_setfield(L, -2, "working")
+  lua_pushcfunction(L, luaUiTitle)
+  lua_setfield(L, -2, "title")
   lua_setfield(L, -2, "ui")
+  # The guard extensions need to skip UI work instead of calling a no-op: the
+  # TUI flips it in exposeTuiSink, and it is the one read a headless mode can
+  # act on. It belongs to `neopi` (the mode), not inside `neopi.ui` — setting
+  # it before the `ui` field landed put it on the wrong table.
+  lua_pushboolean(L, 0)
+  lua_setfield(L, -2, "hasUI")
   lua_pop(L, 1)
 
 proc installTuiTheme*(requested: string, depth: ColorDepth): Theme =

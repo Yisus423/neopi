@@ -255,6 +255,83 @@ suite "the turn drive":
     check not turnContinues(parseJson("{}"), false)
     check not turnContinues(newJNull(), false)
 
+  test "the notify row is transient and carries its severity":
+    let chrome = newChrome()
+    check tuiLayout(chrome, 20).notifyRows == 0
+    chrome.setNotify("saved", nlWarning)
+    check tuiLayout(chrome, 20).notifyRows == 1
+    check chrome.notifyLine() == "saved"
+    check chrome.notifySeverity() == nlWarning
+    chrome.clearNotify()
+    check tuiLayout(chrome, 20).notifyRows == 0
+    check chrome.notifyLine() == ""
+
+  test "the working indicator text is the extension's when it sets one":
+    # The footer's line stays the core's; `ui.working` only replaces the token
+    # it appends while the stream is in flight.
+    var st = initTuiState("p", "m", nil)
+    check footerText(st, true).endsWith("| working")
+    setWorking(addr st, "thinking")
+    check footerText(st, true).endsWith("| thinking")
+    # Not working: the override stays out of the line entirely.
+    check not footerText(st, false).contains("thinking")
+    setWorking(addr st, "")
+    check footerText(st, true).endsWith("| working")
+
+  test "the title goes through the sink and records itself":
+    var st = initTuiState("p", "m", nil)
+    var written: seq[string]
+    st.titleWriter = proc (text: string) =
+      written.add text
+    setTitle(addr st, "neopi - build")
+    check st.title == "neopi - build"
+    check written == @["neopi - build"]
+    # Clearing is a write too: the terminal needs the empty sequence.
+    setTitle(addr st, "")
+    check written == @["neopi - build", ""]
+    # Without a writer the state still records the title instead of crashing
+    # (the print mode and the headless specs have no terminal).
+    st.titleWriter = nil
+    setTitle(addr st, "headless")
+    check st.title == "headless"
+
+  test "the notify row renders above the status keys":
+    var st = initTuiState("p", "m", nil)
+    let screen = buildScreen(addr st)
+    refreshFooter(addr st)
+    st.chrome.setStatus("git", "STATUSROW")
+    st.chrome.setNotify("NOTIFYROW", nlInfo)
+    var canvas = newCanvas(size(40, 12))
+    screen.render(canvas, rect(0, 0, 40, 12))
+    let text = canvas.plainText
+    let notifyAt = text.find("NOTIFYROW")
+    check notifyAt >= 0
+    check notifyAt < text.find("STATUSROW")
+
+  test "the core clears the transient line on the next submit":
+    let root = freshWorkspace("neopi-tp-notify")
+    let path = freshSessionPath("notify")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      exposeTuiSink(L, addr st, "scripted")
+      runScript(L, """neopi.provider.setScripted({{text = "ok"}})""")
+      st.chrome.setNotify("saved", nlInfo)
+      check st.chrome.notifyLine() == "saved"
+      st.inputW.setText("go")
+      sendTurn(addr st, L)
+      # The submit drove a turn and the transient line is gone: a stale
+      # notification outliving the action it reported would be a lie.
+      check sess.history().len >= 2
+      check st.chrome.notifyLine() == ""
+    finally:
+      removeDir(root)
+      removeFile(path)
+
 suite "the footer":
   test "the totals are the branch's and the memo notices every change":
     # `refreshFooter` memoizes the branch's token totals (the walk is
