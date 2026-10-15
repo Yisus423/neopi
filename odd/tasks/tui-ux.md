@@ -169,7 +169,7 @@ commits"); a task closes only with one.
 | ID | Task | Spec | Route | Commit |
 |---|---|---|---|---|
 | T9 | The plumbing, in two work units. **T9a**: the app owns dispatch and render — `wireApp` extracts the loop's callbacks so they are testable, the stream sink **posts** agent events instead of drawing by hand, `pumpApp`/`presentApp` replace `feedKeys`/`flushFrame`/`drainGapKeys`, the turn sets `working` (a field nothing ever wrote, so the `| working` indicator never reached a frame), the abort request becomes observable, and a submit while the turn runs queues steering instead of recursing into a nested turn. **T9b**: the incremental transcript sync — DONE, with the fork's `appendItem` (`800bf7f`) and the pin bumped with it. The full rebuild replaced every item once per turn, so the items' view state went with it: an expanded tool collapsed and a pending approval disappeared from the UI. `syncTranscript` appends only what is past a watermark, and the full path (`seedTranscript`) stays for a fresh screen and for a branch that moved back. The streamed text is provisional, so the run is closed in the widget (`postRunFinished`) before the sync appends the real entry. **`addSource`/`EventSource` is NOT in T9**: it presumes a loop free to poll, which is ROADMAP #16's wall — the sink is called from *inside* the blocked turn | S8 | inline | `1bb3ff5` (T9a) + `0e976bd` (T9b), the fork `800bf7f`, the pin `ea0d956` and the procedure `39078a1` |
-| T5 | The thinking: the reasoning deltas reach the transcript as `ueThinkingDelta` and the collapsed label becomes the pi-shaped one | S8 | worker | `feat(tui): the reasoning deltas render as the collapsed thinking item` |
+| T5 | The thinking: `seThinkingDelta` joins the stream event kinds, the wire mapping stops dropping `delta.reasoning`, the Lua side receives it under `{thinking = ...}`, and the sink posts it as `ueThinkingDelta`. The collapsed label stays nimterm's: it already renders the pi-shaped one ("Thinking…" pending, "Thinking" collapsed, "Thinking · N lines" expanded), so no `ui.thinkingLabel` slot was added — it would have had no consumer, and the same reason drops a `stream_thinking` hook | S8 | inline | `feat(provider): the model's reasoning reaches the transcript as thinking` — `ab901f4` |
 | T6 | The dialogs: `neopi.ui.select` / `neopi.ui.confirm` as **events** — the question renders and its answer arrives through the event source, with no handler blocking on a wait | S8, S9 | worker | `feat(ui): the extension dialogs land on nimterm's question widget` |
 | T8 | Approvals: the transcript's `approval` action bridged to the `tool_call` verdict as an event, not a synchronous prompt | S8, S9 | worker | `feat(tui): the tool gate can ask the user` |
 
@@ -423,8 +423,21 @@ owner, and T9's plumbing is the part of it that this slice consumes.
   nimcache left the failure unchanged. The user's memory pointed at the right
   thing. `AGENTS.md` now says to verify a fresh clone from outside the project,
   which is the only place that check means anything.
-- **Open.** Batch 2 continues with T5 (the thinking), T6 (the dialogs) and T8
-  (the approvals): T9a and T9b are closed. Two things stay outside the cut: T7
+- **Evidence — T5 closed (`ab901f4`), and the real wire was already carrying it.**
+  The mapping dropped `delta.reasoning` by design and said why in its own header
+  ("the TUI slice decides the extension") — this is that decision. The proof that
+  it mattered came from the fixtures the provider session captured: the text
+  stream carries **251 reasoning chunks** and the tool stream **289**, so the
+  transcripts have been losing real model output since the day those captures
+  landed. Two scope decisions went the other way and are recorded as decisions:
+  the collapsed label is already pi-shaped in nimterm (the test pins the exact
+  strings instead of a new slot), and a `stream_thinking` hook would have had no
+  consumer. One seam is covered by construction rather than by a test, and says
+  so: `makeLuaStreamEvent` is not exported and the scripted transport cannot
+  express a reasoning chunk, so the producer of the `{thinking}` key is a mirror
+  line of the text one — the consumer and the wire mapping are both tested.
+- **Open.** Batch 2 continues with T6 (the dialogs) and T8 (the approvals):
+  T9a, T9b and T5 are closed. Two things stay outside the cut: T7
   (the transcript search) and T10 (the standing UX regression gate, whose
   argument is the real regression the harness caught during T3a). Operational
   reminder for the next dependency bump: the `vcsRevision` guard and the Nim
