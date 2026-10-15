@@ -144,6 +144,13 @@ neopi's hooks, read with codegraph (`codegraph explore`) and nimlangserver
   `f4ac13b` (T3), plus T4's docs commit. The work ran inline (one file plus
   its suite): no writer was launched, and the repo's own history says why —
   the writers of this runtime stall.
+- **The render gate** (`nimble bench`, the standing regression harness):
+  `render_median_ms` 6.974 (50 entries) / 6.991 (500) / 6.996 (5000) — flat,
+  and the same numbers the previous slice left (the frame was 46.7 ms at 5000
+  before that slice's fix). `delta_median_ms` 12.888 at 5000 is the stream
+  apply path this diff does not touch. The completion adds no per-frame work:
+  it is recomputed on the editor's change action and the menu joins the tree
+  only while it is open.
 - **Known limits** (the list above, unchanged by the implementation): no
   argument completions, a prefix match instead of pi's fuzzy one, the
   completion only with the cursor at the end of a single-line token, the
