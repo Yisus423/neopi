@@ -171,7 +171,7 @@ commits"); a task closes only with one.
 | T9 | The plumbing, in two work units. **T9a**: the app owns dispatch and render — `wireApp` extracts the loop's callbacks so they are testable, the stream sink **posts** agent events instead of drawing by hand, `pumpApp`/`presentApp` replace `feedKeys`/`flushFrame`/`drainGapKeys`, the turn sets `working` (a field nothing ever wrote, so the `| working` indicator never reached a frame), the abort request becomes observable, and a submit while the turn runs queues steering instead of recursing into a nested turn. **T9b**: the incremental transcript sync — DONE, with the fork's `appendItem` (`800bf7f`) and the pin bumped with it. The full rebuild replaced every item once per turn, so the items' view state went with it: an expanded tool collapsed and a pending approval disappeared from the UI. `syncTranscript` appends only what is past a watermark, and the full path (`seedTranscript`) stays for a fresh screen and for a branch that moved back. The streamed text is provisional, so the run is closed in the widget (`postRunFinished`) before the sync appends the real entry. **`addSource`/`EventSource` is NOT in T9**: it presumes a loop free to poll, which is ROADMAP #16's wall — the sink is called from *inside* the blocked turn | S8 | inline | `1bb3ff5` (T9a) + `0e976bd` (T9b), the fork `800bf7f`, the pin `ea0d956` and the procedure `39078a1` |
 | T5 | The thinking: `seThinkingDelta` joins the stream event kinds, the wire mapping stops dropping `delta.reasoning`, the Lua side receives it under `{thinking = ...}`, and the sink posts it as `ueThinkingDelta`. The collapsed label stays nimterm's: it already renders the pi-shaped one ("Thinking…" pending, "Thinking" collapsed, "Thinking · N lines" expanded), so no `ui.thinkingLabel` slot was added — it would have had no consumer, and the same reason drops a `stream_thinking` hook | S8 | inline | `feat(provider): the model's reasoning reaches the transcript as thinking` — `ab901f4` |
 | T6 | The dialogs as events, and the shape that makes that possible: `ui.select(title, options, onAnswer)` and `ui.confirm(title, message, onAnswer)` **return at once**, because a Lua handler cannot wait for the user, and the answer arrives at the callback. nimterm's `QuestionWidget` renders them (modal while unresolved) with the resume menu's wiring; the question owns the keys, Esc included, so cancelling it beats aborting the turn it was asked from; the callback's ref is always released; and without a TUI the callback fires at once with nil/false instead of leaving a flow hanging | S8, S9 | inline | `feat(ui): the dialogs ask and answer through a callback` — `d518d0c` |
-| T8 | Approvals: the transcript's `approval` action bridged to the `tool_call` verdict as an event, not a synchronous prompt | S8, S9 | worker | `feat(tui): the tool gate can ask the user` |
+| T8 | **Deferred out of this slice, by the user's call.** The approval flow's missing piece is not "the `approval` action is dropped" (those are five lines) but a tool call that must survive a user wait — S8/S9's wall, and ROADMAP #16's line. The finding that makes it cheap later is recorded there: the re-drive already exists, because `drainSteering` (`runtime/agent.lua`) reads `neopi.steeringQueue`, a plain Lua table an extension can push into, so an approval answered mid-turn can start the next turn with the decision and no new primitive. What T8 still lacks is the producer: a registration for the tools that need approval, and a core that skips them, posts nimterm's approval item (choices included) and emits the decision as an event | S8, S9 | — | — (deferred; ROADMAP #16 owns it) |
 
 **Pending the user's word (not cut either way):**
 
@@ -447,11 +447,16 @@ owner, and T9's plumbing is the part of it that this slice consumes.
   flow waiting on a question that can never be shown. The renderer needed no new
   widget: nimterm's `QuestionWidget` is modal while unresolved and the resume
   menu had already solved the same wiring problem once.
-- **Open.** Batch 2 ends with T8 (the approvals): T9a, T9b, T5 and T6 are closed.
-  Two things stay outside the cut: T7
-  (the transcript search) and T10 (the standing UX regression gate, whose
-  argument is the real regression the harness caught during T3a). Operational
-  reminder for the next dependency bump: the `vcsRevision` guard and the Nim
-  cache cleanup are in `AGENTS.md`, and neither was theory — the bump this
-  slice required produced both failures. A third: verify the fresh clone from
-  outside the project, because a nested one inherits the outer `config.nims`.
+- **L11 (verbatim, the T8 call):** the parent put the fork to the user — "A:
+  el flujo completo" versus "C: diferir T8 con la razón escrita" — and the user
+  chose **C**. The reason is in the task row rather than implied: an approval is
+  a tool call that has to survive a user wait, which is #16's wall, and the
+  steering-queue finding is written down as the path that does not need #16, in
+  the place a future session will look for it (the ROADMAP's #16 entry).
+- **Batch 2 closed**: T9a, T9b, T5 and T6 are done; T8 is deferred by the
+  user's call. **Outside the cut now**: T7 (the transcript search), T10 (the
+  standing UX regression gate) and T8 (deferred to #16). Operational reminder
+  for the next dependency bump: the `vcsRevision` guard, the Nim cache cleanup
+  and the fresh-clone check from outside the project are in `AGENTS.md`, and
+  none of the three was theory — the bump this slice required produced all
+  three failures.
