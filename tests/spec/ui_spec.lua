@@ -73,4 +73,29 @@ describe("neopi.ui", function()
     assert.has_error(function() neopi.ui.working(123) end)
     assert.has_error(function() neopi.ui.title(123) end)
   end)
+
+  it("the dialogs answer at once when there is no TUI to ask", function()
+    -- A Lua handler cannot wait, and with no UI there is nobody to ask: the
+    -- callback fires immediately with the "no answer" value, so an extension's
+    -- flow never hangs on a question that cannot be shown.
+    local selected = "unset"
+    assert.are.equal(nil, neopi.ui.select("pick one", {"alpha", "beta"},
+      function(answer) selected = answer end))
+    assert.are.equal(nil, selected)
+    local confirmed = "unset"
+    assert.are.equal(nil, neopi.ui.confirm("sure?", "really do it",
+      function(answer) confirmed = answer end))
+    assert.are.equal(false, confirmed)
+  end)
+
+  it("the dialogs validate their shape", function()
+    assert.has_error(function() neopi.ui.select("pick one") end)
+    assert.has_error(function() neopi.ui.select("pick one", {}) end)
+    assert.has_error(function() neopi.ui.select("pick one", {"alpha"}, nil) end)
+    assert.has_error(function() neopi.ui.select(123, {"a"}, function() end) end)
+    assert.has_error(function() neopi.ui.select("pick one", {1, 2}, function() end) end)
+    assert.has_error(function() neopi.ui.confirm("sure?") end)
+    assert.has_error(function() neopi.ui.confirm("sure?", "really") end)
+    assert.has_error(function() neopi.ui.confirm(123, "really", function() end) end)
+  end)
 end)

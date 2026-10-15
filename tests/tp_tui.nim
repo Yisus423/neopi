@@ -590,6 +590,84 @@ suite "the turn drive":
       removeDir(root)
       removeFile(path)
 
+  test "a select asks, renders, and answers through the callback":
+    let root = freshWorkspace("neopi-tp-select")
+    let path = freshSessionPath("select")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      discard evalJson(L, """
+        neopi._answer = "unanswered"
+        neopi.ui.select("pick one", {"alpha", "beta"}, function(answer)
+          neopi._answer = answer or "cancelled"
+        end)
+        return true
+      """)
+      # The handler has already returned and the question is on screen: that is
+      # the whole point of the callback shape.
+      var canvas = newCanvas(size(40, 12))
+      st.screen.render(canvas, rect(0, 0, 40, 12))
+      check "pick one" in canvas.plainText
+      check "alpha" in canvas.plainText
+      check "beta" in canvas.plainText
+      # The keys reach it through the app's own dispatch, and the answer fires
+      # the callback instead of returning to whoever asked.
+      backend.events.add UiEvent(kind: uiKey, key: keyDown)
+      backend.events.add UiEvent(kind: uiKey, key: keyEnter)
+      discard pumpApp(addr st)
+      check evalJson(L, "return neopi._answer").getStr == "beta"
+      # The question is gone once answered.
+      canvas = newCanvas(size(40, 12))
+      st.screen.render(canvas, rect(0, 0, 40, 12))
+      check "pick one" notin canvas.plainText
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "a confirm answers a boolean, and Esc answers false":
+    let root = freshWorkspace("neopi-tp-confirm")
+    let path = freshSessionPath("confirm")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      discard evalJson(L, """
+        neopi._answer = "unanswered"
+        neopi.ui.confirm("delete it?", "The file leaves the branch",
+          function(answer) neopi._answer = answer end)
+        return true
+      """)
+      check evalJson(L, "return neopi._answer").getStr == "unanswered"
+      backend.events.add UiEvent(kind: uiKey, key: keyEnter)
+      discard pumpApp(addr st)
+      check evalJson(L, "return neopi._answer").getBool
+      # Esc is the cancelling answer, and it is not the same as "no".
+      discard evalJson(L, """
+        neopi._answer = "unanswered"
+        neopi.ui.confirm("delete it?", "The file leaves the branch",
+          function(answer) neopi._answer = answer end)
+        return true
+      """)
+      backend.events.add UiEvent(kind: uiKey, key: keyEscape)
+      discard pumpApp(addr st)
+      check not evalJson(L, "return neopi._answer").getBool
+    finally:
+      removeDir(root)
+      removeFile(path)
+
 suite "the footer":
   test "the totals are the branch's and the memo notices every change":
     # `refreshFooter` memoizes the branch's token totals (the walk is

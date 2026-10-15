@@ -30,6 +30,11 @@ from neopi/hooks import lua_error
 # price.
 {.push stacktrace: off.}
 
+proc lua_pushvalue(L: LuaState, idx: cint) {.importc, cdecl.}
+  ## Duplicate the value at `idx` onto the top of the stack. Declared here
+  ## because lua.nim's binding surface omits it, the same reason hooks.nim
+  ## declares lua_error.
+
 proc raiseLuaError(L: LuaState, message: string) {.noreturn.} =
   ## Push `message` and raise it as a Lua error; lua_error longjmps to the
   ## enclosing pcall, so control never returns here. The file-scope copy the
@@ -123,6 +128,7 @@ type
     inputW*: InputWidget
     footerW*: TextWidget
     menu*: Menu
+    question*: QuestionWidget
 
 const composerRows* = 2
   ## The rule and the input, the fixed pair the composer occupies.
@@ -248,6 +254,8 @@ method children*(screen: NeopiScreen): seq[Widget] =
   result = @[Widget(screen.transcriptW)]
   if not screen.menu.isNil and screen.menu.items.len > 0:
     result.add Widget(screen.menu)
+  if not screen.question.isNil:
+    result.add Widget(screen.question)
   result.add Widget(screen.inputW)
   result.add Widget(screen.footerW)
 
@@ -293,6 +301,12 @@ method paint*(screen: NeopiScreen, canvas: var Canvas) =
   if not screen.menu.isNil and screen.menu.items.len > 0:
     let menuRows = min(7, screen.menu.items.len) + 2
     screen.menu.render(canvas, rect(0, max(0, inputTop - menuRows), w, menuRows))
+  if not screen.question.isNil:
+    # The dialog floats above the composer like the menu, sized by what it asks
+    # (the widget measures itself) and clamped to the rows the input leaves.
+    let rows = max(3, min(screen.question.measure(unconstrained()).h, inputTop))
+    screen.question.render(canvas,
+      rect(0, max(0, inputTop - rows), w, rows))
 
 type
   FooterTokens = object
@@ -344,6 +358,15 @@ type
       ## entry id it already shows. It tracks what is *displayed*, whoever put
       ## it there — the sync appends only what is past it, and the turn's own
       ## user line advances it so the same entry is never added twice.
+    question*: QuestionWidget
+      ## The question on screen, while there is one. A handler never waits for
+      ## its answer: `ui.select`/`ui.confirm` register a callback and return.
+    questionRef*: cint
+      ## The Lua callback waiting for that answer (its registry ref), released
+      ## when it fires. 0 when no question is open.
+    questionBool*: bool
+      ## Whether the open question answers a boolean (`ui.confirm`) instead of
+      ## the chosen label (`ui.select`).
     abortRequested*: bool
       ## The Esc/Ctrl+C the app answered while the turn ran: the sink reads it
       ## and cancels the stream, so the abort is a fact of the state instead of
@@ -396,6 +419,50 @@ proc initTuiState*(provider, model: string, sess: Session,
     working: false, abortRequested: false,
     syncedId: 0,
     chrome: newChrome())
+
+const confirmYes* = "Yes"
+  ## The approving label of a confirm, and the only answer that resolves one as
+  ## true: a cancel is not an approval.
+
+proc setQuestion*(state: ptr TuiState, widget: QuestionWidget, fnRef: cint,
+                  boolean: bool) =
+  ## Put a question on screen and remember the callback waiting for its answer.
+  ## The screen holds the same widget by reference, the way the resume menu
+  ## travels.
+  state[].question = widget
+  state[].questionRef = fnRef
+  state[].questionBool = boolean
+  if not state[].screen.isNil:
+    state[].screen.question = widget
+
+proc resolveQuestion*(state: ptr TuiState, answer: string, cancelled: bool) =
+  ## Hand the answer to the Lua callback that is waiting and close the question.
+  ## The ref is released here: a dialog fires once, and one that never released
+  ## its ref would leak one per question. Without an interpreter there is nobody
+  ## to tell, so the answer is dropped rather than kept.
+  if state[].question.isNil:
+    return
+  let L = state[].lua
+  let fnRef = state[].questionRef
+  let boolean = state[].questionBool
+  state[].question = nil
+  state[].questionRef = 0
+  if not state[].screen.isNil:
+    state[].screen.question = nil
+  if L.isNil or fnRef == 0:
+    return
+  lua_rawgeti(L, luaRegistryIndex, fnRef)
+  if boolean:
+    lua_pushboolean(L, cint(ord(not cancelled and answer == confirmYes)))
+  elif cancelled:
+    lua_pushnil(L)
+  else:
+    pushString(L, answer)
+  if lua_pcall(L, 1, 0, 0) != 0:
+    # Containment: the answer is the extension's business, and a callback that
+    # raises must not take the TUI with it.
+    lua_pop(L, 1)
+  luaL_unref(L, luaRegistryIndex, fnRef)
 
 proc transcriptRoutedKey*(key: Key): bool =
   ## Whether a key belongs to the transcript while the editor keeps focus:
@@ -952,6 +1019,94 @@ proc luaUiTitle(L: LuaState): cint {.cdecl.} =
   lua_pushnil(L)
   result = 1
 
+proc readOptionLabels(L: LuaState, index: cint): seq[string] =
+  ## Read a select's option labels: a non-empty array of strings. An empty
+  ## choice or a non-string entry is refused, because a select with nothing to
+  ## select is a mistake worth hearing about rather than a blank dialog.
+  if lua_type(L, index) != luaTTable:
+    raiseLuaError(L, "the options must be an array of strings")
+  let count = cint(lua_objlen(L, index))
+  if count == 0:
+    raiseLuaError(L, "the options must not be empty")
+  for i in 1 .. count:
+    lua_rawgeti(L, index, i)
+    if lua_type(L, -1) != luaTString:
+      lua_pop(L, 1)
+      raiseLuaError(L, "the options must be an array of strings")
+    result.add $lua_tolstring(L, -1, nil)
+    lua_pop(L, 1)
+
+proc answerWithoutUi(L: LuaState, fnIndex: cint, boolean: bool) =
+  ## Call a dialog's callback when there is no TUI to ask through: nil for a
+  ## select (nothing was chosen) and false for a confirm (nothing was approved).
+  ## Dropping the callback instead would leave an extension's flow waiting on a
+  ## question that can never be shown.
+  lua_pushvalue(L, fnIndex)
+  if boolean:
+    lua_pushboolean(L, 0)
+  else:
+    lua_pushnil(L)
+  if lua_pcall(L, 1, 0, 0) != 0:
+    let message = luaStackMessage(L)
+    lua_pop(L, 1)
+    raise newException(LuaError, message)
+
+proc luaUiSelect(L: LuaState): cint {.cdecl.} =
+  ## Lua-side `neopi.ui.select(title, options, onAnswer)`: show a choice and
+  ## hand the answer to the callback. It RETURNS AT ONCE — a Lua handler cannot
+  ## wait for the user — and the callback receives the chosen label, or nil when
+  ## the question is cancelled with Esc. Without a TUI it fires immediately with
+  ## nil.
+  let state = cast[ptr TuiState](getRegistryPointer(L, tuiStateRegistryKey))
+  let shape = "neopi.ui.select expects (title: string, options: array, " &
+    "onAnswer: function)"
+  if lua_gettop(L) != 3 or lua_type(L, 1) != luaTString or
+      lua_type(L, 2) != luaTTable or lua_type(L, 3) != luaTFunction:
+    raiseLuaError(L, shape)
+  let title = $lua_tolstring(L, 1, nil)
+  let labels = readOptionLabels(L, 2)
+  if state.isNil:
+    answerWithoutUi(L, 3, boolean = false)
+    lua_pushnil(L)
+    return 1
+  if not state[].question.isNil:
+    raiseLuaError(L, "a question is already open")
+  var options: seq[QuestionOption]
+  for label in labels:
+    options.add QuestionOption(label: label)
+  lua_pushvalue(L, 3)
+  setQuestion(state, newQuestion(title, options, allowFreeText = false),
+    luaL_ref(L, luaRegistryIndex), boolean = false)
+  lua_pushnil(L)
+  result = 1
+
+proc luaUiConfirm(L: LuaState): cint {.cdecl.} =
+  ## Lua-side `neopi.ui.confirm(title, message, onAnswer)`: ask yes or no and
+  ## hand the boolean to the callback, at once and like select. Esc answers the
+  ## same as no, because a cancelled confirmation approved nothing. Without a
+  ## TUI the callback fires with false.
+  let state = cast[ptr TuiState](getRegistryPointer(L, tuiStateRegistryKey))
+  let shape = "neopi.ui.confirm expects (title: string, message: string, " &
+    "onAnswer: function)"
+  if lua_gettop(L) != 3 or lua_type(L, 1) != luaTString or
+      lua_type(L, 2) != luaTString or lua_type(L, 3) != luaTFunction:
+    raiseLuaError(L, shape)
+  let title = $lua_tolstring(L, 1, nil)
+  let message = $lua_tolstring(L, 2, nil)
+  if state.isNil:
+    answerWithoutUi(L, 3, boolean = true)
+    lua_pushnil(L)
+    return 1
+  if not state[].question.isNil:
+    raiseLuaError(L, "a question is already open")
+  let options = @[QuestionOption(label: confirmYes),
+    QuestionOption(label: "No")]
+  lua_pushvalue(L, 3)
+  setQuestion(state, newQuestion(title & "\n" & message, options,
+    allowFreeText = false), luaL_ref(L, luaRegistryIndex), boolean = true)
+  lua_pushnil(L)
+  result = 1
+
 proc readLineList(L: LuaState, index: cint, what: string): seq[string] =
   ## Read a line list off the stack: a string is one line and a table is its
   ## array part, every element a string. Anything else raises the Lua error
@@ -1073,7 +1228,7 @@ proc exposeUi*(L: LuaState) =
     lua_pop(L, 1)
     raise newException(LuaError,
       "the ui primitives require the neopi table (call newHookBus first)")
-  lua_createtable(L, 0, 7)
+  lua_createtable(L, 0, 9)
   lua_pushcfunction(L, luaUiHeader)
   lua_setfield(L, -2, "header")
   lua_pushcfunction(L, luaUiStatus)
@@ -1086,6 +1241,10 @@ proc exposeUi*(L: LuaState) =
   lua_setfield(L, -2, "working")
   lua_pushcfunction(L, luaUiTitle)
   lua_setfield(L, -2, "title")
+  lua_pushcfunction(L, luaUiSelect)
+  lua_setfield(L, -2, "select")
+  lua_pushcfunction(L, luaUiConfirm)
+  lua_setfield(L, -2, "confirm")
   lua_setfield(L, -2, "ui")
   # The guard extensions need to skip UI work instead of calling a no-op: the
   # TUI flips it in exposeTuiSink, and it is the one read a headless mode can
@@ -1132,6 +1291,16 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
       return eventHandled
     if event.kind != uiKey:
       return eventIgnored
+    if not state[].question.isNil:
+      # The dialog owns the keys while it is open, Esc included: cancelling the
+      # question is the innermost interaction, so it wins over aborting the turn
+      # the question was asked from. Every key goes to it, because its free-text
+      # option edits text, and nothing is swallowed from behind the dialog.
+      let response = state[].question.handle(event)
+      if response.action.kind == "answer":
+        resolveQuestion(state, response.action.value, response.action.cancelled)
+      app.invalidate()
+      return eventHandled
     if state[].working and
         (event.key == keyEscape or event.key == keyCtrlC):
       state[].abortRequested = true
