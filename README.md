@@ -16,7 +16,7 @@ config file you own, the `require` mechanism loads what it references.
 1. Build and test (Nim 2.2; the suite is self-contained):
 
    ```bash
-   nimble test                          # 119 Nim tests + 10 busted specs; the live check needs a key
+   nimble test                          # 148 Nim tests + 19 busted specs; the live check needs a key
    nim c -o:build/neopi src/neopi.nim   # the binary (print mode + the TUI)
    ```
 
@@ -39,12 +39,15 @@ config file you own, the `require` mechanism loads what it references.
    ```
 
    Keys: **Enter** sends (or runs `/commands`, or steers while the model
-   works); **Esc** aborts the stream (the partial turn renders marked) or
-   clears the composer; **Ctrl+C** exits; **PgUp/PgDn** scroll the
-   transcript; **Ctrl+O** expands or collapses the thinking and the tool output; **/resume**
-   opens the sessions picker (Enter loads, Esc cancels). Dragging the mouse
-   over the transcript selects text, and the selection copies to the
-   clipboard. The transcript renders the deltas live, and the model's thinking
+   works); typing `/` opens the command completion above the composer (the
+   names and the descriptions, narrowed as you type: **Tab** fills the
+   highlighted one in, **Enter** fills it in and runs it, **Esc** closes the
+   menu and keeps the draft); **Esc** aborts the stream (the partial turn
+   renders marked) or clears the composer; **Ctrl+C** exits; **PgUp/PgDn**
+   scroll the transcript; **Ctrl+O** expands or collapses the thinking and the
+   tool output; **/resume** opens the sessions picker (Enter loads, Esc
+   cancels). Dragging the mouse over the transcript selects text, and the
+   selection copies to the clipboard. The transcript renders the deltas live, and the model's thinking
    arrives as a collapsed item you can expand with Ctrl+O.
 
    The palette follows the terminal: the color depth (truecolor, 256, 16,
@@ -93,7 +96,7 @@ The Lua extension surface (what scripts see), plus the user config entrypoint:
 | `neopi.provider` | `generate(config)` / `stream(config, onEvent)` / `setScripted(steps)` | one model turn per call; `stream` sends `{text = delta}` to onEvent (return false cancels) |
 | `neopi.session` | `append(kind, payload)` / `history()` / `navigate(id)` | the session tree, colon syntax |
 | `neopi.registerTool` | `registerTool(name, description, schema, execute)` | extensions add tools the model calls |
-| `neopi.registerCommand` | `registerCommand(name, description, execute)` | extensions add `/commands`; the output renders as the status line |
+| `neopi.registerCommand` | `registerCommand(name, description, execute)` | extensions add `/commands`; the output renders as the status line, and the composer completes the registered names as you type (the description is what the completion menu shows) |
 | `neopi.ui` | `header(lines)` / `status(key, text)` / `widget(key, lines, opts)` / `notify(text, level?)` / `working(text)` / `title(text)` / `select(title, options, onAnswer)` / `confirm(title, message, onAnswer)` | the extension chrome: a header block, one keyed row per status key, blocks placed above or below the composer (`opts.placement`), a transient line painted with its level's theme token, the footer's working token, the terminal window's title, and the dialogs — which take a callback instead of returning an answer, because a Lua handler cannot wait for the user. A nil argument clears the slot; all of them are no-ops without the TUI, and `neopi.hasUI` says which mode you are in |
 
 Extensions load from `.neopi/init.lua` (the nvim model: one config file you
@@ -104,7 +107,8 @@ with `.neopi/`). A broken config warns on stderr and the agent still works.
 
 With no prompt argument, the interactive TUI opens: the transcript (the
 session's entries, color-coded, scrollable), the composer (the editable
-input), the extension widgets + status line, and the footer (the provider,
+input, which completes `/commands` as they are typed), the extension widgets
++ status line, and the footer (the provider,
 model, token usage, the working indicator). The interface drives the
 engine: sends go through the same `agent.run` chunk print mode uses, the
 deltas render live through the stream sink, and the app's own loop keeps the

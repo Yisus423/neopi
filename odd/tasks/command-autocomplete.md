@@ -107,17 +107,48 @@ neopi's hooks, read with codegraph (`codegraph explore`) and nimlangserver
 
 ## Tasks
 
-- [ ] T1. The source and the matching (S1, S2, S5): `commandItems(L)` (the
+- [x] T1. The source and the matching (S1, S2, S5): `commandItems(L)` (the
       registry projection + the `/resume` builtin) and `completionMatches`
-      as pure procs + their tests — inline, commit `feat(tui): ...`
-- [ ] T2. The wiring (S3): the `change` action, the key map (Tab/Enter/Esc/
+      as pure procs + their tests — inline, commits `b6667d7` (the record)
+      and `c91d389` (the code + the 4 tests, 39 OK)
+- [x] T2. The wiring (S3): the `change` action, the key map (Tab/Enter/Esc/
       arrows), the state's `menuKind` + the render slot + the tests through
-      the fake app — inline, commit `feat(tui): ...`
-- [ ] T3. The builtin runs when chosen (S4, D6): the trimmed comparison in
+      the fake app — inline, commit `c197113` (45 OK)
+- [x] T3. The builtin runs when chosen (S4, D6): the trimmed comparison in
       `runCommand` + the test that `/resume ` (completion-applied) opens the
-      picker — inline, commit `fix(tui): ...`
-- [ ] T4. The docs and the record: the README key list + the API table row,
-      the evidence here, the ROADMAP tick — inline, commit `docs(tui): ...`
+      picker — inline, commit `f4ac13b` (46 OK)
+- [x] T4. The docs and the record: the README key list + the API table row,
+      the evidence here, the ROADMAP tick — inline
+
+## Evidence
+
+- **The gate** (`nimble test`, verbatim): "[Summary] 148 tests run (2.81s):
+  148 OK, 0 FAILED, 0 SKIPPED" and the busted runner: "19 successes / 0
+  failures / 0 errors / 0 pending". The suite went in at 137; the 11 new
+  tests are this slice's own — 4 for the source and the rule, 6 for the keys
+  and the render, 1 for the builtin the completion produces.
+- **The focused loop**: `nim c -r --hints:off --threads:on --mm:orc
+  -o:build/tp_tui_focus tests/tp_tui.nim` (35 tests at the baseline, 46
+  after). Every task went RED first, and the three REDs were the ones this
+  record predicted: `undeclared identifier: 'commandItems'`, `undeclared
+  field: 'menuKind'`, and the builtin's `st.menuKind was mkNone` — the
+  completed `/resume ` falling into the runtime's registry as "unknown
+  command /resume".
+- **nimlangserver**: `nimCheckFile src/neopi/tui.nim` → 0 diagnostics, at
+  the baseline this slice opened with and after every edit.
+- **codegraph**: `explore` for the call path — `wireApp` → `handleTuiAction`
+  → `sendTurn` → `runCommand`, with `openResume`/`paint` for the menu slot —
+  and the blast radius confirmed the touched procs have no callers outside
+  the TUI and `tests/tp_tui.nim`.
+- **The commits**: `b6667d7` (the record), `c91d389` (T1), `c197113` (T2),
+  `f4ac13b` (T3), plus T4's docs commit. The work ran inline (one file plus
+  its suite): no writer was launched, and the repo's own history says why —
+  the writers of this runtime stall.
+- **Known limits** (the list above, unchanged by the implementation): no
+  argument completions, a prefix match instead of pi's fuzzy one, the
+  completion only with the cursor at the end of a single-line token, the
+  registry re-read on every matching keystroke, and `setText` dropping the
+  composer's undo history when a completion is applied.
 
 ## Log
 
