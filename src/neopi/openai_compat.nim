@@ -1,8 +1,8 @@
 ## The OpenAI-compatible wire mapping: the chat-completions streaming
 ## chunks (the SSE data payloads) → the neopi StreamEvents plus the
-## accumulated Response parts. The reasoning deltas are dropped: the
-## neopi StreamEvent contract has no thinking kind today (the TUI slice
-## decides the extension). The stream loop owns the end semantics: one
+## accumulated Response parts. The reasoning deltas surface as thinking
+## events: they are the model's own words, not the message text, so they
+## never accumulate into it. The stream loop owns the end semantics: one
 ## seFinished after the done.
 import std/json
 import chronos
@@ -51,7 +51,8 @@ proc toToolCalls*(acc: OaiAccum): seq[tuple[id: string, name: string,
 proc mapOaiChunk*(data: string, acc: var OaiAccum): seq[StreamEvent] =
   ## One SSE data payload → the stream events; the accumulators update.
   ## The "[DONE]" sentinel sets acc.done and emits nothing. The empty
-  ## content deltas and the reasoning deltas emit nothing.
+  ## content deltas emit nothing; the reasoning deltas emit a thinking
+  ## event.
   result = @[]
   if data == "[DONE]":
     acc.done = true
@@ -72,6 +73,11 @@ proc mapOaiChunk*(data: string, acc: var OaiAccum): seq[StreamEvent] =
       let text = content.getStr()
       acc.text.add text
       result.add StreamEvent(kind: seTextDelta, text: text)
+    let reasoning = delta.field("reasoning")
+    if reasoning.kind == JString and reasoning.getStr("").len > 0:
+      # The model's own words, kept out of acc.text: thinking is not the
+      # message, and the transcript renders it as its own collapsed item.
+      result.add StreamEvent(kind: seThinkingDelta, text: reasoning.getStr())
     let toolCalls = delta.field("tool_calls")
     if toolCalls.kind == JArray:
       for tc in toolCalls:

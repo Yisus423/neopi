@@ -375,14 +375,19 @@ proc luaProviderSetScripted(L: LuaState): cint {.cdecl.} =
 proc makeLuaStreamEvent(L: LuaState,
     fnRef: cint): StreamCallback =
   ## The StreamCallback bridging to a Lua onEvent function: push the
-  ## {text = delta} table on text deltas and call the stored function through
-  ## pcall, returning its bool (false cancels the stream). A Lua error in the
-  ## handler raises Nim-side, where the stream's containment reports it.
+  ## {text = delta} table on text deltas — and {thinking = delta} on the model's
+  ## reasoning, which is not the message and therefore carries its own key, so a
+  ## consumer reading `.text` cannot mistake it — and call the stored function
+  ## through pcall, returning its bool (false cancels the stream). A Lua error
+  ## in the handler raises Nim-side, where the stream's containment reports it.
   return proc (ev: StreamEvent): bool =
-    if ev.kind != seTextDelta:
+    if ev.kind != seTextDelta and ev.kind != seThinkingDelta:
       return true
     lua_rawgeti(L, luaRegistryIndex, fnRef)
-    pushJson(L, %*{"text": ev.text})
+    if ev.kind == seThinkingDelta:
+      pushJson(L, %*{"thinking": ev.text})
+    else:
+      pushJson(L, %*{"text": ev.text})
     if lua_pcall(L, 1, 1, 0) != 0:
       let message = luaStackMessage(L)
       lua_pop(L, 1)
@@ -393,8 +398,9 @@ proc makeLuaStreamEvent(L: LuaState,
 
 proc luaProviderStream(L: LuaState): cint {.cdecl.} =
   ## Lua-side `neopi.provider.stream(config, onEvent)`: one model turn with
-  ## the text deltas streamed to the Lua onEvent (receiving {text = delta};
-  ## returning false cancels). The config and the response have the same
+  ## the text deltas streamed to the Lua onEvent (receiving {text = delta} for
+  ## the message and {thinking = delta} for the model's reasoning; returning
+  ## false cancels). The config and the response have the same
   ## shape as generate's. The onEvent's fn ref is released when the call
   ## completes; a Lua error in the handler surfaces as a provider failure.
   let context = cast[ptr ProviderContext](lua_touserdata(L, luaUpvalueIndex(1)))

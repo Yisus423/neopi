@@ -69,15 +69,18 @@ type
     execute*: proc (args: JsonNode): string {.closure.}
 
   StreamEventKind* = enum
-    ## Kind of normalized streaming event. Thinking deltas are not surfaced yet.
+    ## Kind of normalized streaming event: the message text, the model's
+    ## reasoning, a tool-call fragment, or completion.
     seTextDelta
     seToolCallDelta
     seFinished
+    seThinkingDelta
 
   StreamEvent* = object
-    ## One streaming event: text, a tool-call fragment, or completion.
+    ## One streaming event: text, reasoning, a tool-call fragment, or
+    ## completion.
     case kind*: StreamEventKind
-    of seTextDelta:
+    of seTextDelta, seThinkingDelta:
       text*: string
     of seToolCallDelta:
       toolCallId*: string

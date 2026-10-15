@@ -30,11 +30,18 @@ suite "the openai wire mapping":
     check events[0].kind == seTextDelta
     check events[0].text == "hola"
 
-  test "the reasoning chunks are dropped (the contract preserved)":
+  test "the reasoning chunks surface as thinking deltas":
+    # This used to be pinned as dropped: the event contract had no thinking kind
+    # and the module said the TUI slice would decide it. It decides now, so the
+    # pin flips with the contract instead of disappearing.
     var acc: OaiAccum
     let events = mapOaiChunk(
       "{\"choices\":[{\"delta\":{\"reasoning\":\"pensando\"}}]}", acc)
-    check events.len == 0
+    check events.len == 1
+    check events[0].kind == seThinkingDelta
+    check events[0].text == "pensando"
+    # Thinking is not the message: it does not accumulate into the text.
+    check acc.text == ""
 
   test "the empty content deltas emit nothing":
     var acc: OaiAccum
@@ -107,10 +114,21 @@ suite "the openai wire mapping":
     check acc.done
     check events.len > 0
     check events[^1].kind == seFinished
-    # Every event before the finish is a text delta with content.
+    # Every event before the finish is a delta with content: the message text or
+    # the model's reasoning. This capture carries both (251 reasoning chunks),
+    # which is exactly why the contract surfaces the thinking instead of
+    # dropping it — and counting them here is what proves it on the real wire.
+    var textDeltas = 0
+    var thinkingDeltas = 0
     for e in events[0 ..< ^1]:
-      check e.kind == seTextDelta
+      check e.kind in {seTextDelta, seThinkingDelta}
       check e.text.len > 0
+      if e.kind == seThinkingDelta:
+        inc thinkingDeltas
+      else:
+        inc textDeltas
+    check textDeltas > 0
+    check thinkingDeltas > 0
 
   test "L1: the real captured tool stream reassembles the tool call":
     let (acc, events) = feedAll(readFile("tests/fixtures/openrouter-tool-stream.txt"))

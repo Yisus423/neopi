@@ -557,6 +557,39 @@ suite "the turn drive":
       removeDir(root)
       removeFile(path)
 
+  test "a thinking delta reaches the transcript as a collapsed pi-shaped item":
+    let root = freshWorkspace("neopi-tp-thinking")
+    let path = freshSessionPath("thinking")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      discard wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      # The sink's own contract: the Lua side hands it {thinking = ...} — the
+      # shape expose.nim builds for a reasoning event — and it becomes a
+      # thinking item in the transcript.
+      runScript(L, "return neopi._tuiOnEvent({thinking = 'weighing it'})")
+      var found = false
+      for item in st.transcriptW.transcript.items:
+        if item.kind == tikThinking:
+          found = true
+          check item.text == "weighing it"
+          check not item.expanded
+      check found
+      # nimterm already renders the collapsed label pi-shaped, which is why the
+      # label stays its business and no ui.thinkingLabel slot is needed.
+      var canvas = newCanvas(size(40, 8))
+      st.screen.render(canvas, rect(0, 0, 40, 8))
+      check "Thinking" in canvas.plainText
+    finally:
+      removeDir(root)
+      removeFile(path)
+
 suite "the footer":
   test "the totals are the branch's and the memo notices every change":
     # `refreshFooter` memoizes the branch's token totals (the walk is

@@ -564,17 +564,21 @@ proc queueSteering(L: LuaState, text: string) =
   lua_rawseti(L, -2, n + 1)
   lua_pop(L, 2)
 
-proc postDelta*(state: ptr TuiState, text: string) =
-  ## Hand one streamed delta to the app's queue as an agent event. The app owns
-  ## the transcript update and the frame: this only says what happened. Going
-  ## through the queue instead of drawing here is what gives the render path a
-  ## single owner, and the widget's `apply` keeps the per-item line caches
-  ## (the model's apply plus `invalidateLines` was the sledgehammer that reset
-  ## every cache revision and re-wrapped the whole transcript per token: 6.6 s
-  ## at 5000 entries, the number bench/tui_bench.nim measured).
+proc postAgent*(state: ptr TuiState, event: AgentUiEvent) =
+  ## Hand one agent event to the app's queue. The app owns the transcript
+  ## update and the frame: this only says what happened. Going through the
+  ## queue instead of drawing here is what gives the render path a single
+  ## owner, and the widget's `apply` keeps the per-item line caches (the
+  ## model's apply plus `invalidateLines` was the sledgehammer that reset every
+  ## cache revision and re-wrapped the whole transcript per token: 6.6 s at
+  ## 5000 entries, the number bench/tui_bench.nim measured).
   if not state[].appReady:
     return
-  state[].app.post(agentEvent(AgentUiEvent(kind: ueTextDelta, text: text)))
+  state[].app.post(agentEvent(event))
+
+proc postDelta*(state: ptr TuiState, text: string) =
+  ## Hand one streamed message delta to the app as an agent event.
+  postAgent(state, AgentUiEvent(kind: ueTextDelta, text: text))
 
 proc pumpApp*(state: ptr TuiState): bool =
   ## Drain everything pending through the app's own dispatch — the keys, the
@@ -697,8 +701,14 @@ proc tuiOnEventCB(L: LuaState): cint {.cdecl.} =
   ## user asked to abort, the stream's cancel contract (the same as ever).
   let state = cast[ptr TuiState](lua_touserdata(L, luaUpvalueIndex(1)))
   let event = jsonOfStack(L, 1)
-  if event.kind == JObject and event.hasKey("text"):
-    postDelta(state, event["text"].getStr(""))
+  if event.kind == JObject:
+    # Two shapes arrive from the Lua side: the message text, and the model's
+    # reasoning under its own key because it is not the message.
+    if event.hasKey("thinking"):
+      postAgent(state, AgentUiEvent(kind: ueThinkingDelta,
+        text: event["thinking"].getStr("")))
+    elif event.hasKey("text"):
+      postDelta(state, event["text"].getStr(""))
   let abort = pumpApp(state)
   presentApp(state)
   lua_pushboolean(L, cint(ord(not abort)))

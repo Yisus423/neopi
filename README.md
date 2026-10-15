@@ -41,11 +41,11 @@ config file you own, the `require` mechanism loads what it references.
    Keys: **Enter** sends (or runs `/commands`, or steers while the model
    works); **Esc** aborts the stream (the partial turn renders marked) or
    clears the composer; **Ctrl+C** exits; **PgUp/PgDn** scroll the
-   transcript; **Ctrl+O** expands or collapses the tool output; **/resume**
+   transcript; **Ctrl+O** expands or collapses the thinking and the tool output; **/resume**
    opens the sessions picker (Enter loads, Esc cancels). Dragging the mouse
    over the transcript selects text, and the selection copies to the
-   clipboard. The transcript renders the deltas live — the model's thinking
-   pauses don't freeze it (an asyncdispatch timer, no threading).
+   clipboard. The transcript renders the deltas live, and the model's thinking
+   arrives as a collapsed item you can expand with Ctrl+O.
 
    The palette follows the terminal: the color depth (truecolor, 256, 16,
    and off for `NO_COLOR` or a dumb terminal) and the background reported by
@@ -107,9 +107,9 @@ session's entries, color-coded, scrollable), the composer (the editable
 input), the extension widgets + status line, and the footer (the provider,
 model, token usage, the working indicator). The interface drives the
 engine: sends go through the same `agent.run` chunk print mode uses, the
-deltas render live through the stream sink, and an asyncdispatch timer
-keeps the keys polling and the frame redrawing during the stream — no
-threading.
+deltas render live through the stream sink, and the app's own loop keeps the
+keys answering and the frame redrawing during the stream (no threading: the
+sink hands the app its events and lets it dispatch).
 
 ## Known limits (honest)
 
