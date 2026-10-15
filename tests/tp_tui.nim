@@ -243,6 +243,75 @@ suite "the / command dispatch":
       removeDir(root)
       removeFile(path)
 
+suite "the command completion":
+  test "commandItems lists the core builtin and the runtime's registry":
+    let root = freshWorkspace("neopi-tp-tui-complete")
+    let path = freshSessionPath("complete")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      runScript(L, """
+        neopi.registerCommand('echo', 'echo the args', function(args)
+          return 'echoed: ' .. args
+        end)
+        neopi.registerCommand('ping', 'return pong', function() end)
+      """)
+      # The core's own builtin first, then the registry in registration order:
+      # /resume is a command the user can type, so the completion that lists
+      # what can be typed has to carry it too (S4).
+      let items = commandItems(L)
+      check items.len == 3
+      check items[0].label == "resume"
+      check items[0].description.len > 0
+      check items[1].label == "echo"
+      check items[1].description == "echo the args"
+      check items[2].label == "ping"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "commandItems without the runtime lists only the builtin":
+    # The print mode and the headless specs have no registry (the runtime is
+    # not loaded); the builtin still stands and the missing registry
+    # contributes nothing instead of raising.
+    let sess = newSession(freshSessionPath("complete-noruntime"))
+    let ext = newExtensibility(freshWorkspace("neopi-tp-tui-nort"),
+      none(Provider), sess)
+    let L = ext.bus.state
+    let items = commandItems(L)
+    check items.len == 1
+    check items[0].label == "resume"
+
+  test "the completion prefix is the /token, only at the end of one line":
+    check completionPrefix("/", 1) == "/"
+    check completionPrefix("/ec", 3) == "/ec"
+    # A space ends the name: after it the argument completion's territory
+    # starts (pi's spaceIndex rule), and neopi completes no arguments.
+    check completionPrefix("/echo hi", 8) == ""
+    check completionPrefix("/ec ", 4) == ""
+    # The cursor is not at the end: completing would clobber the tail.
+    check completionPrefix("/ec", 1) == ""
+    check completionPrefix("hola", 4) == ""
+    check completionPrefix("/a\nb", 4) == ""
+    check completionPrefix("", 0) == ""
+    check completionPrefix("/", 0) == ""
+
+  test "the matches are case-insensitive prefixes, and the bare slash lists all":
+    let menu = @[MenuItem(label: "resume", description: "the sessions"),
+      MenuItem(label: "echo", description: "echo the args"),
+      MenuItem(label: "model", description: "show the model")]
+    check completionMatches(menu, "/").len == 3
+    let onlyResume = completionMatches(menu, "/r")
+    check onlyResume.len == 1
+    check onlyResume[0].label == "resume"
+    check onlyResume[0].description == "the sessions"
+    check completionMatches(menu, "/MO").len == 1
+    check completionMatches(menu, "/model").len == 1
+    check completionMatches(menu, "/zz").len == 0
+
 suite "the turn drive":
   test "sendTurn drives one turn at a time: the tool result and the final text land":
     let root = freshWorkspace("neopi-tp-tui-drive")

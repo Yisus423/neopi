@@ -720,6 +720,73 @@ proc listSessions*(root: string): seq[tuple[value, label: string]] =
   for (path, _) in files:
     result.add (value: path, label: sessionLabel(path))
 
+proc coreCommands(): seq[MenuItem] =
+  ## The core's own commands: the ones the TUI dispatches without the runtime
+  ## (`/resume` opens the sessions picker). They belong in the completion
+  ## because they belong to what the user can type.
+  result = @[MenuItem(label: "resume",
+    description: "resume a previous session")]
+
+proc commandItems*(L: LuaState): seq[MenuItem] =
+  ## The commands the composer completes: the core's builtins first, then the
+  ## runtime's registry (`neopi.registeredCommands`) in registration order.
+  ## The projection reads only the name and the description, because the
+  ## registry's entries carry functions and the raw table is not
+  ## JSON-encodable. Without the runtime (the print mode, a headless spec, a
+  ## registry-less interpreter) the builtins stand and the registry simply
+  ## contributes nothing.
+  result = coreCommands()
+  if L.isNil:
+    return
+  var registry: JsonNode
+  try:
+    registry = evalJson(L, """
+      local out = {}
+      if type(neopi.registeredCommands) == "function" then
+        for i, cmd in ipairs(neopi.registeredCommands()) do
+          out[i] = {name = cmd.name, description = cmd.description or ""}
+        end
+      end
+      return out
+    """)
+  except LuaError:
+    # A broken registry is not worth the TUI: the builtins still complete.
+    return
+  if registry.kind != JArray:
+    return
+  for entry in registry:
+    let name = entry{"name"}.getStr("")
+    if name.len == 0:
+      continue
+    result.add MenuItem(label: name,
+      description: entry{"description"}.getStr(""))
+
+proc completionPrefix*(text: string, cursor: int): string =
+  ## The token the completion is offered for, or "" when the composer is not
+  ## completing a command name: the cursor sits at the end of a single-line
+  ## text that starts with "/" and whose name carries no whitespace yet. A
+  ## space ends the name (pi's rule), and a cursor in the middle would clobber
+  ## the tail if a completion were applied.
+  if text.len == 0 or cursor != text.len or text[0] != '/':
+    return ""
+  for i in 1 ..< text.len:
+    let c = text[i]
+    if c == ' ' or c == '\t' or c == '\n' or c == '\r':
+      return ""
+  text
+
+proc completionMatches*(items: seq[MenuItem], prefix: string): seq[MenuItem] =
+  ## The items whose name prefix-matches the typed token, case-insensitively:
+  ## "/" alone (the empty name) lists every command. The rule is one pure proc
+  ## on purpose — pi fuzzy-matches, and swapping it later is a local change.
+  let typed =
+    if prefix.startsWith("/"): prefix[1 ..< prefix.len]
+    else: prefix
+  let needle = typed.toLowerAscii
+  for item in items:
+    if item.label.toLowerAscii.startsWith(needle):
+      result.add item
+
 proc openResume*(state: ptr TuiState) =
   ## Open the resume menu with the workspace's sessions (the /resume
   ## builtin). An empty sessions dir reports on the status line instead.
