@@ -28,7 +28,7 @@ honest record of the design decisions.
 | `session.nim` | The session tree: append-only JSONL, id + parent, the active branch, `navigateTo` (branch in place), the torn-tail rule |
 | `tools.nim` | The Nim agent tools (read/write/edit/bash) over `resolveConfined`; failures raise model-facing messages |
 | `expose.nim` | The Lua exposure of provider/session: `neopi.provider` (generate/stream/setScripted) and `neopi.session` (append/history/navigate); `stopReasonOf` maps `frCancelled` → "aborted" |
-| `tui.nim` | The TUI: the pure render layer (wrapLine/lineColor/transcriptLines/usageTotals/footerLine/visibleRange/selectLines), the three components (transcript/composer/footer) + the select overlay, the async timer (`pollTimerKeys`, addTimer 50ms), the stream sink (`tuiOnEventCB` via lua_pushcclosure), and the loop (`tuiLoop`: init + key dispatch + the SIGINT hook) |
+| `tui.nim` | The TUI over nimterm: the root widget (`NeopiScreen`) and the chrome it lays out (`tuiLayout`: a header, the transcript, the placed widgets, one row per status key, the composer, the footer), the extension slots (`neopi.ui`: status/widget/header/notify/working/title plus the dialogs), the app's callbacks (`wireApp`: the keys, the resume menu, the open question, the agent events, the actions), the stream sink (`tuiOnEventCB`: a Lua callback that posts nimterm agent events and lets the app dispatch and present), the transcript sync (incremental, with a full rebuild on a branch change) and the turn drive (`sendTurn`: one turn per `evalJson`, the app draining keys and events between them) |
 
 ## The runtime modules
 
@@ -73,11 +73,16 @@ lines / 50KB. Converging them is runtime work, not core work.
    libpcre arrive via dlopen at load time.
 6. **The interface is separate from the engine.** The loop and the tools do
    not change for the TUI: sends go through the same `agent.run` chunk print
-   mode uses, and the deltas render live through the stream sink (a Lua
-   closure carrying the TUI state pointer as its first upvalue) that applies
-   them to nimterm's transcript and flushes the frame in the same thread
-   the turn's waitFor pumps — no timer, no races, no threading (nimterm's
-   App is the loop owner). The pure render layer tests without a terminal.
+   mode uses, and the stream sink — a C callback carrying the TUI state pointer
+   as its first upvalue — **posts** each delta as a nimterm agent event and lets
+   the app dispatch and present it. The app owns the frame (the canvas, the
+   dirty flag and the frame budget) so the keys, the resume menu, an open dialog
+   and the stream events all take one path, and the transcript grows
+   incrementally so the view state an item carries (an expanded tool, a pending
+   approval) survives the next turn. No timer, no races, no threading: nimterm's
+   `App` is the loop owner and the turn's `waitFor` is what pumps it. The layout
+   (`tuiLayout`) and the transcript sync are pure, so they test without a
+   terminal — a canvas and a fake backend are the harness.
 7. **Extensions load the nvim way.** `.neopi/init.lua` is one config file
    the user owns; `require` (through `package.path` extended with
    `.neopi/`) is the loading mechanism — a directory scan is redundant with

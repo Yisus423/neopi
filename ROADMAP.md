@@ -35,22 +35,29 @@ verified basis of each slice.
 | 11.3. The swap off nimgent | The types out of `provider.nim` into `primitives.nim`, `Message` with the tool round-trip, the loop and the hook gates ported, the live transport defect fixed (`fe51fed`) | The anti-corruption layer absorbed its own replacement: `expose.nim` byte-identical and the 109 pre-existing tests unmodified still pin the contract. The live path had never run and crashed on a nil body reader |
 | Fix. The nimgent tail | The nimble requires and the libpcre path out; the live check opt-in (`NEOPI_LIVE_TEST`); AGENTS/README/ARCHITECTURE refreshed (`950bcf1`) | The build and the claims had to follow the code: `nimble test` is keyless and offline, and the docs still promised libpcre and described the layer as a wrapper over a dependency that no longer exists |
 | Fix. The dependency pin | chronos + our nimterm fork + sse resolve through nimble by git URL and commit; `nim.cfg` has no path at all; `binDir` is `build/`; config.nims' dead `../nimgent` loop out (`11688bc`) | A fresh clone could not build (absolute local paths) and the versions were whatever the checkouts happened to be. The same "depend deliberately" call the provider layer made, the other way round: a commit pin is exact, `nimble develop` still overrides it, and the installed copy is provably the pinned commit |
+| 20. The TUI UX (pi's interface, on nimterm) | The palette follows the terminal (`87c27cd`); the transcript answers the page keys and the copy while the editor keeps focus (`f4a46a4`); the chrome gains a header, a keyed status bar and placed widgets (`581daca`) with the adjacent slots — `hasUI`, `working`, `notify`, `title` (`d064a1d`); the app owns the dispatch and the frame (`1bb3ff5`); the transcript syncs incrementally so the view state an item carries survives (`0e976bd`); the model's reasoning reaches the transcript (`ab901f4`); the dialogs ask and answer through a callback (`d518d0c`) | The slice that closed the UX gap and settled the extension surface BEFORE anything was written against it. The study (the plan, the specs S1–S11, the map and the evidence live in `odd/tasks/tui-ux.md`) found that pi's component contract is six lines — `render(width): string[]` — and that the component vocabulary belongs in a library and not in the engine, which is why the surface lands in levels and why the component-shaped family is deferred rather than declared impossible. It moved the nimterm pin to `800bf7f` for `appendItem`, and `AGENTS.md` carries the bump procedure that move taught |
 
 ## Remaining (priority order)
 
 The numbers are stable identifiers, not a dense sequence or a rank: the ORDER
-of the table is the priority (#10 and #11 left this list — see Done).
+of the table is the priority (#10, #11 and #20 left this list — see Done, and
+#21–#23 are the user's plan for the next session).
 
 | # | Item | Notes |
 |---|---|---|
-| 19 | Pi's extension examples + the interface UX | Porting pi's `examples/extensions/*` onto `neopi.on`/`fs`/`process`/`provider`/`session`/`registerTool`/`registerCommand`/`ui` is the "real consumers exist" bar AGENTS.md sets for the frozen surface — it proves the API and finds its gaps, in Lua, without touching the core. The interface UX (#13) rides with it: the same extensions are what a real user runs. Takes precedence over #12 |
+| 21 | The session commands inside the TUI: `/login`, `/logout`, `/model` | The user's next slice, "algo más terrenal": today the provider and the model come from the CLI flags and the environment, with no way to change them from inside the TUI and no way to manage a key. `/commands` already dispatch through the composer and `neopi.registeredCommands` is the registry; the missing piece for an interactive prompt is the `input` hook, the one gap the UX map lists |
+| 22 | The command autocompletion, the way pi has it | The composer completes `/commands` as you type, with their descriptions: `neopi.registeredCommands` is already the source and nimterm's `Menu` is built for exactly that list. pi's `github-issue-autocomplete` is the same shape seen from the extension side |
+| 23 | New providers | The provider layer is ours now (the chronos stack), so a provider is a wire mapping plus a base URL and `openai_compat.nim` generalizes. The open question is the auth shape per provider — and what `login`/`logout` mean for each, which #21 decides |
+| 19 | Pi's extension examples + the interface UX | Porting pi's `examples/extensions/*` onto `neopi.on`/`fs`/`process`/`provider`/`session`/`registerTool`/`registerCommand`/`ui` is the "real consumers exist" bar AGENTS.md sets for the frozen surface — it proves the API and finds its gaps, in Lua, without touching the core. The surface it would have to work against was settled first (item 20) |
 | 12 | lazy.npi (the lazy plugin manager, the user's plan) | An extension: `neopi.fs.list` + `require` on-trigger — everything against the surface |
-| 13 | The interface study: what else to copy from pi's TUI | The mouse, the themes, the widget borders; the markdown landed with nimterm; the transcript scroll keys pending |
+| 13 | The interface study: what else to copy from pi's TUI | The mouse, the themes, the status bar and the transcript's scroll keys landed with the TUI UX slice (`87c27cd`, `f4a46a4`, `581daca`), and the markdown came with nimterm. What is left: the widget borders, and whatever pi's dialogs do that the callback shape does not |
 | 14 | Packaging (single-binary distribution) | The runtime ships with the binary |
 | 15 | Fork/clone to new files | Branch-in-place covers the MVP; forking copies the tree |
 | 16 | The tool execution alive during a run | bash runs frozen inside the turn's chunk (the threads/async gap pi and nimlet solve); the abort during a thinking pause waits for the next delta. **The approval flow rides here too** (it was the TUI UX slice's T8, deferred by the user's call): an approval is a tool call that must survive a user wait, and the re-drive it needs already exists — `drainSteering` in `runtime/agent.lua` reads `neopi.steeringQueue` after each turn, and that queue is a plain Lua table an extension can push into, so an approval answered mid-turn starts the next turn with the decision and needs no new primitive. The missing piece is the producer: a registration for the tools that need approval, and a core that skips them, posts nimterm's approval item (choices included) and emits the decision as an event |
 | 17 | grep/find/ls agent tools | If the model needs them |
-| 18 | The provider's recorded follow-ups | The known limits the swap's verification left: wrap a mid-stream failure as `ProviderError` (trigger: the first Nim consumer or a retry policy); port the argument JSON-Schema validation (trigger: malformed model args, or the extension tool surface growing); bound the wire's `tool_calls` index (`openai_compat.nim:79` — cheap, no trigger). They ride the TUI slice (#11) because it reopens the provider's event contract for the thinking delta, so it touches the same files |
+| 24 | The transcript search | `setSearch`/`nextSearch`/`clearSearch` already exist in nimterm; what is missing is the binding and the search mode in the composer (the TUI UX slice's T7) |
+| 25 | The UX regression gate | Canvas + FakeBackend assertions over the chrome as a standing gate (the TUI UX slice's T10). Its argument is empirical: `bench/tui_bench.nim`'s own self-check caught a regression that 127 tests did not |
+| 18 | The provider's recorded follow-ups | The known limits the swap's verification left: wrap a mid-stream failure as `ProviderError` (trigger: the first Nim consumer or a retry policy); port the argument JSON-Schema validation (trigger: malformed model args, or the extension tool surface growing); bound the wire's `tool_calls` index (`openai_compat.nim:79` — cheap, no trigger). The thinking delta landed with the TUI UX slice (`ab901f4`), so what is left is the two limits that still have no trigger |
 
 ## Reconsidered
 
@@ -81,9 +88,9 @@ of the table is the priority (#10 and #11 left this list — see Done).
   CLI-integrated mode waits.
 - **An async API for Lua extensions** — Lua is synchronous; an async surface
   would need coroutines. The core is async inside already (chronos behind
-  the provider's waitFor); the key drain covers the TUI's responsiveness.
-- **`neopi.ui.select` (the dialogs API)** — commands ask the TUI for a
-  selection (pi's ExtensionUIDialogs); deferred until an extension needs it.
+  the provider's waitFor); the key drain covers the TUI's responsiveness. The
+  dialogs answered it for the one case that needed it: an answer that arrives
+  later travels as a callback (`d518d0c`), never as a blocking wait.
 - **The global `~/.neopi/init.lua`** — the project config loads today; the
   global one (the user's personal extensions across projects) waits.
 - **A manifest** (package.json-style declared paths) — redundant with the

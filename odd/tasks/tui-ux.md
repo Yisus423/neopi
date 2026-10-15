@@ -2,7 +2,8 @@
 
 The slice that closes the UX gap between neopi's TUI and pi's, and with it
 settles the interface vocabulary BEFORE any extension is written against it.
-Stage 1 (this document) is a read-only study: no source line changes in it.
+The document starts as the read-only study that decided the scope and became the
+slice's record: the specs, the map, the tasks and the evidence of every one.
 
 ## Specs
 
