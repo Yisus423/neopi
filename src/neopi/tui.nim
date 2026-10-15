@@ -309,6 +309,12 @@ method paint*(screen: NeopiScreen, canvas: var Canvas) =
       rect(0, max(0, inputTop - rows), w, rows))
 
 type
+  MenuKind* = enum
+    ## Which menu the floating slot holds. They share the widget and the rows
+    ## above the composer, but not the key map: Tab completes a command into
+    ## the composer, Enter resumes a session.
+    mkNone, mkResume, mkCompletion
+
   FooterTokens = object
     ## The memoized branch-scoped token totals behind the footer. The key is
     ## everything `footerText` reads from the session: its identity (a
@@ -336,6 +342,9 @@ type
     inputW*: InputWidget
     footerW*: TextWidget
     menu*: Menu
+    menuKind*: MenuKind
+      ## Which menu the floating slot holds (the completion or the resume
+      ## picker), because their key maps differ.
     chrome*: Chrome
       ## The extension-filled chrome (the header rows, the keyed status rows and
       ## the placed blocks), shared by reference with the root widget.
@@ -417,7 +426,7 @@ proc initTuiState*(provider, model: string, sess: Session,
     quit: false, clipboard: copyToClipboard,
     workingText: "", title: "", titleWriter: terminalTitleWriter,
     working: false, abortRequested: false,
-    syncedId: 0,
+    syncedId: 0, menuKind: mkNone,
     chrome: newChrome())
 
 const confirmYes* = "Yes"
@@ -787,6 +796,57 @@ proc completionMatches*(items: seq[MenuItem], prefix: string): seq[MenuItem] =
     if item.label.toLowerAscii.startsWith(needle):
       result.add item
 
+proc selectedItem(menu: Menu): MenuItem =
+  ## The item under the menu's cursor. The widget clamps the selection, so a
+  ## menu that has items always has one; the empty answer is the guard for a
+  ## caller that did not check.
+  if not menu.isNil and menu.selected >= 0 and menu.selected < menu.items.len:
+    menu.items[menu.selected]
+  else:
+    MenuItem()
+
+proc closeCompletion(state: ptr TuiState) =
+  ## Give the completion's slot back to the transcript. Only the completion's
+  ## own menu is touched: an open resume picker belongs to its own flow.
+  if state[].menuKind != mkCompletion:
+    return
+  state[].menuKind = mkNone
+  state[].menu = nil
+  if not state[].screen.isNil:
+    state[].screen.menu = nil
+
+proc applyCompletion(state: ptr TuiState, item: MenuItem) =
+  ## Put the completed command in the composer, ready for its arguments:
+  ## "/name " with the cursor after the space, and the menu closed. The text
+  ## changes outside the editor's key path, so no change action follows to
+  ## close it — the widget's own setText is the way in, and it drops the undo
+  ## history with it (a known limit: pi pushes a snapshot first).
+  state[].inputW.setText("/" & item.label & " ")
+  closeCompletion(state)
+
+proc updateCompletion(state: ptr TuiState, L: LuaState) =
+  ## Recompute the completion from the composer: the menu opens while the
+  ## cursor sits at the end of a single-line /token that matches at least one
+  ## command, and closes otherwise. Every keystroke that edits the text lands
+  ## here through the editor's own change action — no polling, and no work
+  ## inside paint.
+  ##
+  ## The resume picker on screen is not the completion's to touch: it belongs
+  ## to `openResume`/`resumeSession`.
+  if state[].menuKind == mkResume:
+    return
+  let prefix = completionPrefix(state[].inputW.text, state[].inputW.cursor)
+  var matches: seq[MenuItem] = @[]
+  if prefix.len > 0:
+    matches = completionMatches(commandItems(L), prefix)
+  if matches.len == 0:
+    closeCompletion(state)
+    return
+  state[].menuKind = mkCompletion
+  state[].menu = newMenu(matches)
+  if not state[].screen.isNil:
+    state[].screen.menu = state[].menu
+
 proc openResume*(state: ptr TuiState) =
   ## Open the resume menu with the workspace's sessions (the /resume
   ## builtin). An empty sessions dir reports on the status line instead.
@@ -797,6 +857,7 @@ proc openResume*(state: ptr TuiState) =
     setCoreStatus(state, "no sessions to resume")
     refreshFooter(state)
     return
+  state[].menuKind = mkResume
   state[].menu = newMenu(items, title = "resume a session:")
   if not state[].screen.isNil:
     state[].screen.menu = state[].menu
@@ -814,9 +875,11 @@ proc resumeSession*(state: ptr TuiState, L: LuaState, path: string) =
   except CatchableError as e:
     setCoreStatus(state, "cannot resume " & path & ": " & e.msg)
     state[].menu = nil
+    state[].menuKind = mkNone
     if not state[].screen.isNil: state[].screen.menu = nil
     return
   state[].menu = nil
+  state[].menuKind = mkNone
   if not state[].screen.isNil: state[].screen.menu = nil
   state[].working = false
   setCoreStatus(state, "")
@@ -1375,8 +1438,36 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
     if event.key == keyCtrlC:
       app.running = false
       return eventHandled
-    if not state[].screen.isNil and not state[].screen.menu.isNil and
-        state[].screen.menu.items.len > 0:
+    # The two menus share the slot above the composer and not their keys. The
+    # completion: Tab completes (and answering it is what keeps nimterm's
+    # dispatch from moving the focus), the arrows navigate, Esc closes the menu
+    # ALONE — pi cancels the autocomplete, not the draft — and Enter completes
+    # and then falls through to the editor, so the submit rides with it and the
+    # completed command runs in the same keystroke. Every other key goes to the
+    # editor, whose change action recomputes the menu.
+    let menuOpen = not state[].screen.isNil and
+      not state[].screen.menu.isNil and state[].screen.menu.items.len > 0
+    if menuOpen and state[].menuKind == mkCompletion:
+      let menu = state[].screen.menu
+      case event.key
+      of keyUp, keyDown, keyPageUp, keyPageDown:
+        let response = menu.handle(event)
+        app.invalidate()
+        if response.handled: return response
+      of keyTab:
+        applyCompletion(state, menu.selectedItem())
+        app.invalidate()
+        return eventHandled
+      of keyEscape:
+        closeCompletion(state)
+        app.invalidate()
+        return eventHandled
+      of keyEnter:
+        applyCompletion(state, menu.selectedItem())
+        app.invalidate()
+      else:
+        discard
+    elif menuOpen:
       case event.key
       of keyUp, keyDown, keyPageUp, keyPageDown:
         let response = state[].screen.menu.handle(event)
@@ -1405,9 +1496,15 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
     eventIgnored
 
   app.onAction = proc (app: var App, action: UiAction) =
-    ## A submit while the turn runs is steering, not another turn: the drive is
-    ## already inside `evalJson` and a nested turn would recurse into it. The
-    ## rest goes to the shared action dispatch.
+    ## The editor's change action is why the completion needs no timer and no
+    ## polling: every edit of the text arrives here. A submit while the turn
+    ## runs is steering, not another turn: the drive is already inside
+    ## `evalJson` and a nested turn would recurse into it. The rest goes to the
+    ## shared action dispatch.
+    if action.kind == "change":
+      updateCompletion(state, L)
+      app.invalidate()
+      return
     if action.kind == "submit" and state[].working:
       let draft = state[].inputW.text
       if draft.len > 0 and not L.isNil:

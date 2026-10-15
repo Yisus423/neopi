@@ -75,6 +75,27 @@ proc wireFakeApp(state: ptr TuiState): TuiFakeBackend =
   state[].app.focus(Widget(state[].inputW))
   state[].appReady = true
 
+proc wireCompletionApp(state: ptr TuiState, L: LuaState): TuiFakeBackend =
+  ## The app the completion tests drive: the fake backend, the stream sink and
+  ## the callbacks, so a typed key travels the production path (the input's
+  ## change action is what recomputes the menu).
+  result = wireFakeApp(state)
+  exposeTuiSink(L, state, "scripted")
+  wireApp(state, L, state[].app)
+
+proc typeText(backend: TuiFakeBackend, state: ptr TuiState, text: string) =
+  ## Type `text` into the composer one key at a time and let the app dispatch:
+  ## the editor applies each character and its change action is what the
+  ## completion listens to.
+  for c in text:
+    backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
+  discard pumpApp(state)
+
+proc pressKey(backend: TuiFakeBackend, state: ptr TuiState, key: Key) =
+  ## Queue one key and let the app dispatch and present it.
+  backend.events.add UiEvent(kind: uiKey, key: key)
+  discard pumpApp(state)
+
 suite "the transcript adapter":
   test "the session entries map onto nimterm's transcript items":
     let entries = @[
@@ -311,6 +332,188 @@ suite "the command completion":
     check completionMatches(menu, "/MO").len == 1
     check completionMatches(menu, "/model").len == 1
     check completionMatches(menu, "/zz").len == 0
+
+suite "the completion in the composer":
+  test "typing / opens the menu and typing narrows it, and a space closes it":
+    let root = freshWorkspace("neopi-tp-tui-comp-open")
+    let path = freshSessionPath("comp-open")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      runScript(L, """
+        neopi.registerCommand('echo', 'echo the args', function(args)
+          return 'echoed: ' .. args
+        end)
+      """)
+      let backend = wireCompletionApp(addr st, L)
+      typeText(backend, addr st, "/")
+      check st.menuKind == mkCompletion
+      check not st.screen.menu.isNil
+      check st.screen.menu.items.len == 2
+      check st.screen.menu.items[0].label == "resume"
+      check st.screen.menu.items[1].label == "echo"
+      check st.screen.menu.items[1].description == "echo the args"
+      typeText(backend, addr st, "ec")
+      check st.screen.menu.items.len == 1
+      check st.screen.menu.items[0].label == "echo"
+      # A space ends the name: after it the argument's territory starts, where
+      # neopi completes nothing, so the menu goes away.
+      typeText(backend, addr st, " ")
+      check st.menuKind == mkNone
+      check st.menu.isNil
+      check st.screen.menu.isNil
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "Tab completes the highlighted command and sends nothing":
+    let root = freshWorkspace("neopi-tp-tui-comp-tab")
+    let path = freshSessionPath("comp-tab")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      runScript(L, """
+        neopi.registerCommand('echo', 'echo the args', function(args)
+          return 'echoed: ' .. args
+        end)
+      """)
+      let backend = wireCompletionApp(addr st, L)
+      typeText(backend, addr st, "/ec")
+      check st.screen.menu.items.len == 1
+      pressKey(backend, addr st, keyTab)
+      # The composer carries the completed name and a trailing space, ready for
+      # the arguments; nothing ran and nothing entered the session.
+      check st.inputW.text == "/echo "
+      check st.menuKind == mkNone
+      check st.menu.isNil
+      check sess.history().len == 0
+      check st.transcriptW.transcript.items.len == 0
+      # Tab belonged to the completion: the focus never left the composer (an
+      # unhandled Tab moves it in nimterm's dispatch).
+      check st.app.focus == Widget(st.inputW)
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "Enter completes and runs the command in the same keystroke":
+    let root = freshWorkspace("neopi-tp-tui-comp-enter")
+    let path = freshSessionPath("comp-enter")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      runScript(L, """
+        neopi.registerCommand('echo', 'echo the args', function(args)
+          return 'echoed: ' .. args
+        end)
+      """)
+      let backend = wireCompletionApp(addr st, L)
+      typeText(backend, addr st, "/ec")
+      pressKey(backend, addr st, keyEnter)
+      # pi's fall-through: the completion lands and the submit rides with it,
+      # so the command actually ran.
+      check st.inputW.text == ""
+      check st.menuKind == mkNone
+      check st.transcriptW.transcript.items.len == 1
+      check "echoed: " in st.transcriptW.transcript.items[0].text
+      check sess.history().len == 0
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "Esc closes the menu and keeps the draft":
+    let root = freshWorkspace("neopi-tp-tui-comp-esc")
+    let path = freshSessionPath("comp-esc")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      runScript(L, """
+        neopi.registerCommand('echo', 'echo the args', function(args)
+          return 'echoed: ' .. args
+        end)
+      """)
+      let backend = wireCompletionApp(addr st, L)
+      typeText(backend, addr st, "/ec")
+      pressKey(backend, addr st, keyEscape)
+      # pi cancels the autocomplete alone: the text the user typed survives,
+      # which is not what Esc does without a menu (it clears the composer).
+      check st.menuKind == mkNone
+      check st.menu.isNil
+      check st.inputW.text == "/ec"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "the arrow keys move the selection":
+    let root = freshWorkspace("neopi-tp-tui-comp-arrows")
+    let path = freshSessionPath("comp-arrows")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      runScript(L, """
+        neopi.registerCommand('echo', 'echo the args', function(args)
+          return 'echoed: ' .. args
+        end)
+      """)
+      let backend = wireCompletionApp(addr st, L)
+      typeText(backend, addr st, "/")
+      check st.screen.menu.selected == 0
+      pressKey(backend, addr st, keyDown)
+      check st.screen.menu.selected == 1
+      pressKey(backend, addr st, keyUp)
+      check st.screen.menu.selected == 0
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "the menu renders above the composer, with the descriptions":
+    let root = freshWorkspace("neopi-tp-tui-comp-render")
+    let path = freshSessionPath("comp-render")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      runScript(L, """
+        neopi.registerCommand('echo', 'echo the args', function(args)
+          return 'echoed: ' .. args
+        end)
+      """)
+      let backend = wireCompletionApp(addr st, L)
+      typeText(backend, addr st, "/")
+      var canvas = newCanvas(size(60, 12))
+      st.screen.render(canvas, rect(0, 0, 60, 12))
+      # What the completion shows is the name and the description the
+      # extension wrote — the reason the registry is the source.
+      check "resume" in canvas.plainText
+      check "echo" in canvas.plainText
+      check "echo the args" in canvas.plainText
+      # And it floats above the composer, so the draft stays visible.
+      check "/" in canvas.plainText
+    finally:
+      removeDir(root)
+      removeFile(path)
 
 suite "the turn drive":
   test "sendTurn drives one turn at a time: the tool result and the final text land":
