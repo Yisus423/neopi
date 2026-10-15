@@ -409,10 +409,25 @@ owner, and T9's plumbing is the part of it that this slice consumes.
   still named the removed copy and the build died with `cannot open:
   <removed>/nimterm.nim`. Both are the class of thing a build catches and a
   reading does not, which is now the third slice where that sentence holds.
+- **Evidence — the pin's acceptance passed from outside the project, and the
+  failed attempt was the test's own doing.** `nimble build` on a clone at
+  `/tmp/neopi-fresh` (the path the #11 evidence recorded) resolves `800bf7f`
+  and produces `build/neopi` (2.96 MB). The first attempt had cloned into
+  `build/fresh-clone`, *inside* the project, and died with a `type mismatch` on
+  `newExtensibility`; the sources of the two checkouts are byte-identical
+  (`diff` is empty) because a nested clone inherits the outer `config.nims`,
+  whose `switch("path", thisDir() / "src")` adds the outer `src` to the search
+  path — so two copies of the same modules meet under different paths. The
+  parent's hypothesis (a shared nimcache, since Nim keys it by target name) was
+  **wrong**, and the counter-experiment says so: redirecting the clone's
+  nimcache left the failure unchanged. The user's memory pointed at the right
+  thing. `AGENTS.md` now says to verify a fresh clone from outside the project,
+  which is the only place that check means anything.
 - **Open.** Batch 2 continues with T5 (the thinking), T6 (the dialogs) and T8
   (the approvals): T9a and T9b are closed. Two things stay outside the cut: T7
   (the transcript search) and T10 (the standing UX regression gate, whose
   argument is the real regression the harness caught during T3a). Operational
   reminder for the next dependency bump: the `vcsRevision` guard and the Nim
   cache cleanup are in `AGENTS.md`, and neither was theory — the bump this
-  slice required produced both failures.
+  slice required produced both failures. A third: verify the fresh clone from
+  outside the project, because a nested one inherits the outer `config.nims`.

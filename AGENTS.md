@@ -73,6 +73,17 @@ a probe that calls a symbol only the pinned revision has. **The `vcsRevision`
 is what proves the copy is the pin; the version number does not, because it is
 the same in both.**
 
+**Verify a fresh clone from OUTSIDE the project.** A checkout nested inside
+another one (`build/fresh-clone`) inherits the outer one's `config.nims`, whose
+`switch("path", thisDir() / "src")` adds the outer `src` to the search path:
+the compiler then sees two copies of the same modules under different paths and
+dies with a `type mismatch` that does not exist in the code (`diff` of the two
+sources is empty, and redirecting the nimcache does not change it — the path is
+what collides). The acceptance test for a pin is a clone somewhere else
+entirely: `/tmp/neopi-fresh` is where it has been run and recorded, and
+`nimble build` there is the pristine route — it resolves the pin and produces
+`build/neopi`.
+
 ## Testing
 
 - `nimble test` — self-contained and offline: the Nim suite via unittest2
