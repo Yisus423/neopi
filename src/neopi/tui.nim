@@ -947,7 +947,11 @@ proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
   ## (the nvim model — the runtime owns it): the input travels on the neopi
   ## table, the returned output renders as a status line in the transcript,
   ## and a failure is feedback there too — the TUI survives /unknown.
-  if text == "/resume":
+  ##
+  ## The comparison is on the trimmed input because the builtin is also
+  ## reachable from the completion, which inserts the trailing space the
+  ## arguments would follow: "/resume" and "/resume " are the same command.
+  if text.strip == "/resume":
     state[].inputW.clear()
     openResume(state)
     return

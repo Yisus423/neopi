@@ -485,6 +485,37 @@ suite "the completion in the composer":
       removeDir(root)
       removeFile(path)
 
+  test "the completed /resume is the builtin, not an unknown command":
+    let root = freshWorkspace("neopi-tp-tui-comp-resume")
+    let path = freshSessionPath("comp-resume")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      createDir(root / ".neopi" / "sessions")
+      writeFile(root / ".neopi" / "sessions" / "run-1.jsonl",
+        "{\"type\":\"user\",\"id\":1,\"text\":\"an old session\"}")
+      let backend = wireCompletionApp(addr st, L)
+      typeText(backend, addr st, "/re")
+      check st.screen.menu.items.len == 1
+      check st.screen.menu.items[0].label == "resume"
+      # Enter completes to "/resume " — the trailing space the insertion leaves
+      # for the arguments — and submits. The builtin has to answer for the text
+      # the completion actually produced, not only for the bare "/resume" a
+      # user types by hand: it is the same command either way.
+      pressKey(backend, addr st, keyEnter)
+      check st.menuKind == mkResume
+      check not st.menu.isNil
+      if not st.menu.isNil:
+        check st.menu.items.len == 1
+      check st.inputW.text == ""
+    finally:
+      removeDir(root)
+      removeFile(path)
+
   test "the menu renders above the composer, with the descriptions":
     let root = freshWorkspace("neopi-tp-tui-comp-render")
     let path = freshSessionPath("comp-render")
