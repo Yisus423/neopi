@@ -150,6 +150,19 @@ neopi's hooks, read with codegraph (`codegraph explore`) and nimlangserver
       completed text too (`/quit ` with the insertion's trailing space) — the
       same trimmed comparison `/resume` needed. Commit `bef2ece`.
       RED first: five focused failures, every one of them "quit is missing".
+- [x] F5. `/quit` registered, got listed and ran — and the program stayed
+      open. The builtin lowered `running` on `state.app`, and nimterm's App is
+      a VALUE: `tuiLoop` holds its own (`var app = newApp(...)`, `app.run()`)
+      and the callbacks receive that one, so the state's field is a copy whose
+      reference members (the backend, the queue, the root widget) are shared
+      and whose value flags are not. The write reached an app nothing loops
+      over — the write-only-field shape this repo has paid for twice already.
+      The request travels in the state now (`quit`) and the wiring honors it
+      on the callback's app, which is the loop's; the `app` field carries the
+      note. Commit `7f5f0a0`. RED first with the production divergence
+      assembled in the test: `loopApp.running was true`. The previous test had
+      passed because the HARNESS steps the state's copy — the one shape it
+      could not catch.
 
 ## Evidence
 
@@ -199,6 +212,12 @@ neopi's hooks, read with codegraph (`codegraph explore`) and nimlangserver
   it — `nimble test` → "[Summary] 152 tests run (3.08s): 152 OK, 0 FAILED, 0
   SKIPPED" with the busted runner's "19 successes / 0 failures / 0 errors / 0
   pending". Commit `bef2ece`.
+- **The /quit fix** (F5): the focused loop 50 → 51, and the gate after it —
+  `nimble test` → "[Summary] 153 tests run (2.86s): 153 OK, 0 FAILED, 0
+  SKIPPED" with the busted runner's "19 successes / 0 failures / 0 errors / 0
+  pending". `nimFindReferences` over `running` listed the only two writes in
+  neopi — both on the callback's app — and nothing reading the state's copy.
+  Commit `7f5f0a0`.
 
 ## Log
 
@@ -229,3 +248,11 @@ neopi's hooks, read with codegraph (`codegraph explore`) and nimlangserver
 - **L6** (2026-10-15, verbatim): "dale, ya está bien, agrega un /quit para salir
   y estaría lista está sesión, ¿que seguiría?" — the /quit request and the
   session's close; the next slice stays the user's call (#21 was their plan).
+- **L7** (2026-10-16, verbatim): "el /quit no está funcionando, si se registro,
+  pero no me cierra el programa" — and the correction that follows it: "podías
+  haber usado codegraph o nimlangserver". The report was exact: the builtin was
+  registered and listed, so the failure was in what it did, not in whether it
+  existed. The tools answered it in two calls once asked — `nimFindReferences`
+  over `running` lists every write (the Ctrl+C branch and the new honor point,
+  both on the callback's app; nothing reads the state's copy) — and the fix's
+  blast radius was verified that way instead of by reading around.
