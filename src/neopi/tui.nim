@@ -737,10 +737,11 @@ proc listSessions*(root: string): seq[tuple[value, label: string]] =
 
 proc coreCommands(): seq[MenuItem] =
   ## The core's own commands: the ones the TUI dispatches without the runtime
-  ## (`/resume` opens the sessions picker). They belong in the completion
-  ## because they belong to what the user can type.
-  result = @[MenuItem(label: "resume",
-    description: "resume a previous session")]
+  ## (`/resume` opens the sessions picker, `/quit` ends the session). They
+  ## belong in the completion because they belong to what the user can type.
+  result = @[
+    MenuItem(label: "resume", description: "resume a previous session"),
+    MenuItem(label: "quit", description: "exit neopi")]
 
 proc commandItems*(L: LuaState): seq[MenuItem] =
   ## The commands the composer completes: the core's builtins first, then the
@@ -956,19 +957,31 @@ proc exposeTuiSink*(L: LuaState, state: ptr TuiState, model: string) =
   lua_setfield(L, -2, "hasUI")
   lua_pop(L, 1)
 
+proc quitTui(state: ptr TuiState) =
+  ## End the session: the app's loop stops (what Ctrl+C does) and the state
+  ## carries the fact. The frame in flight finishes first — the loop re-checks
+  ## its flag after the current step — so nothing tears down mid-render.
+  state[].quit = true
+  state[].app.running = false
+
 proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
-  ## Dispatch a /-prefixed composer input: the /resume builtin opens the
-  ## sessions menu; everything else goes to the runtime's command registry
-  ## (the nvim model — the runtime owns it): the input travels on the neopi
-  ## table, the returned output renders as a status line in the transcript,
-  ## and a failure is feedback there too — the TUI survives /unknown.
+  ## Dispatch a /-prefixed composer input: the /resume and /quit builtins are
+  ## the core's; everything else goes to the runtime's command registry (the
+  ## nvim model — the runtime owns it): the input travels on the neopi table,
+  ## the returned output renders as a status line in the transcript, and a
+  ## failure is feedback there too — the TUI survives /unknown.
   ##
-  ## The comparison is on the trimmed input because the builtin is also
+  ## The comparison is on the trimmed input because the builtins are also
   ## reachable from the completion, which inserts the trailing space the
   ## arguments would follow: "/resume" and "/resume " are the same command.
-  if text.strip == "/resume":
+  let command = text.strip
+  if command == "/resume":
     state[].inputW.clear()
     openResume(state)
+    return
+  if command == "/quit":
+    state[].inputW.clear()
+    quitTui(state)
     return
   state[].inputW.clear()
   lua_getfield(L, luaGlobalsIndex, "neopi")

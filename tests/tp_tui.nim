@@ -280,31 +280,33 @@ suite "the command completion":
         end)
         neopi.registerCommand('ping', 'return pong', function() end)
       """)
-      # The core's own builtin first, then the registry in registration order:
-      # /resume is a command the user can type, so the completion that lists
-      # what can be typed has to carry it too (S4).
+      # The core's own builtins first, then the registry in registration order:
+      # /resume and /quit are commands the user can type, so the completion that
+      # lists what can be typed has to carry them too (S4).
       let items = commandItems(L)
-      check items.len == 3
+      check items.len == 4
       check items[0].label == "resume"
       check items[0].description.len > 0
-      check items[1].label == "echo"
-      check items[1].description == "echo the args"
-      check items[2].label == "ping"
+      check items[1].label == "quit"
+      check items[2].label == "echo"
+      check items[2].description == "echo the args"
+      check items[3].label == "ping"
     finally:
       removeDir(root)
       removeFile(path)
 
   test "commandItems without the runtime lists only the builtin":
     # The print mode and the headless specs have no registry (the runtime is
-    # not loaded); the builtin still stands and the missing registry
+    # not loaded); the builtins still stand and the missing registry
     # contributes nothing instead of raising.
     let sess = newSession(freshSessionPath("complete-noruntime"))
     let ext = newExtensibility(freshWorkspace("neopi-tp-tui-nort"),
       none(Provider), sess)
     let L = ext.bus.state
     let items = commandItems(L)
-    check items.len == 1
+    check items.len == 2
     check items[0].label == "resume"
+    check items[1].label == "quit"
 
   test "the completion prefix is the /token, only at the end of one line":
     check completionPrefix("/", 1) == "/"
@@ -353,10 +355,11 @@ suite "the completion in the composer":
       typeText(backend, addr st, "/")
       check st.menuKind == mkCompletion
       check not st.screen.menu.isNil
-      check st.screen.menu.items.len == 2
+      check st.screen.menu.items.len == 3
       check st.screen.menu.items[0].label == "resume"
-      check st.screen.menu.items[1].label == "echo"
-      check st.screen.menu.items[1].description == "echo the args"
+      check st.screen.menu.items[1].label == "quit"
+      check st.screen.menu.items[2].label == "echo"
+      check st.screen.menu.items[2].description == "echo the args"
       typeText(backend, addr st, "ec")
       check st.screen.menu.items.len == 1
       check st.screen.menu.items[0].label == "echo"
@@ -582,7 +585,7 @@ suite "the composer keeps its keys":
       check st.menuKind == mkCompletion
       check not st.screen.menu.isNil
       if not st.screen.menu.isNil:
-        check st.screen.menu.items.len == 2
+        check st.screen.menu.items.len == 3
       # And the composer is on screen, with the draft in it.
       var canvas = newCanvas(size(60, 12))
       st.screen.render(canvas, rect(0, 0, 60, 12))
@@ -651,6 +654,39 @@ suite "the composer keeps its keys":
       # its own line while a menu was up.
       check "─" in canvas.plainText
       check "/" in canvas.plainText
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+suite "the /quit builtin":
+  test "the /quit builtin stops the TUI's loop":
+    let root = freshWorkspace("neopi-tp-tui-quit")
+    let path = freshSessionPath("quit")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireCompletionApp(addr st, L)
+      # As if the app's loop owned the frame: in the harness nothing is looping,
+      # so a test that did not raise the flag could not tell whether /quit
+      # lowered it.
+      st.app.running = true
+      typeText(backend, addr st, "/quit")
+      check st.menuKind == mkCompletion
+      check not st.menu.isNil
+      if not st.menu.isNil:
+        check st.menu.items.len == 1
+        check st.menu.items[0].label == "quit"
+      # Enter completes to "/quit " — the trailing space the insertion leaves —
+      # and submits: the builtin answers for the text the completion produced,
+      # and the loop stops with it.
+      pressKey(backend, addr st, keyEnter)
+      check not st.app.running
+      check st.quit
+      check st.inputW.text == ""
     finally:
       removeDir(root)
       removeFile(path)

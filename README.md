@@ -46,8 +46,8 @@ config file you own, the `require` mechanism loads what it references.
    renders marked) or clears the composer; **Ctrl+C** exits; **PgUp/PgDn**
    scroll the transcript; **Ctrl+O** expands or collapses the thinking and the
    tool output; **/resume** opens the sessions picker (Enter loads, Esc
-   cancels). Dragging the mouse over the transcript selects text, and the
-   selection copies to the clipboard. The transcript renders the deltas live, and the model's thinking
+   cancels) and **/quit** (or Ctrl+C) exits. Dragging the mouse over the
+   transcript selects text, and the selection copies to the clipboard. The transcript renders the deltas live, and the model's thinking
    arrives as a collapsed item you can expand with Ctrl+O.
 
    The palette follows the terminal: the color depth (truecolor, 256, 16,
