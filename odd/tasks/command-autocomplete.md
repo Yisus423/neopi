@@ -142,6 +142,15 @@ neopi's hooks, read with codegraph (`codegraph explore`) and nimlangserver
       it is modal and owns the screen while it is up.
 - Commits: `59754ec` (F1 + F2) and `27518e6` (F3).
 
+### The /quit builtin (2026-10-15, the session's last ask)
+
+- [x] F4. `/quit` ends the session from the composer: `quitTui` stops the
+      app's loop (what Ctrl+C does) and the state carries the fact; the
+      completion lists it with the other core builtins, and it answers for the
+      completed text too (`/quit ` with the insertion's trailing space) — the
+      same trimmed comparison `/resume` needed. Commit `bef2ece`.
+      RED first: five focused failures, every one of them "quit is missing".
+
 ## Evidence
 
 - **The gate** (`nimble test`, verbatim): "[Summary] 148 tests run (2.81s):
@@ -186,6 +195,10 @@ neopi's hooks, read with codegraph (`codegraph explore`) and nimlangserver
   SKIPPED" and the busted runner's "19 successes / 0 failures / 0 errors / 0
   pending". nimlangserver stayed at 0 diagnostics. Commits `59754ec` and
   `27518e6`, one per work unit, each green on its own.
+- **The last ask** (`/quit`, F4): the focused loop 49 → 50, and the gate after
+  it — `nimble test` → "[Summary] 152 tests run (3.08s): 152 OK, 0 FAILED, 0
+  SKIPPED" with the busted runner's "19 successes / 0 failures / 0 errors / 0
+  pending". Commit `bef2ece`.
 
 ## Log
 
@@ -213,3 +226,6 @@ neopi's hooks, read with codegraph (`codegraph explore`) and nimlangserver
   What the report described as the composer not showing up is the completion
   going silent (the menu never opened) — the composer itself kept rendering,
   which the F1 test pins.
+- **L6** (2026-10-15, verbatim): "dale, ya está bien, agrega un /quit para salir
+  y estaría lista está sesión, ¿que seguiría?" — the /quit request and the
+  session's close; the next slice stays the user's call (#21 was their plan).
