@@ -625,6 +625,36 @@ suite "the composer keeps its keys":
       removeDir(root)
       removeFile(path)
 
+  test "the open menu leaves the composer's rule where it is":
+    let root = freshWorkspace("neopi-tp-tui-bug-rule")
+    let path = freshSessionPath("bug-rule")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      runScript(L, """
+        neopi.registerCommand('echo', 'echo the args', function(args)
+          return 'echoed: ' .. args
+        end)
+      """)
+      let backend = wireCompletionApp(addr st, L)
+      typeText(backend, addr st, "/")
+      check not st.screen.menu.isNil
+      var canvas = newCanvas(size(60, 12))
+      st.screen.render(canvas, rect(0, 0, 60, 12))
+      # The menu floats just above the composer, and the rule is the row right
+      # above the input: a block whose rectangle reaches that row blanks it
+      # (the menu's paint fills every cell of its area), so the composer lost
+      # its own line while a menu was up.
+      check "─" in canvas.plainText
+      check "/" in canvas.plainText
+    finally:
+      removeDir(root)
+      removeFile(path)
+
 suite "the turn drive":
   test "sendTurn drives one turn at a time: the tool result and the final text land":
     let root = freshWorkspace("neopi-tp-tui-drive")

@@ -299,8 +299,14 @@ method paint*(screen: NeopiScreen, canvas: var Canvas) =
       inc row
   canvas.writeAnsiText(0, row, screen.footerW.text, defaultStyle(), w)
   if not screen.menu.isNil and screen.menu.items.len > 0:
+    # The menu floats above the composer and CLEARS its rule: the rule owns the
+    # row right above the input, and the menu's paint blanks every cell of its
+    # rectangle, so a block that reached that row ate the composer's own line
+    # while it was open. One row higher is enough — the +2 is the border's
+    # room, and an unbordered menu leaves it empty.
     let menuRows = min(7, screen.menu.items.len) + 2
-    screen.menu.render(canvas, rect(0, max(0, inputTop - menuRows), w, menuRows))
+    let ruleRow = inputTop - 1
+    screen.menu.render(canvas, rect(0, max(0, ruleRow - menuRows), w, menuRows))
   if not screen.question.isNil:
     # The dialog floats above the composer like the menu, sized by what it asks
     # (the widget measures itself) and clamped to the rows the input leaves.
