@@ -344,6 +344,13 @@ type
     lua*: LuaState
     root*: string
     app*: App
+      ## The app the TUI drives. nimterm's App is a VALUE: tuiLoop holds its
+      ## own (`var app = newApp(...)`, `app.run()`) and the callbacks receive
+      ## THAT one, so this field is a copy. Its reference fields (the backend,
+      ## the queue, the root widget) are shared — which is why the render path
+      ## works through it — and its value flags are not, which is why the exit
+      ## request lives in the state (`quit`) and the wiring honors it on the
+      ## real app. A write to `state.app.running` reaches nothing that loops.
     transcriptW*: TranscriptWidget
     inputW*: InputWidget
     footerW*: TextWidget
@@ -958,11 +965,12 @@ proc exposeTuiSink*(L: LuaState, state: ptr TuiState, model: string) =
   lua_pop(L, 1)
 
 proc quitTui(state: ptr TuiState) =
-  ## End the session: the app's loop stops (what Ctrl+C does) and the state
-  ## carries the fact. The frame in flight finishes first — the loop re-checks
-  ## its flag after the current step — so nothing tears down mid-render.
+  ## Ask the session to end. The state carries the fact and the wiring that
+  ## holds the real app honors it (see the `app` field's note): writing
+  ## `running` HERE would write the state's copy of the app, which nothing
+  ## loops over — that is the bug this function shipped with. The frame in
+  ## flight finishes first: the loop re-checks its flag after the current step.
   state[].quit = true
-  state[].app.running = false
 
 proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
   ## Dispatch a /-prefixed composer input: the /resume and /quit builtins are
@@ -1556,6 +1564,11 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
       app.invalidate()
       return
     discard handleTuiAction(state, L, action)
+    # `/quit` left its request in the state, and this is where it is honored:
+    # `app` here IS the app the caller loops over (nimterm passes it to the
+    # callback), which the state's copy is not.
+    if state[].quit:
+      app.running = false
 
 proc tuiLoop*(sess: Session, L: LuaState, provider, model: string,
               root = ""): string =

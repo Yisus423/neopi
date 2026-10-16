@@ -670,9 +670,10 @@ suite "the /quit builtin":
       exposeUi(L)
       loadRuntimeEntry(L)
       let backend = wireCompletionApp(addr st, L)
-      # As if the app's loop owned the frame: in the harness nothing is looping,
-      # so a test that did not raise the flag could not tell whether /quit
-      # lowered it.
+      # In this harness the state's copy of the app IS the one that steps
+      # (`wireFakeApp` assigns it and `pumpApp` drives it), so this test pins
+      # the state's fact and the menu listing; the test below pins the
+      # production shape, where the loop's app is the local one.
       st.app.running = true
       typeText(backend, addr st, "/quit")
       check st.menuKind == mkCompletion
@@ -685,6 +686,45 @@ suite "the /quit builtin":
       # and the loop stops with it.
       pressKey(backend, addr st, keyEnter)
       check not st.app.running
+      check st.quit
+      check st.inputW.text == ""
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "the /quit builtin stops the app the LOOP runs, not the state's copy":
+    # The production shape, which the harness above hides: `tuiLoop` holds the
+    # app in a local (`var app = newApp(...)`, `app.run()`) and the state keeps
+    # a COPY of it, so a write to `state.app.running` reaches nothing that
+    # loops. This test assembles that divergence on purpose and drives the
+    # loop's own app — the one bug of this shape that the harness would let
+    # through, because there the state's copy IS what steps.
+    let root = freshWorkspace("neopi-tp-tui-quit-loop")
+    let path = freshSessionPath("quit-loop")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = TuiFakeBackend()
+      let screen = buildScreen(addr st)
+      var loopApp = newApp(backend, screen)
+      st.app = loopApp
+      st.appReady = true
+      loopApp.focus(Widget(st.inputW))
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, loopApp)
+      loopApp.running = true
+      for c in "/quit":
+        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
+      backend.events.add UiEvent(kind: uiKey, key: keyEnter)
+      while loopApp.step(0):
+        discard
+      # The loop's app is the one that has to stop: `app.run()` re-checks
+      # `running` after each step, so this flag IS the program's exit.
+      check not loopApp.running
       check st.quit
       check st.inputW.text == ""
     finally:
