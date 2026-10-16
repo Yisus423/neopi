@@ -120,6 +120,28 @@ neopi's hooks, read with codegraph (`codegraph explore`) and nimlangserver
 - [x] T4. The docs and the record: the README key list + the API table row,
       the evidence here, the ROADMAP tick — inline
 
+### The bugs the user hit (2026-10-15, after the slice landed)
+
+- [x] F1. The picker's Esc freed the widget but not the state: `menuKind`
+      stayed `mkResume`, and since the change action asks the kind for
+      permission before completing, every later keystroke met a resume menu
+      that was no longer on screen and the completion stayed silent for the
+      rest of the session. `closeResume` closes the slot and the kind
+      together (what `resumeSession` was already doing by hand).
+- [x] F2. Tab in the composer was unhandled, so nimterm's dispatch handed the
+      keys to the next focusable widget — the transcript — where the composer
+      receives nothing at all (the reported "the TUI stops capturing keys",
+      and the reason Shift+Tab appeared to fix it: the focus cycled back).
+      The composer owns Tab now and pins the focus back, which also makes Tab
+      the way out of a focus already lost that way.
+- [x] F3 (found while reproducing, and the assertion would have caught it
+      anyway): the open menu blanked the composer's rule. The menu is painted
+      after the composer and fills every cell of its rectangle, and that
+      rectangle ended on the rule's own row — the one right above the input.
+      The menu ends one row higher now; the dialog keeps its geometry, since
+      it is modal and owns the screen while it is up.
+- Commits: `59754ec` (F1 + F2) and `27518e6` (F3).
+
 ## Evidence
 
 - **The gate** (`nimble test`, verbatim): "[Summary] 148 tests run (2.81s):
@@ -156,6 +178,14 @@ neopi's hooks, read with codegraph (`codegraph explore`) and nimlangserver
   completion only with the cursor at the end of a single-line token, the
   registry re-read on every matching keystroke, and `setText` dropping the
   composer's undo history when a completion is applied.
+- **The bug-fix arc** (F1–F3, L4/L5): the three bugs went RED first — the
+  focused loop 46 → 49 and the two key tests printed exactly the reported
+  symptom (`st.menuKind was mkResume` after the picker's Esc; the focus on the
+  transcript after a Tab, with the next character eaten). The gate after them:
+  `nimble test` → "[Summary] 151 tests run (3.14s): 151 OK, 0 FAILED, 0
+  SKIPPED" and the busted runner's "19 successes / 0 failures / 0 errors / 0
+  pending". nimlangserver stayed at 0 diagnostics. Commits `59754ec` and
+  `27518e6`, one per work unit, each green on its own.
 
 ## Log
 
@@ -168,3 +198,18 @@ neopi's hooks, read with codegraph (`codegraph explore`) and nimlangserver
 - **L3** (2026-10-15, the two decisions, verbatim): S3 and S4 — Tab completes
   without sending and Enter completes and sends; the builtins join the
   registry in one list.
+- **L4** (2026-10-15, the bug report, verbatim): "encontré un pequeño bug, al
+  hacer /resume, abrir su menu y luego cerrarlo con esc ya no me salen el
+  composer ni funcionan las completions. Otro bug pero no sé sí tenga que ver
+  con esto: al presionar tab mientras escribo, la tui deja de captar las
+  teclas"
+- **L5** (2026-10-15, the fix arc): the two reports reproduce in the harness
+  and each has its own root cause — the RED printed `st.menuKind was mkResume`
+  after the picker's Esc, and after a Tab the focus was the transcript with
+  `st.inputW.text was hola` (the next character was eaten; the Shift+Tab that
+  followed brought the focus back and the one after it landed). Reproducing
+  them also cost the third bug: with the completion open, `"─" in
+  canvas.plainText` was false — the menu's rectangle reached the rule's row.
+  What the report described as the composer not showing up is the completion
+  going silent (the menu never opened) — the composer itself kept rendering,
+  which the F1 test pins.
