@@ -15,7 +15,14 @@ import unittest2
 {.emit: """/*TYPESECTION*/ typedef struct lua_State lua_State;""".}
 
 proc freshWorkspace(name: string): string =
+  ## A workspace that starts EMPTY: the directory is removed first, because a run
+  ## that died mid-test (a crash skips the `finally`) otherwise leaves its
+  ## sessions behind for the next one to read — which is how a stale
+  ## `run-9.jsonl` turned one run of the /new test into a false failure. The
+  ## suite mutates these directories, so isolation has to hold across a killed
+  ## process too.
   result = getTempDir() / name
+  removeDir(result)
   createDir(result)
 
 proc freshSessionPath(name: string): string =
@@ -281,16 +288,17 @@ suite "the command completion":
         neopi.registerCommand('ping', 'return pong', function() end)
       """)
       # The core's own builtins first, then the registry in registration order:
-      # /resume and /quit are commands the user can type, so the completion that
-      # lists what can be typed has to carry them too (S4).
+      # /resume, /new, /compact and /quit are commands the user can type, so the
+      # completion that lists what can be typed has to carry them too (S4).
       let items = commandItems(L)
-      check items.len == 4
+      check items.len == 5
       check items[0].label == "resume"
       check items[0].description.len > 0
-      check items[1].label == "quit"
-      check items[2].label == "echo"
-      check items[2].description == "echo the args"
-      check items[3].label == "ping"
+      check items[1].label == "new"
+      check items[2].label == "quit"
+      check items[3].label == "echo"
+      check items[3].description == "echo the args"
+      check items[4].label == "ping"
     finally:
       removeDir(root)
       removeFile(path)
@@ -304,9 +312,10 @@ suite "the command completion":
       none(Provider), sess)
     let L = ext.bus.state
     let items = commandItems(L)
-    check items.len == 2
+    check items.len == 3
     check items[0].label == "resume"
-    check items[1].label == "quit"
+    check items[1].label == "new"
+    check items[2].label == "quit"
 
   test "the completion prefix is the /token, only at the end of one line":
     check completionPrefix("/", 1) == "/"
@@ -355,11 +364,12 @@ suite "the completion in the composer":
       typeText(backend, addr st, "/")
       check st.menuKind == mkCompletion
       check not st.screen.menu.isNil
-      check st.screen.menu.items.len == 3
+      check st.screen.menu.items.len == 4
       check st.screen.menu.items[0].label == "resume"
-      check st.screen.menu.items[1].label == "quit"
-      check st.screen.menu.items[2].label == "echo"
-      check st.screen.menu.items[2].description == "echo the args"
+      check st.screen.menu.items[1].label == "new"
+      check st.screen.menu.items[2].label == "quit"
+      check st.screen.menu.items[3].label == "echo"
+      check st.screen.menu.items[3].description == "echo the args"
       typeText(backend, addr st, "ec")
       check st.screen.menu.items.len == 1
       check st.screen.menu.items[0].label == "echo"
@@ -585,7 +595,7 @@ suite "the composer keeps its keys":
       check st.menuKind == mkCompletion
       check not st.screen.menu.isNil
       if not st.screen.menu.isNil:
-        check st.screen.menu.items.len == 3
+        check st.screen.menu.items.len == 4
       # And the composer is on screen, with the draft in it.
       var canvas = newCanvas(size(60, 12))
       st.screen.render(canvas, rect(0, 0, 60, 12))
@@ -654,6 +664,52 @@ suite "the composer keeps its keys":
       # its own line while a menu was up.
       check "─" in canvas.plainText
       check "/" in canvas.plainText
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+suite "the /new builtin":
+  test "the /new builtin starts a fresh session and leaves the old one behind":
+    let root = freshWorkspace("neopi-tp-tui-new")
+    let path = freshSessionPath("new")
+    try:
+      createDir(root / ".neopi" / "sessions")
+      let old = root / ".neopi" / "sessions" / "run-9.jsonl"
+      let sess = newSession(old)
+      sess.append SessionEntry(kind: ekUser, text: "the old prompt")
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireCompletionApp(addr st, L)
+      seedTranscript(addr st)
+      refreshFooter(addr st)
+      check st.sess.history().len == 1
+      typeText(backend, addr st, "/new")
+      check st.menuKind == mkCompletion
+      check not st.menu.isNil
+      if not st.menu.isNil:
+        check st.menu.items[0].label == "new"
+      pressKey(backend, addr st, keyEnter)
+      # A fresh file in the workspace's sessions dir, the same swap `/resume`
+      # performs (the state's session and the registry pointer the cfunctions
+      # read), and an empty transcript carrying just the report line.
+      check st.sess.path != old
+      check st.sess.path.startsWith(root / ".neopi" / "sessions")
+      check st.sess.history().len == 0
+      check evalJson(L, "return #neopi.session:history()").getInt == 0
+      check st.transcriptW.transcript.items.len == 1
+      check "new session" in st.transcriptW.transcript.items[0].text
+      check st.footerW.text.endsWith("| in 0 | out 0")
+      # The session left behind is untouched on disk, so /resume brings it back:
+      # starting a new one never deletes or rewrites the old.
+      var listed: seq[string] = @[]
+      for (value, _) in listSessions(root):
+        listed.add value
+      check old in listed
+      check old notin @[st.sess.path]
+      check readFile(old).len > 0
     finally:
       removeDir(root)
       removeFile(path)

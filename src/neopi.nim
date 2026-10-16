@@ -111,8 +111,7 @@ proc runPrint(prompt, providerName: string, modelId: string) =
     createDir(sessionsDir)
   except OSError, IOError:
     fatal("cannot create " & sessionsDir & ": " & getCurrentExceptionMsg())
-  let sessionPath = sessionsDir /
-    ("run-" & ($epochTime()).replace(".", "-") & ".jsonl")
+  let sessionPath = newSessionPath(root)
   let s = try: newSession(sessionPath)
     except CatchableError as e:
       fatal("cannot open the session: " & e.msg)
@@ -157,8 +156,7 @@ proc runTui(providerName, modelId: string) =
     createDir(sessionsDir)
   except OSError, IOError:
     fatal("cannot create " & sessionsDir & ": " & getCurrentExceptionMsg())
-  let sessionPath = sessionsDir /
-    ("run-" & ($epochTime()).replace(".", "-") & ".jsonl")
+  let sessionPath = newSessionPath(root)
   let s = try: newSession(sessionPath)
     except CatchableError as e:
       fatal("cannot open the session: " & e.msg)

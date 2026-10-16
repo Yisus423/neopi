@@ -748,6 +748,7 @@ proc coreCommands(): seq[MenuItem] =
   ## belong in the completion because they belong to what the user can type.
   result = @[
     MenuItem(label: "resume", description: "resume a previous session"),
+    MenuItem(label: "new", description: "start a new session"),
     MenuItem(label: "quit", description: "exit neopi")]
 
 proc commandItems*(L: LuaState): seq[MenuItem] =
@@ -889,6 +890,39 @@ proc openResume*(state: ptr TuiState) =
   if not state[].screen.isNil:
     state[].screen.menu = state[].menu
 
+proc newSessionPath*(root: string): string =
+  ## The path a fresh session gets: the workspace's sessions dir, the file named
+  ## by the epoch. It is the recipe the CLI already used twice, in one place now
+  ## that `/new` needs the same name.
+  root / ".neopi" / "sessions" /
+    ("run-" & ($epochTime()).replace(".", "-") & ".jsonl")
+
+proc startNewSession*(state: ptr TuiState, L: LuaState): string =
+  ## Start a fresh session (the `/new` builtin): a new file in the workspace's
+  ## sessions dir and the swap `/resume` performs — the state's session and the
+  ## registry pointer the cfunctions read dynamically — with the transcript
+  ## rebuilt empty. The session left behind stays on disk untouched, so
+  ## `/resume` brings it back: nothing here deletes or rewrites it. The answer
+  ## is the line the command reports.
+  if state[].root.len == 0:
+    return "no workspace root to start a session in"
+  let path = newSessionPath(state[].root)
+  try:
+    createDir(path.parentDir)
+    let fresh = newSession(path)
+    state[].sess = fresh
+    setRegistryPointer(L, "neopi.session", cast[pointer](fresh))
+  except CatchableError as e:
+    return "cannot start a session: " & e.msg
+  closeResume(state)
+  state[].working = false
+  setCoreStatus(state, "")
+  # The fresh session is a new tree, an empty one: rebuild and re-watermark, so
+  # the transcript shows what this session has and nothing of the last.
+  seedTranscript(state)
+  refreshFooter(state)
+  "new session " & path.splitFile.name
+
 proc resumeSession*(state: ptr TuiState, L: LuaState, path: string) =
   ## Load the session file the user picked (the menu's Enter): newSession
   ## loads the JSONL, the swap rebinds the TUI state's session and the
@@ -986,6 +1020,10 @@ proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
   if command == "/resume":
     state[].inputW.clear()
     openResume(state)
+    return
+  if command == "/new":
+    state[].inputW.clear()
+    appendStatusLine(state, startNewSession(state, L))
     return
   if command == "/quit":
     state[].inputW.clear()
