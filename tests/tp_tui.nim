@@ -546,6 +546,85 @@ suite "the completion in the composer":
       removeDir(root)
       removeFile(path)
 
+suite "the composer keeps its keys":
+  test "closing the resume picker with Esc gives the completion back":
+    let root = freshWorkspace("neopi-tp-tui-bug-resume")
+    let path = freshSessionPath("bug-resume")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      runScript(L, """
+        neopi.registerCommand('echo', 'echo the args', function(args)
+          return 'echoed: ' .. args
+        end)
+      """)
+      createDir(root / ".neopi" / "sessions")
+      writeFile(root / ".neopi" / "sessions" / "run-1.jsonl",
+        "{\"type\":\"user\",\"id\":1,\"text\":\"an old session\"}")
+      let backend = wireCompletionApp(addr st, L)
+      # The path the bug report walks: /resume, the picker, Esc.
+      typeText(backend, addr st, "/resume")
+      pressKey(backend, addr st, keyEnter)
+      check st.menuKind == mkResume
+      check st.menu.items.len == 1
+      pressKey(backend, addr st, keyEscape)
+      # The picker is gone AND the state stops claiming it: a state that keeps
+      # `mkResume` after the menu left makes `updateCompletion` return early
+      # forever, which is the completion going silent.
+      check st.menuKind == mkNone
+      check st.menu.isNil
+      check st.screen.menu.isNil
+      typeText(backend, addr st, "/")
+      check st.menuKind == mkCompletion
+      check not st.screen.menu.isNil
+      if not st.screen.menu.isNil:
+        check st.screen.menu.items.len == 2
+      # And the composer is on screen, with the draft in it.
+      var canvas = newCanvas(size(60, 12))
+      st.screen.render(canvas, rect(0, 0, 60, 12))
+      check "/" in canvas.plainText
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "Tab in the composer never hands the keys to the transcript":
+    let root = freshWorkspace("neopi-tp-tui-bug-tab")
+    let path = freshSessionPath("bug-tab")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      runScript(L, """
+        neopi.registerCommand('echo', 'echo the args', function(args)
+          return 'echoed: ' .. args
+        end)
+      """)
+      let backend = wireCompletionApp(addr st, L)
+      typeText(backend, addr st, "hola")
+      check st.app.focus == Widget(st.inputW)
+      # A Tab the completion does not answer (no menu is open) is spent in the
+      # composer. In nimterm's dispatch an unhandled Tab MOVES the focus, and
+      # the composer then receives nothing: that is the TUI going deaf.
+      pressKey(backend, addr st, keyTab)
+      check st.app.focus == Widget(st.inputW)
+      typeText(backend, addr st, "!")
+      check st.inputW.text == "hola!"
+      # Shift+Tab is the same key from the other side.
+      pressKey(backend, addr st, keyShiftTab)
+      check st.app.focus == Widget(st.inputW)
+      typeText(backend, addr st, "?")
+      check st.inputW.text == "hola!?"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
 suite "the turn drive":
   test "sendTurn drives one turn at a time: the tool result and the final text land":
     let root = freshWorkspace("neopi-tp-tui-drive")

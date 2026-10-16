@@ -815,6 +815,19 @@ proc closeCompletion(state: ptr TuiState) =
   if not state[].screen.isNil:
     state[].screen.menu = nil
 
+proc closeResume(state: ptr TuiState) =
+  ## Close the resume picker, releasing the slot AND the kind together. A state
+  ## that kept `mkResume` after the picker left kept the completion shut: the
+  ## change action asks the kind for permission, so a stale `mkResume` is a
+  ## question answered by a menu that is no longer on screen — which is how an
+  ## Esc on the picker silently disabled the completion.
+  if state[].menuKind != mkResume:
+    return
+  state[].menuKind = mkNone
+  state[].menu = nil
+  if not state[].screen.isNil:
+    state[].screen.menu = nil
+
 proc applyCompletion(state: ptr TuiState, item: MenuItem) =
   ## Put the completed command in the composer, ready for its arguments:
   ## "/name " with the cursor after the space, and the menu closed. The text
@@ -874,13 +887,9 @@ proc resumeSession*(state: ptr TuiState, L: LuaState, path: string) =
     setRegistryPointer(L, "neopi.session", cast[pointer](fresh))
   except CatchableError as e:
     setCoreStatus(state, "cannot resume " & path & ": " & e.msg)
-    state[].menu = nil
-    state[].menuKind = mkNone
-    if not state[].screen.isNil: state[].screen.menu = nil
+    closeResume(state)
     return
-  state[].menu = nil
-  state[].menuKind = mkNone
-  if not state[].screen.isNil: state[].screen.menu = nil
+  closeResume(state)
   state[].working = false
   setCoreStatus(state, "")
   # The loaded session is a new tree: rebuild and re-watermark.
@@ -1484,12 +1493,23 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
           resumeSession(state, L, picked.description)
         return eventHandled
       of keyEscape:
-        state[].screen.menu = nil
-        state[].menu = nil
+        closeResume(state)
         app.invalidate()
         return eventHandled
       else:
         discard
+    # This TUI has one editor, and Tab belongs to it: the completion answers it
+    # while its menu is open, and an unanswered Tab is spent here — with the
+    # focus pinned back to the composer. In nimterm's dispatch an unhandled Tab
+    # MOVES the focus to the next focusable widget (the transcript), where the
+    # composer receives nothing at all: the TUI goes deaf, and only a
+    # Shift+Tab happens to bring it back. The transcript's own keys are routed
+    # explicitly instead (`routeTranscriptKey`), so nothing needs its focus.
+    if event.key == keyTab or event.key == keyShiftTab:
+      if not state[].inputW.isNil:
+        app.focus(Widget(state[].inputW))
+      app.invalidate()
+      return eventHandled
     if event.key == keyEscape:
       state[].inputW.clear()
       app.invalidate()
