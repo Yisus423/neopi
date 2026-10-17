@@ -744,11 +744,14 @@ proc listSessions*(root: string): seq[tuple[value, label: string]] =
 
 proc coreCommands(): seq[MenuItem] =
   ## The core's own commands: the ones the TUI dispatches without the runtime
-  ## (`/resume` opens the sessions picker, `/quit` ends the session). They
-  ## belong in the completion because they belong to what the user can type.
+  ## (`/resume` opens the sessions picker, `/new` starts a fresh session,
+  ## `/compact` asks the runtime to summarize now, `/quit` ends the session).
+  ## They belong in the completion because they belong to what the user can
+  ## type.
   result = @[
     MenuItem(label: "resume", description: "resume a previous session"),
     MenuItem(label: "new", description: "start a new session"),
+    MenuItem(label: "compact", description: "summarize the conversation now"),
     MenuItem(label: "quit", description: "exit neopi")]
 
 proc commandItems*(L: LuaState): seq[MenuItem] =
@@ -1006,12 +1009,43 @@ proc quitTui(state: ptr TuiState) =
   ## flight finishes first: the loop re-checks its flag after the current step.
   state[].quit = true
 
+proc compactFeedback*(L: LuaState): string =
+  ## Ask the runtime to compact the session now (the `/compact` builtin) and
+  ## answer with the line to show: what it compacted, why it did nothing, or the
+  ## failure. The model is the one the TUI drives (`neopi._tuiModel`, the same
+  ## channel the turns use), so the command and the loop summarize with the
+  ## model the footer names.
+  ##
+  ## The provider call inside is synchronous: the TUI waits it out, the same
+  ## freeze a tool call has today (ROADMAP #16) — which is why this reports
+  ## through a status line instead of a wait state of its own.
+  var outcome: JsonNode
+  try:
+    outcome = evalJson(L, """
+      local agent = require('agent')
+      return agent.compactNow(neopi.session, {model = neopi._tuiModel})
+    """)
+  except LuaError as e:
+    return "compaction failed: " & e.msg
+  if outcome.kind != JObject:
+    return "compaction failed: the runtime answered nothing"
+  if outcome{"ok"}.getBool(false):
+    return "compacted " & $outcome{"summarized"}.getInt(0) &
+      " entries before #" & $outcome{"firstKeptId"}.getInt(0)
+  case outcome{"reason"}.getStr("")
+  of "nothingToCompact": "nothing to compact"
+  of "emptyConversation": "nothing to compact: no earlier entries"
+  of "providerFailed": "compaction failed: the provider did not answer"
+  of "emptySummary": "compaction failed: the model answered an empty summary"
+  else: "compaction failed"
+
 proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
-  ## Dispatch a /-prefixed composer input: the /resume and /quit builtins are
-  ## the core's; everything else goes to the runtime's command registry (the
-  ## nvim model — the runtime owns it): the input travels on the neopi table,
-  ## the returned output renders as a status line in the transcript, and a
-  ## failure is feedback there too — the TUI survives /unknown.
+  ## Dispatch a /-prefixed composer input: the core's own builtins (/resume,
+  ## /new, /compact, /quit) act here; everything else goes to the runtime's
+  ## command registry (the nvim model — the runtime owns it): the input travels
+  ## on the neopi table, the returned output renders as a status line in the
+  ## transcript, and a failure is feedback there too — the TUI survives
+  ## /unknown.
   ##
   ## The comparison is on the trimmed input because the builtins are also
   ## reachable from the completion, which inserts the trailing space the
@@ -1024,6 +1058,10 @@ proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
   if command == "/new":
     state[].inputW.clear()
     appendStatusLine(state, startNewSession(state, L))
+    return
+  if command == "/compact":
+    state[].inputW.clear()
+    appendStatusLine(state, compactFeedback(L))
     return
   if command == "/quit":
     state[].inputW.clear()

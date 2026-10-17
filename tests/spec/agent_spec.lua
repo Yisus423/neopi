@@ -95,4 +95,63 @@ describe("agent loop", function()
     assert.are.equal(0, #neopi.steeringQueue)
     neopi.steeringQueue = nil
   end)
+
+  it("compaction on demand refuses without a model", function()
+    -- The model is the caller's: the command's interface owns which one
+    -- summarizes, so a missing one is a mistake worth hearing about.
+    local agent = require("agent")
+    assert.has_error(function()
+      agent.compactNow(neopi.session, {})
+    end)
+  end)
+
+  it("compaction on demand reports why it did nothing", function()
+    -- A budget no branch can reach, so the answer is deterministic whatever
+    -- the specs before this one left in the shared session: the walk finds no
+    -- cut point and the command says so instead of inventing a compaction.
+    -- (This test appends one small entry and compacts nothing.)
+    neopi.provider.setScripted({{text = "the summary"}})
+    local session = neopi.session
+    local agent = require("agent")
+    session:append("user", {text = "tiny"})
+
+    local result = agent.compactNow(session,
+      {model = "scripted", keepRecentTokens = 10000000})
+
+    assert.is_false(result.ok)
+    assert.are.equal("nothingToCompact", result.reason)
+    -- Nothing landed: a refusal is not an entry.
+    local history = session:history()
+    assert.are_not.equal("compaction", history[#history].type)
+  end)
+
+  -- This one MUTATES the shared session (it appends a compaction entry, which
+  -- the projection then honors for every spec after this file), so it stays
+  -- last in the file.
+  it("compaction on demand summarizes what sits before the cut point", function()
+    -- The `/compact` path: the policy the trigger runs, callable directly.
+    -- The cut point comes from the same walk (backwards, accumulating the
+    -- entries' estimates) that the loop's trigger uses.
+    neopi.provider.setScripted({{text = "the summary"}})
+    local session = neopi.session
+    local agent = require("agent")
+    session:append("user", {text = "an earlier turn"})
+    session:append("assistant", {text = "an answer", model = "scripted",
+      provider = "scripted", usageInput = 30000, usageOutput = 5,
+      stopReason = "stop"})
+
+    local result = agent.compactNow(session,
+      {model = "scripted", keepRecentTokens = 20000})
+
+    assert.is_true(result.ok)
+    assert.is_true(result.summarized >= 1)
+    local history = session:history()
+    local last = history[#history]
+    -- The compaction entry landed last, carrying the summary and the cut: the
+    -- entry the walk stopped on, which the projection keeps from here on.
+    assert.are.equal("compaction", last.type)
+    assert.are.equal("the summary", last.summary)
+    assert.are.equal(history[#history - 1].id, last.firstKeptId)
+    assert.are.equal(result.firstKeptId, last.firstKeptId)
+  end)
 end)

@@ -145,19 +145,38 @@ local function summaryPrompt(serialized)
   }, "\n")
 end
 
+--- The branch's token estimate: the summed per-entry estimate, which is what
+--- a compaction entry records as the context size before its cut. (The loop's
+--- trigger compares the last response's reported input instead — the size of
+--- the request that produced it — but that number is not a property of the
+--- branch, so the record takes the walk.)
+--- @param entries table[] -- the active branch's entries (JSONL-shaped tables)
+--- @return number -- the estimated token count of the branch
+local function contextEstimate(entries)
+  local total = 0
+  for _, e in ipairs(entries) do
+    total = total + estimateTokens(e)
+  end
+  return total
+end
+
 --- Compact the session: summarize the conversation before the cut point and
 --- append the compaction entry. Best-effort: a failed or empty summary call
---- appends nothing and the loop continues with the oversized context.
+--- appends nothing and the loop continues with the oversized context. The
+--- REASON is part of the answer because the on-demand command reports it (the
+--- trigger ignores it).
 --- @param session table -- the neopi.session handle (append/history)
 --- @param model string -- the model id for the summarization request
 --- @param keepRecentTokens number -- the token budget the kept region must reach
 --- @param contextTokens number -- the estimated context size before compaction
---- @return boolean -- whether a compaction entry was appended
-local function compact(session, model, keepRecentTokens, contextTokens)
+--- @return table -- {ok = boolean, reason = string|nil, firstKeptId = number|nil,
+---   summarized = number}; `reason` when `ok` is false is "nothingToCompact",
+---   "emptyConversation", "providerFailed" or "emptySummary"
+local function compactWithReason(session, model, keepRecentTokens, contextTokens)
   local entries = session:history()
   local cut = findCutPoint(entries, keepRecentTokens)
   if not cut then
-    return false
+    return {ok = false, reason = "nothingToCompact", summarized = 0}
   end
   local summarized = {}
   for _, e in ipairs(entries) do
@@ -167,25 +186,31 @@ local function compact(session, model, keepRecentTokens, contextTokens)
   end
   local serialized = serializeConversation(summarized)
   if serialized == "" then
-    return false
+    return {ok = false, reason = "emptyConversation", summarized = 0}
   end
   local ok, response = pcall(neopi.provider.generate, {
     model = model,
     messages = {{role = "user", text = summaryPrompt(serialized)}},
   })
   if not ok then
-    return false
+    return {ok = false, reason = "providerFailed", summarized = #summarized}
   end
   local summary = response.text or ""
   if summary == "" then
-    return false
+    return {ok = false, reason = "emptySummary", summarized = #summarized}
   end
   session:append("compaction", {
     summary = summary,
     firstKeptId = cut,
     tokensBefore = contextTokens,
   })
-  return true
+  return {ok = true, firstKeptId = cut, summarized = #summarized}
+end
+
+--- Compact the session (the trigger's policy), answering whether it did.
+--- @return boolean -- whether a compaction entry was appended
+local function compact(session, model, keepRecentTokens, contextTokens)
+  return compactWithReason(session, model, keepRecentTokens, contextTokens).ok
 end
 
 --- Execute one tool call with the runtime tools and the registered tools,
@@ -346,6 +371,30 @@ function agent.runTurn(session, config)
     end
   end
   return response
+end
+
+--- Compact the session on demand (the `/compact` command): the same policy the
+--- loop's trigger runs, with the conversation summarized NOW instead of when
+--- the window fills. The model is required — the caller owns which one drives
+--- the interface — and the threshold defaults to the loop's.
+--- @param session table -- the neopi.session handle (append/history)
+--- @param config table -- {model = string, keepRecentTokens?: number}
+--- @return table -- {ok = boolean, reason = string|nil, firstKeptId = number|nil,
+---   summarized = number, tokensBefore = number}; `reason` when `ok` is false is
+---   one of the refusals compactWithReason names
+function agent.compactNow(session, config)
+  if type(session) ~= "table" or type(config) ~= "table" then
+    error("agent.compactNow expects (session, config)", 0)
+  end
+  if type(config.model) ~= "string" or config.model == "" then
+    error("agent.compactNow expects config.model", 0)
+  end
+  local entries = session:history()
+  local tokensBefore = contextEstimate(entries)
+  local result = compactWithReason(session, config.model,
+    config.keepRecentTokens or 20000, tokensBefore)
+  result.tokensBefore = tokensBefore
+  return result
 end
 
 --- The headless loop: drive one turn at a time until the model stops, the

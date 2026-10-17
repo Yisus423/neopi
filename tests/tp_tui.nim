@@ -291,14 +291,15 @@ suite "the command completion":
       # /resume, /new, /compact and /quit are commands the user can type, so the
       # completion that lists what can be typed has to carry them too (S4).
       let items = commandItems(L)
-      check items.len == 5
+      check items.len == 6
       check items[0].label == "resume"
       check items[0].description.len > 0
       check items[1].label == "new"
-      check items[2].label == "quit"
-      check items[3].label == "echo"
-      check items[3].description == "echo the args"
-      check items[4].label == "ping"
+      check items[2].label == "compact"
+      check items[3].label == "quit"
+      check items[4].label == "echo"
+      check items[4].description == "echo the args"
+      check items[5].label == "ping"
     finally:
       removeDir(root)
       removeFile(path)
@@ -312,10 +313,11 @@ suite "the command completion":
       none(Provider), sess)
     let L = ext.bus.state
     let items = commandItems(L)
-    check items.len == 3
+    check items.len == 4
     check items[0].label == "resume"
     check items[1].label == "new"
-    check items[2].label == "quit"
+    check items[2].label == "compact"
+    check items[3].label == "quit"
 
   test "the completion prefix is the /token, only at the end of one line":
     check completionPrefix("/", 1) == "/"
@@ -364,12 +366,13 @@ suite "the completion in the composer":
       typeText(backend, addr st, "/")
       check st.menuKind == mkCompletion
       check not st.screen.menu.isNil
-      check st.screen.menu.items.len == 4
+      check st.screen.menu.items.len == 5
       check st.screen.menu.items[0].label == "resume"
       check st.screen.menu.items[1].label == "new"
-      check st.screen.menu.items[2].label == "quit"
-      check st.screen.menu.items[3].label == "echo"
-      check st.screen.menu.items[3].description == "echo the args"
+      check st.screen.menu.items[2].label == "compact"
+      check st.screen.menu.items[3].label == "quit"
+      check st.screen.menu.items[4].label == "echo"
+      check st.screen.menu.items[4].description == "echo the args"
       typeText(backend, addr st, "ec")
       check st.screen.menu.items.len == 1
       check st.screen.menu.items[0].label == "echo"
@@ -595,7 +598,7 @@ suite "the composer keeps its keys":
       check st.menuKind == mkCompletion
       check not st.screen.menu.isNil
       if not st.screen.menu.isNil:
-        check st.screen.menu.items.len == 4
+        check st.screen.menu.items.len == 5
       # And the composer is on screen, with the draft in it.
       var canvas = newCanvas(size(60, 12))
       st.screen.render(canvas, rect(0, 0, 60, 12))
@@ -710,6 +713,69 @@ suite "the /new builtin":
       check old in listed
       check old notin @[st.sess.path]
       check readFile(old).len > 0
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+suite "the /compact builtin":
+  test "the /compact builtin summarizes now and reports what it compacted":
+    let root = freshWorkspace("neopi-tp-tui-compact")
+    let path = freshSessionPath("compact")
+    try:
+      let sess = newSession(path)
+      sess.append SessionEntry(kind: ekUser, text: "the earlier turn")
+      # The cut point comes from the same walk the loop's trigger uses: this
+      # reported usage is what makes the branch reach the budget.
+      sess.append SessionEntry(kind: ekAssistant, text: "an answer",
+        model: "scripted", provider: "scripted", usageInput: 30000,
+        stopReason: "stop")
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("scripted", "scripted", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      runScript(L, """neopi.provider.setScripted({{text = "the summary"}})""")
+      let backend = wireCompletionApp(addr st, L)
+      seedTranscript(addr st)
+      refreshFooter(addr st)
+      typeText(backend, addr st, "/compact")
+      check st.menuKind == mkCompletion
+      check not st.menu.isNil
+      if not st.menu.isNil:
+        check st.menu.items[0].label == "compact"
+      pressKey(backend, addr st, keyEnter)
+      # The compaction entry landed through the runtime's own policy — the same
+      # one the loop's trigger runs — and the status line says what happened.
+      let history = st.sess.history()
+      check history[^1].kind == ekCompaction
+      check history[^1].summary == "the summary"
+      check history[^1].firstKeptId == history[^2].id
+      check "compacted" in st.transcriptW.transcript.items[^1].text
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "the /compact builtin says when there is nothing to compact":
+    # A session too small for a cut point: the honest answer is the reason, not
+    # an invented entry.
+    let root = freshWorkspace("neopi-tp-tui-compact-none")
+    let path = freshSessionPath("compact-none")
+    try:
+      let sess = newSession(path)
+      sess.append SessionEntry(kind: ekUser, text: "tiny")
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("scripted", "scripted", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      runScript(L, """neopi.provider.setScripted({{text = "the summary"}})""")
+      let backend = wireCompletionApp(addr st, L)
+      seedTranscript(addr st)
+      typeText(backend, addr st, "/compact")
+      pressKey(backend, addr st, keyEnter)
+      check st.sess.history().len == 1
+      check st.sess.history()[^1].kind == ekUser
+      check "nothing to compact" in st.transcriptW.transcript.items[^1].text
     finally:
       removeDir(root)
       removeFile(path)
