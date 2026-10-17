@@ -164,6 +164,28 @@ neopi's hooks, read with codegraph (`codegraph explore`) and nimlangserver
       passed because the HARNESS steps the state's copy — the one shape it
       could not catch.
 
+### The session pair, to close the stage (2026-10-16)
+
+- [x] F6. `/new` starts a fresh session: a new file in the workspace's
+      sessions dir and the swap `/resume` performs, the transcript rebuilt
+      empty, the new file's name reported as the line. The old session stays
+      on disk untouched, so `/resume` brings it back. The path recipe the CLI
+      wrote twice lives in one place now (`newSessionPath`). Commit `d80e376`.
+      Two harness defects came out of it: the new test dereferenced the
+      completion menu before checking it existed (a SIGSEGV that skipped the
+      `finally`), and `freshWorkspace` never cleared its directory, so a run
+      that died mid-test left sessions for the next one to READ — a stale
+      `run-9.jsonl` turned a green run into a false failure.
+- [x] F7. `/compact` summarizes the conversation now: the runtime gains
+      `agent.compactNow(session, config)` and the refactor that makes it
+      honest — the compaction answers with a REASON the trigger ignores and
+      the command reports ("nothing to compact" is not a failed
+      summarization). The model is the one the TUI drives. Commit `f8e42db`.
+      The Lua spec went RED first (`attempt to call field 'compactNow' (a nil
+      value)`), and because the specs share one live session, the compaction
+      spec — the only one that mutates it — sits last in its file, with the
+      "nothing to compact" case asking for a budget no branch can reach.
+
 ## Evidence
 
 - **The gate** (`nimble test`, verbatim): "[Summary] 148 tests run (2.81s):
@@ -218,6 +240,10 @@ neopi's hooks, read with codegraph (`codegraph explore`) and nimlangserver
   pending". `nimFindReferences` over `running` listed the only two writes in
   neopi — both on the callback's app — and nothing reading the state's copy.
   Commit `7f5f0a0`.
+- **The closing pair** (F6, F7): the focused loop 52 → 54, busted 19 → 22
+  successes, and the gate after them — `nimble test` → "[Summary] 156 tests run
+  (3.07s): 156 OK, 0 FAILED, 0 SKIPPED" with the busted runner's "22 successes
+  / 0 failures / 0 errors / 0 pending". Commits `d80e376` and `f8e42db`.
 
 ## Log
 
@@ -256,3 +282,9 @@ neopi's hooks, read with codegraph (`codegraph explore`) and nimlangserver
   over `running` lists every write (the Ctrl+C branch and the new honor point,
   both on the callback's app; nothing reads the state's copy) — and the fix's
   blast radius was verified that way instead of by reading around.
+- **L8** (2026-10-16, verbatim): "antes de pasar a #21 agreguemos un /new y un
+  /compact para cerrar esta etapa. ¿crees que deberia empezar 21 en otra
+  sesion?" — the two commands close the composer's command set (the session
+  pair and the context pair with the exit), and the answer on #21 is YES: a
+  new slice, with the `input` hook as an API study before any code, and its
+  own memory context — the workflow `mem_context` → this record → reconcile.
