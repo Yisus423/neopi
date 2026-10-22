@@ -6,7 +6,7 @@
 import std/[json, options, os, strutils, times]
 import nimterm
 import nimterm/transcript
-import neopi/[extensibility, lua, provider, session]
+import neopi/[expose, extensibility, lua, provider, session]
 import neopi/tui
 import unittest2
 
@@ -288,18 +288,21 @@ suite "the command completion":
         neopi.registerCommand('ping', 'return pong', function() end)
       """)
       # The core's own builtins first, then the registry in registration order:
-      # /resume, /new, /compact and /quit are commands the user can type, so the
-      # completion that lists what can be typed has to carry them too (S4).
+      # /resume, /new, /compact, /quit, /login and /logout are commands the
+      # user can type, so the completion that lists what can be typed has to
+      # carry them too (S4).
       let items = commandItems(L)
-      check items.len == 6
+      check items.len == 8
       check items[0].label == "resume"
       check items[0].description.len > 0
       check items[1].label == "new"
       check items[2].label == "compact"
       check items[3].label == "quit"
-      check items[4].label == "echo"
-      check items[4].description == "echo the args"
-      check items[5].label == "ping"
+      check items[4].label == "login"
+      check items[5].label == "logout"
+      check items[6].label == "echo"
+      check items[6].description == "echo the args"
+      check items[7].label == "ping"
     finally:
       removeDir(root)
       removeFile(path)
@@ -313,11 +316,13 @@ suite "the command completion":
       none(Provider), sess)
     let L = ext.bus.state
     let items = commandItems(L)
-    check items.len == 4
+    check items.len == 6
     check items[0].label == "resume"
     check items[1].label == "new"
     check items[2].label == "compact"
     check items[3].label == "quit"
+    check items[4].label == "login"
+    check items[5].label == "logout"
 
   test "the completion prefix is the /token, only at the end of one line":
     check completionPrefix("/", 1) == "/"
@@ -366,13 +371,15 @@ suite "the completion in the composer":
       typeText(backend, addr st, "/")
       check st.menuKind == mkCompletion
       check not st.screen.menu.isNil
-      check st.screen.menu.items.len == 5
+      check st.screen.menu.items.len == 7
       check st.screen.menu.items[0].label == "resume"
       check st.screen.menu.items[1].label == "new"
       check st.screen.menu.items[2].label == "compact"
       check st.screen.menu.items[3].label == "quit"
-      check st.screen.menu.items[4].label == "echo"
-      check st.screen.menu.items[4].description == "echo the args"
+      check st.screen.menu.items[4].label == "login"
+      check st.screen.menu.items[5].label == "logout"
+      check st.screen.menu.items[6].label == "echo"
+      check st.screen.menu.items[6].description == "echo the args"
       typeText(backend, addr st, "ec")
       check st.screen.menu.items.len == 1
       check st.screen.menu.items[0].label == "echo"
@@ -598,7 +605,7 @@ suite "the composer keeps its keys":
       check st.menuKind == mkCompletion
       check not st.screen.menu.isNil
       if not st.screen.menu.isNil:
-        check st.screen.menu.items.len == 5
+        check st.screen.menu.items.len == 7
       # And the composer is on screen, with the draft in it.
       var canvas = newCanvas(size(60, 12))
       st.screen.render(canvas, rect(0, 0, 60, 12))
@@ -849,6 +856,176 @@ suite "the /quit builtin":
       check not loopApp.running
       check st.quit
       check st.inputW.text == ""
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+suite "the /login and /logout builtins":
+  test "/login opens a masked question named for the provider's key":
+    let root = freshWorkspace("neopi-tp-tui-login-mask")
+    let path = freshSessionPath("login-mask")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      st.inputW.setText("/login")
+      sendTurn(addr st, L)
+      # The core's own question, with no Lua callback: the widget is masked free
+      # text and the composer is empty (the key never reaches it).
+      check not st.question.isNil
+      check st.inputW.text == ""
+      for c in "sk-or-secret":
+        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
+      discard pumpApp(addr st)
+      var canvas = newCanvas(size(60, 12))
+      st.screen.render(canvas, rect(0, 0, 60, 12))
+      # The title names the env var it asks for; the typed key is masked.
+      check "OPENROUTER_API_KEY" in canvas.plainText
+      check "sk-or-secret" notin canvas.plainText
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "answering /login installs the rebuilt provider, and the key stays out of the session":
+    let root = freshWorkspace("neopi-tp-tui-login")
+    let path = freshSessionPath("login")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      check currentProvider(L).isNone
+      st.inputW.setText("/login")
+      sendTurn(addr st, L)
+      for c in "sk-or-1":
+        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
+      backend.events.add UiEvent(kind: uiKey, key: keyEnter)
+      discard pumpApp(addr st)
+      # The answer rebuilt the provider with runTui's name mapping and the key.
+      let installed = currentProvider(L)
+      check installed.isSome
+      if installed.isSome:
+        check installed.get.apiKey == "sk-or-1"
+        check installed.get.name == "openrouter"
+      # The key is the provider's, not the session's: nothing wrote it to the
+      # history, the transcript or the status line.
+      check sess.history().len == 0
+      for entry in sess.history():
+        check "sk-or-1" notin entry.text
+      for item in st.transcriptW.transcript.items:
+        check "sk-or-1" notin item.text
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "Esc on the /login question leaves the provider exactly as before":
+    let root = freshWorkspace("neopi-tp-tui-login-cancel")
+    let path = freshSessionPath("login-cancel")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      setProvider(L, some(openRouter("before")))
+      st.inputW.setText("/login")
+      sendTurn(addr st, L)
+      backend.events.add UiEvent(kind: uiKey, key: keyEscape)
+      discard pumpApp(addr st)
+      # A cancel is "no change": the same provider is still live, and the
+      # status line says so without naming the key.
+      let after = currentProvider(L)
+      check after.isSome
+      if after.isSome:
+        check after.get.apiKey == "before"
+      check st.transcriptW.transcript.items[^1].kind == tikStatus
+      check "cancelled" in st.transcriptW.transcript.items[^1].text
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "/logout clears the provider and says so":
+    let root = freshWorkspace("neopi-tp-tui-logout")
+    let path = freshSessionPath("logout")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      setProvider(L, some(openRouter("before")))
+      check currentProvider(L).isSome
+      st.inputW.setText("/logout")
+      sendTurn(addr st, L)
+      # The provider holder is empty and the status line reports it.
+      check currentProvider(L).isNone
+      check st.transcriptW.transcript.items[^1].kind == tikStatus
+      check "logged out" in st.transcriptW.transcript.items[^1].text
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "a turn with no provider reports it and does not run the loop":
+    let root = freshWorkspace("neopi-tp-tui-noprovider")
+    let path = freshSessionPath("noprovider")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      st.inputW.setText("hola")
+      sendTurn(addr st, L)
+      # Feedback, not a loop failure: the status line names the command and the
+      # env var, and no turn ran (no user entry, no assistant entry).
+      check st.transcriptW.transcript.items.len == 1
+      check st.transcriptW.transcript.items[^1].kind == tikStatus
+      check "no provider" in st.transcriptW.transcript.items[^1].text
+      check "OPENROUTER_API_KEY" in st.transcriptW.transcript.items[^1].text
+      check sess.history().len == 0
+      check not st.working
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "commandItems carries login and logout":
+    let root = freshWorkspace("neopi-tp-tui-corecommands")
+    let path = freshSessionPath("corecommands")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let items = commandItems(L)
+      var labels: seq[string]
+      for item in items:
+        labels.add item.label
+      check "login" in labels
+      check "logout" in labels
     finally:
       removeDir(root)
       removeFile(path)

@@ -10,10 +10,12 @@
 ## key polling, the per-line colors) is replaced by nimterm's event loop,
 ## widgets, unicodedb widths, and markdown renderer.
 
-import std/[algorithm, json, os, strutils, syncio, tables, times]
+import std/[algorithm, json, options, os, strutils, syncio, tables, times]
 import nimterm
 import nimterm/[events as ntevents, term, transcript as nttranscript]
+import neopi/expose
 import neopi/lua
+import neopi/provider
 import neopi/session
 from neopi/hooks import lua_error
 
@@ -321,6 +323,16 @@ type
     ## the composer, Enter resumes a session.
     mkNone, mkResume, mkCompletion
 
+  QuestionPurpose* = enum
+    ## Where a question's answer goes. The extension UI's dialogs deliver to a
+    ## waiting Lua callback (`qpLua`); the core's own flows use the same widget
+    ## with no callback and a purpose of their own (`qpLogin`), so the answer's
+    ## destination is read from the state instead of the ref. `qpNone` is the
+    ## state before any question is open. The list is open so a later core
+    ## question (the provider catalog of `/model`) joins without a new
+    ## mechanism.
+    qpNone, qpLua, qpLogin
+
   FooterTokens = object
     ## The memoized branch-scoped token totals behind the footer. The key is
     ## everything `footerText` reads from the session: its identity (a
@@ -389,6 +401,10 @@ type
     questionBool*: bool
       ## Whether the open question answers a boolean (`ui.confirm`) instead of
       ## the chosen label (`ui.select`).
+    questionPurpose*: QuestionPurpose
+      ## Where the open question's answer goes: the Lua callback (`qpLua`) or
+      ## one of the core's own handlers (`qpLogin`). `qpNone` when no question
+      ## is open.
     abortRequested*: bool
       ## The Esc/Ctrl+C the app answered while the turn ran: the sink reads it
       ## and cancels the stream, so the abort is a fact of the state instead of
@@ -439,38 +455,58 @@ proc initTuiState*(provider, model: string, sess: Session,
     quit: false, clipboard: copyToClipboard,
     workingText: "", title: "", titleWriter: terminalTitleWriter,
     working: false, abortRequested: false,
-    syncedId: 0, menuKind: mkNone,
+    syncedId: 0, menuKind: mkNone, questionPurpose: qpNone,
     chrome: newChrome())
 
 const confirmYes* = "Yes"
   ## The approving label of a confirm, and the only answer that resolves one as
   ## true: a cancel is not an approval.
 
+proc providerEnvVar*(name: string): string =
+  ## The environment variable a provider's key comes from: the provider name
+  ## uppercased plus `_API_KEY` (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`).
+  ## `/login`'s title asks for it and the no-provider feedback names it, so the
+  ## key is described without ever being echoed.
+  name.toUpperAscii & "_API_KEY"
+
+proc answerLogin(state: ptr TuiState, answer: string, cancelled: bool)
+  # Forward declaration: the body sits beside the other status-line helpers,
+  # after `appendStatusLine` is declared.
+
 proc setQuestion*(state: ptr TuiState, widget: QuestionWidget, fnRef: cint,
-                  boolean: bool) =
-  ## Put a question on screen and remember the callback waiting for its answer.
-  ## The screen holds the same widget by reference, the way the resume menu
-  ## travels.
+                  boolean: bool, purpose = qpLua) =
+  ## Put a question on screen and remember the callback waiting for its answer,
+  ## and WHY it is open. The screen holds the same widget by reference, the way
+  ## the resume menu travels. A Lua dialog leaves `purpose` at `qpLua`; the
+  ## core's own question passes `qpLogin` and no ref.
   state[].question = widget
   state[].questionRef = fnRef
   state[].questionBool = boolean
+  state[].questionPurpose = purpose
   if not state[].screen.isNil:
     state[].screen.question = widget
 
 proc resolveQuestion*(state: ptr TuiState, answer: string, cancelled: bool) =
-  ## Hand the answer to the Lua callback that is waiting and close the question.
-  ## The ref is released here: a dialog fires once, and one that never released
-  ## its ref would leak one per question. Without an interpreter there is nobody
-  ## to tell, so the answer is dropped rather than kept.
+  ## Hand the answer to the callback the open question waits on and close it:
+  ## the waiting Lua callback (`qpLua`) or one of the core's own handlers
+  ## (`qpLogin`). The ref is released here: a dialog fires once, and one that
+  ## never released its ref would leak one per question. Without an interpreter
+  ## there is nobody to tell, so a Lua answer is dropped rather than kept; a
+  ## cancelled core question means "no change" and its handler is told so.
   if state[].question.isNil:
     return
+  let purpose = state[].questionPurpose
   let L = state[].lua
   let fnRef = state[].questionRef
   let boolean = state[].questionBool
   state[].question = nil
   state[].questionRef = 0
+  state[].questionPurpose = qpNone
   if not state[].screen.isNil:
     state[].screen.question = nil
+  if purpose == qpLogin:
+    answerLogin(state, answer, cancelled)
+    return
   if L.isNil or fnRef == 0:
     return
   lua_rawgeti(L, luaRegistryIndex, fnRef)
@@ -643,6 +679,21 @@ proc clearTransient*(state: ptr TuiState) =
   if not state[].chrome.isNil:
     state[].chrome.clearNotify()
 
+proc answerLogin(state: ptr TuiState, answer: string, cancelled: bool) =
+  ## Resolve the core's `/login` question: rebuild the live provider with the
+  ## SAME name mapping `runTui` uses and install it into the holder the
+  ## `neopi.provider` closures read, so the next turn uses the new key. A
+  ## cancel — or an empty answer, which is not a key — is "no change": the
+  ## provider is left exactly as it was. The confirmation names the provider,
+  ## never the key.
+  if cancelled or answer.len == 0:
+    appendStatusLine(state, "login cancelled: the provider is unchanged")
+    return
+  let name = state[].provider
+  let rebuilt = if name == "openai": openAI(answer) else: openRouter(answer)
+  setProvider(state[].lua, some(rebuilt))
+  appendStatusLine(state, "logged in to " & rebuilt.name)
+
 proc queueSteering(L: LuaState, text: string) =
   ## Append the draft text to neopi.steeringQueue (the Lua array table the
   ## loop drains between turns — pi's model).
@@ -745,14 +796,16 @@ proc listSessions*(root: string): seq[tuple[value, label: string]] =
 proc coreCommands(): seq[MenuItem] =
   ## The core's own commands: the ones the TUI dispatches without the runtime
   ## (`/resume` opens the sessions picker, `/new` starts a fresh session,
-  ## `/compact` asks the runtime to summarize now, `/quit` ends the session).
-  ## They belong in the completion because they belong to what the user can
-  ## type.
+  ## `/compact` asks the runtime to summarize now, `/quit` ends the session,
+  ## `/login` asks for a provider key and `/logout` drops the provider). They
+  ## belong in the completion because they belong to what the user can type.
   result = @[
     MenuItem(label: "resume", description: "resume a previous session"),
     MenuItem(label: "new", description: "start a new session"),
     MenuItem(label: "compact", description: "summarize the conversation now"),
-    MenuItem(label: "quit", description: "exit neopi")]
+    MenuItem(label: "quit", description: "exit neopi"),
+    MenuItem(label: "login", description: "set the provider's API key"),
+    MenuItem(label: "logout", description: "drop the provider's API key")]
 
 proc commandItems*(L: LuaState): seq[MenuItem] =
   ## The commands the composer completes: the core's builtins first, then the
@@ -1039,6 +1092,29 @@ proc compactFeedback*(L: LuaState): string =
   of "emptySummary": "compaction failed: the model answered an empty summary"
   else: "compaction failed"
 
+proc openLogin(state: ptr TuiState) =
+  ## Open the core's `/login` question: one masked line for the provider's key,
+  ## titled with the environment variable that key would come from. There is no
+  ## Lua callback — the answer's destination is the state's purpose (`qpLogin`),
+  ## which is what lets a core flow use the same widget the extension dialogs
+  ## use without an interpreter ref.
+  if not state[].question.isNil:
+    appendStatusLine(state, "a question is already open")
+    return
+  let title = "paste " & providerEnvVar(state[].provider) & " for " &
+    state[].provider
+  let options: seq[QuestionOption] = @[]
+  setQuestion(state, newQuestion(title, options, allowFreeText = true,
+    secret = true), fnRef = 0, boolean = false, purpose = qpLogin)
+
+proc logout(state: ptr TuiState) =
+  ## Drop the live provider: the next turn has none until `/login` installs one.
+  ## The feedback names the environment variable the key would come from — the
+  ## key itself is never echoed, and it never entered the session either.
+  setProvider(state[].lua, none(Provider))
+  appendStatusLine(state, "logged out: no provider (set " &
+    providerEnvVar(state[].provider) & " or run /login)")
+
 proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
   ## Dispatch a /-prefixed composer input: the core's own builtins (/resume,
   ## /new, /compact, /quit) act here; everything else goes to the runtime's
@@ -1066,6 +1142,14 @@ proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
   if command == "/quit":
     state[].inputW.clear()
     quitTui(state)
+    return
+  if command == "/login":
+    state[].inputW.clear()
+    openLogin(state)
+    return
+  if command == "/logout":
+    state[].inputW.clear()
+    logout(state)
     return
   state[].inputW.clear()
   lua_getfield(L, luaGlobalsIndex, "neopi")
@@ -1127,6 +1211,14 @@ proc sendTurn*(state: ptr TuiState, L: LuaState) =
   clearTransient(state)
   if text.startsWith("/"):
     runCommand(state, L, text)
+    return
+  if L.isNil or currentProvider(L).isNone:
+    # The keyless start (or a `/logout`): a turn would fail deep inside the
+    # loop with a provider error. The feedback names the command and the
+    # environment variable instead, and nothing enters the session — there was
+    # no turn, so there is no user entry to remember.
+    appendStatusLine(state, "no provider: run /login or set " &
+      providerEnvVar(state[].provider))
     return
   try:
     state[].sess.append(SessionEntry(kind: ekUser, text: text))

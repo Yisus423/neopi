@@ -146,10 +146,14 @@ proc runTui(providerName, modelId: string) =
   of "openai", "openrouter": discard
   else: fatal("unknown provider \"" & providerName & "\" (openai or openrouter)")
   let key = getEnv(upper & "_API_KEY")
-  if key.len == 0:
-    fatal("no " & upper & "_API_KEY in the environment or .env; export it " &
-      "or pass --provider/--model")
-  let p = if providerName == "openai": openAI(key) else: openRouter(key)
+  # A missing key is not fatal in the TUI: `/login` is the key's runtime home,
+  # so a keyless start is reachable. The session opens with no provider and a
+  # turn attempted before `/login` reports it as feedback. The print mode keeps
+  # its own fatal — it has no `/login`.
+  let backing =
+    if key.len == 0: none(Provider)
+    elif providerName == "openai": some(openAI(key))
+    else: some(openRouter(key))
   let root = getCurrentDir()
   let sessionsDir = root / ".neopi" / "sessions"
   try:
@@ -161,7 +165,7 @@ proc runTui(providerName, modelId: string) =
     except CatchableError as e:
       fatal("cannot open the session: " & e.msg)
   # No prompt enters the session here: the composer's sends do.
-  let ext = newExtensibility(root, some(p), s)
+  let ext = newExtensibility(root, backing, s)
   exposeUi(ext.bus.state)
   loadRuntime(ext.bus.state)
   try:
