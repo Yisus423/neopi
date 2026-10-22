@@ -111,7 +111,7 @@ row paints the "○ Other" marker (`question.nim:159-166`). `setText` exists
 
 | ID | What | Specs | Route | Commit |
 |---|---|---|---|---|
-| T1 | This record: the study, the map and the specs | S1-S6 | inline | `docs(tui): the session commands and the input study` — `ec36faf` |
+| T1 | This record: the study, the map and the specs | S1-S6 | inline | `docs(tui): the session commands and the input study` — `d363c3a` |
 | T2 | `neopi.ui.input` (the plain and the `secret` variant) + its tests | S3 | inline | `feat(ui): ui.input asks for a line and answers through a callback` |
 | T3 | The core's provider holder: the runtime rebuild path `/login`/`/logout` use | S3, S4 | inline | `feat(tui): the provider can be rebuilt at runtime` |
 | T4 | `/model`: `GET /v1/models` over the wire + the select | S5 | inline | `feat(tui): /model offers the provider's real catalog` |
