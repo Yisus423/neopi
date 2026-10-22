@@ -153,6 +153,36 @@ proc chatHeaders*(apiKey: string): seq[(string, string)] =
   @[("Authorization", "Bearer " & apiKey),
     ("Content-Type", "application/json")]
 
+proc modelsHeaders(apiKey: string): seq[(string, string)] =
+  ## The catalog request headers: the bearer key only (a GET carries no
+  ## body, so no content type).
+  @[("Authorization", "Bearer " & apiKey)]
+
+proc buildModelsRequest*(baseUrl, apiKey: string): WireRequest =
+  ## The model-catalog request: `GET <baseUrl>/models` with the bearer key.
+  ## The base is the provider's (the same one `/chat/completions` uses).
+  WireRequest(url: baseUrl & "/models", httpMethod: "GET",
+    headers: modelsHeaders(apiKey), body: "")
+
+proc parseModels*(body: string): seq[string] =
+  ## The OpenAI-compatible catalog (`{"data": [{"id": "..."}]}`) → the
+  ## model ids, in the endpoint's order. A body that is not valid JSON, or
+  ## that has no `data` array, raises ProviderError: a failed catalog is
+  ## never an empty catalog. Entries without a non-empty string id are
+  ## skipped (the endpoint sometimes carries metadata-only rows).
+  var node: JsonNode
+  try:
+    node = parseJson(body)
+  except JsonParsingError, CatchableError:
+    raise newException(ProviderError, "the model catalog is not valid JSON")
+  if node.kind != JObject or not node.hasKey("data") or
+      node["data"].kind != JArray:
+    raise newException(ProviderError, "the model catalog has no data array")
+  for entry in node["data"]:
+    let id = entry.field("id")
+    if id.kind == JString and id.getStr("").len > 0:
+      result.add id.getStr()
+
 proc streamChatAsync*(transport: Transport, baseUrl: string, apiKey: string,
     model: string, messages: seq[Message], onEvent: primitives.StreamCallback,
     system = "", tools: seq[Tool] = @[], readTimeoutMs = 0):
@@ -232,6 +262,47 @@ proc streamChat*(transport: Transport, baseUrl: string, apiKey: string,
   ## waitFor pumps the loop while the stream runs.
   waitFor streamChatAsync(transport, baseUrl, apiKey, model, messages,
     onEvent, system, tools, readTimeoutMs)
+
+proc listModelsAsync*(transport: Transport, baseUrl: string, apiKey: string):
+    Future[seq[string]] {.async: (raises: [CatchableError]).} =
+  ## One model-catalog fetch over the wire: `GET <baseUrl>/models` through
+  ## the transport, the whole body accumulated and parsed into ids. A
+  ## transport failure, a non-200 status, or a malformed body raises
+  ## ProviderError (the body rides the non-200 message).
+  let wireReq = buildModelsRequest(baseUrl, apiKey)
+  var resp: WireResponse
+  try:
+    resp = await transport.fetch(wireReq)
+  except CancelledError:
+    raise
+  except ProviderError:
+    raise
+  except CatchableError as e:
+    var err = newException(ProviderError, "the transport failed: " & e.msg)
+    err.retryable = true
+    raise err
+  var body = ""
+  try:
+    while true:
+      let chunk = await resp.next()
+      if chunk.len == 0:
+        break
+      body.add chunk
+  finally:
+    resp.close()
+  if resp.status != 200:
+    var err = newException(ProviderError,
+      "the provider returned " & $resp.status & ": " & body)
+    err.status = resp.status
+    err.retryable = resp.status == 429 or resp.status >= 500
+    raise err
+  return parseModels(body)
+
+proc listModels*(transport: Transport, baseUrl: string, apiKey: string):
+    seq[string] =
+  ## The blocking boundary (the shape the policy layer calls): chronos's
+  ## waitFor pumps the loop while the catalog is fetched.
+  waitFor listModelsAsync(transport, baseUrl, apiKey)
 
 type ScriptedTransport* = ref object of Transport
   ## The L2 test transport: one scripted reply per fetch, encoded as the

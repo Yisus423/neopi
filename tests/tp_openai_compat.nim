@@ -326,3 +326,52 @@ suite "the scripted provider transport (L2)":
       fail()
     except ProviderError as e:
       check "out of steps" in e.msg
+
+suite "the openai model catalog":
+  test "the catalog request is a GET .../models with the bearer key":
+    let fake = newFakeTransport()
+    fake.canned(200, @["{\"data\": [{\"id\": \"gpt-4o\"}]}"])
+    let p = openAI("test-key", baseUrl = "https://example.test/v1",
+      transport = fake)
+    discard p.listModels()
+    check fake.calls.len == 1
+    check fake.calls[0].httpMethod == "GET"
+    check fake.calls[0].url == "https://example.test/v1/models"
+    check fake.calls[0].url.endsWith("/models")
+    check ("Authorization", "Bearer test-key") in fake.calls[0].headers
+    check fake.calls[0].body.len == 0
+
+  test "the catalog body parses into the model ids in order":
+    let fake = newFakeTransport()
+    # Two chunks: the body accumulates before it parses.
+    fake.canned(200, @["{\"data\": [{\"id\": \"gpt-4o\"},",
+      " {\"id\": \"gpt-4o-mini\"}]}"])
+    let p = openAI("k", baseUrl = "https://example.test/v1", transport = fake)
+    check p.listModels() == @["gpt-4o", "gpt-4o-mini"]
+
+  test "a non-200 status raises ProviderError with the body":
+    let fake = newFakeTransport()
+    fake.canned(500, @["{\"error\": \"boom\"}"])
+    let p = openAI("k", baseUrl = "https://example.test/v1", transport = fake)
+    try:
+      discard p.listModels()
+      fail()
+    except ProviderError as e:
+      check "500" in e.msg
+      check "boom" in e.msg
+      check e.status == 500
+      check e.retryable == true
+
+  test "a garbage body raises ProviderError instead of an empty catalog":
+    let fake = newFakeTransport()
+    fake.canned(200, @["this is not json"])
+    let p = openAI("k", baseUrl = "https://example.test/v1", transport = fake)
+    expect ProviderError:
+      discard p.listModels()
+
+  test "a JSON body without a data array raises ProviderError":
+    let fake = newFakeTransport()
+    fake.canned(200, @["{\"object\": \"list\"}"])
+    let p = openAI("k", baseUrl = "https://example.test/v1", transport = fake)
+    expect ProviderError:
+      discard p.listModels()
