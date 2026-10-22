@@ -2,7 +2,7 @@
 ## tables on the extensibility's state. No API key or network: the provider
 ## tests use the scripted swap (the scripted provider).
 import std/[json, options, os]
-import neopi/[extensibility, lua, provider, session]
+import neopi/[expose, extensibility, lua, provider, session]
 import unittest2
 
 # Same file-scope typedef as lua.nim: this module's generated C calls into
@@ -189,6 +189,69 @@ suite "exposure provider":
     finally:
       removeDir(root)
       removeFile(path)
+
+  test "the core reads the provider the exposure built":
+    let root = freshWorkspace("neopi-tp-expose-read")
+    let path = freshSessionPath("read")
+    try:
+      let ext = newExtensibility(root, some(openRouter("first-key")),
+        newSession(path))
+      let L = ext.bus.state
+      # The exposure stores its context in the registry: the core reaches the
+      # same backing the closures carry.
+      let provider = currentProvider(L)
+      check provider.isSome
+      check provider.get.name == "openrouter"
+      check provider.get.apiKey == "first-key"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "the core replaces the provider the closures read":
+    let root = freshWorkspace("neopi-tp-expose-replace")
+    let path = freshSessionPath("replace")
+    try:
+      let ext = newExtensibility(root, some(openRouter("first-key")),
+        newSession(path))
+      let L = ext.bus.state
+      setProvider(L, some(scriptedProvider(@[ScriptStep(text: "rebuilt")])))
+      # The closures read the same holder the core wrote: generate answers
+      # through the rebuilt scripted provider. The turn needs one message
+      # (runTurn's invariant); the scripted provider ignores its content.
+      let response = evalJson(L, """
+        return neopi.provider.generate({model = "m",
+          messages = {{role = "user", text = "go"}}})
+      """)
+      check response["provider"].getStr == "fake"
+      check response["text"].getStr == "rebuilt"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "a second exposure adopts the same holder":
+    let root = freshWorkspace("neopi-tp-expose-adopt")
+    let path = freshSessionPath("adopt")
+    try:
+      let ext = newExtensibility(root, some(openRouter("first-key")),
+        newSession(path))
+      let L = ext.bus.state
+      # A second exposure reuses the context already in the registry instead
+      # of creating a second holder: the core and the closures agree.
+      exposeProvider(L, some(openAI("second-key")))
+      let provider = currentProvider(L)
+      check provider.isSome
+      check provider.get.apiKey == "second-key"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "no exposure: currentProvider is none and setProvider is a no-op":
+    let L = newLuaState()
+    # No context in the registry: reading gives none and replacing is a
+    # no-op, never a crash.
+    check currentProvider(L).isNone
+    setProvider(L, some(scriptedProvider(@[ScriptStep(text: "ignored")])))
+    check currentProvider(L).isNone
 
 suite "exposure session":
   test "session wrap: append, history, and navigate":

@@ -62,15 +62,22 @@ proc raiseLuaError(L: LuaState, message: string) {.noreturn.} =
 
 type
   ProviderContext = object
-    ## Per-interpreter context carried as the generate and setScripted
-    ## closures' shared upvalue: the current backing provider, swapped by
-    ## setScripted. Created once with `create`; the ORC refcounts of its
-    ## fields are never released (the GC does not know the raw allocation),
-    ## so the backing lives as long as the closures do — the process
-    ## lifetime.
+    ## Per-interpreter context shared by the generate, stream, and setScripted
+    ## closures: the current backing provider, swapped by setScripted or by
+    ## the core's setProvider. It is reachable through the closures' shared
+    ## upvalue AND stored under providerRegistryKey in the Lua registry, so
+    ## the core can read and replace the live provider without a new
+    ## Lua-visible function. Created once per interpreter (exposeProvider
+    ## reuses the existing context); the ORC refcounts of its fields are
+    ## never released (the GC does not know the raw allocation), so the
+    ## backing lives as long as the closures do — the process lifetime.
     provider: Option[Provider]
 
-const sessionRegistryKey = "neopi.session"
+const
+  sessionRegistryKey = "neopi.session"
+  providerRegistryKey* = "neopi.provider"
+    ## Registry key holding the ProviderContext pointer, so the core reaches
+    ## the same live provider the neopi.provider closures carry.
 
 func payloadInt(payload: JsonNode, key: string): int =
   ## An optional integer field of the payload: 0 when absent or not a number.
@@ -470,9 +477,16 @@ proc luaProviderStream(L: LuaState): cint {.cdecl.} =
 proc exposeProvider*(L: LuaState, backing: Option[Provider]) =
   ## Expose the `neopi.provider` table inside the existing `neopi` table:
   ## generate(config), stream(config, onEvent), and setScripted(steps), all
-  ## closures carrying the provider context as their first upvalue. Requires
-  ## `neopi` to exist (newHookBus creates it).
-  let context = create(ProviderContext)
+  ## closures carrying the provider context as their first upvalue. The
+  ## context is a singleton per interpreter: a second call reuses the context
+  ## already stored under providerRegistryKey and adopts `backing`, so the
+  ## closures and the core keep reading ONE holder. Requires `neopi` to exist
+  ## (newHookBus creates it).
+  var context = cast[ptr ProviderContext](
+    getRegistryPointer(L, providerRegistryKey))
+  if context.isNil:
+    context = create(ProviderContext)
+    setRegistryPointer(L, providerRegistryKey, cast[pointer](context))
   context.provider = backing
   lua_getfield(L, luaGlobalsIndex, "neopi")
   if lua_type(L, -1) != luaTTable:
@@ -491,6 +505,27 @@ proc exposeProvider*(L: LuaState, backing: Option[Provider]) =
   lua_setfield(L, -2, "setScripted")
   lua_setfield(L, -2, "provider")
   lua_pop(L, 1)
+
+proc currentProvider*(L: LuaState): Option[Provider] =
+  ## The live provider the exposure holds, or `none` when the backing is
+  ## empty or there is no context at all (the exposure never ran). The core
+  ## reads it to know what the neopi.provider closures will call.
+  let context = cast[ptr ProviderContext](
+    getRegistryPointer(L, providerRegistryKey))
+  if context.isNil:
+    return none(Provider)
+  context.provider
+
+proc setProvider*(L: LuaState, backing: Option[Provider]) =
+  ## Replace the live provider the exposure holds: the same holder the
+  ## neopi.provider closures read, so the next generate/stream uses the new
+  ## backing. A no-op (never a crash) when there is no context — the core may
+  ## call it before the exposure ran.
+  let context = cast[ptr ProviderContext](
+    getRegistryPointer(L, providerRegistryKey))
+  if context.isNil:
+    return
+  context.provider = backing
 
 proc luaEmit(L: LuaState): cint {.cdecl.} =
   ## Lua-side `neopi.emit(event, payload)`: fire the hook bus's handlers for
