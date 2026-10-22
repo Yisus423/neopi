@@ -1297,6 +1297,36 @@ proc answerWithoutUi(L: LuaState, fnIndex: cint, boolean: bool) =
     lua_pop(L, 1)
     raise newException(LuaError, message)
 
+proc readInputOptions(L: LuaState, index: cint): tuple[secret: bool, value: string] =
+  ## Read an input's options: `secret` masks the typed line and `value`
+  ## prefills it. An unknown key is refused, the way the widget slot refuses a
+  ## typo in `placement` — a silently ignored option is a mystery, not a
+  ## convenience.
+  lua_pushnil(L)
+  while lua_next(L, index) != 0:
+    var message = "the input options take only secret and value"
+    let kind = lua_type(L, -1)
+    if lua_type(L, -2) != luaTString:
+      lua_pop(L, 2)
+      raiseLuaError(L, message)
+    case $lua_tolstring(L, -2, nil)
+    of "secret":
+      if kind != luaTBoolean:
+        message = "the input's secret must be a boolean"
+        lua_pop(L, 2)
+        raiseLuaError(L, message)
+      result.secret = lua_toboolean(L, -1) != 0
+    of "value":
+      if kind != luaTString:
+        message = "the input's value must be a string"
+        lua_pop(L, 2)
+        raiseLuaError(L, message)
+      result.value = $lua_tolstring(L, -1, nil)
+    else:
+      lua_pop(L, 2)
+      raiseLuaError(L, message)
+    lua_pop(L, 1)
+
 proc luaUiSelect(L: LuaState): cint {.cdecl.} =
   ## Lua-side `neopi.ui.select(title, options, onAnswer)`: show a choice and
   ## hand the answer to the callback. It RETURNS AT ONCE — a Lua handler cannot
@@ -1323,6 +1353,53 @@ proc luaUiSelect(L: LuaState): cint {.cdecl.} =
   lua_pushvalue(L, 3)
   setQuestion(state, newQuestion(title, options, allowFreeText = false),
     luaL_ref(L, luaRegistryIndex), boolean = false)
+  lua_pushnil(L)
+  result = 1
+
+proc luaUiInput(L: LuaState): cint {.cdecl.} =
+  ## Lua-side `neopi.ui.input(title, [opts,] onAnswer)`: ask for one line of
+  ## text and hand it to the callback. Like select and confirm it RETURNS AT
+  ## ONCE — a Lua handler cannot wait for the user — and the callback receives
+  ## the typed text, or nil when the prompt is cancelled with Esc (a cancel is
+  ## not an empty answer). `opts.secret` masks what is typed, for a key;
+  ## `opts.value` prefills the line. Without a TUI the callback fires at once
+  ## with nil.
+  let state = cast[ptr TuiState](getRegistryPointer(L, tuiStateRegistryKey))
+  let shape = "neopi.ui.input expects (title: string, opts?: table, " &
+    "onAnswer: function)"
+  if lua_gettop(L) != 2 and lua_gettop(L) != 3:
+    raiseLuaError(L, shape)
+  if lua_type(L, 1) != luaTString:
+    raiseLuaError(L, shape)
+  var optsIndex: cint = 0
+  var fnIndex: cint = 2
+  if lua_gettop(L) == 3:
+    if lua_type(L, 2) != luaTTable or lua_type(L, 3) != luaTFunction:
+      raiseLuaError(L, shape)
+    optsIndex = 2
+    fnIndex = 3
+  elif lua_type(L, 2) != luaTFunction:
+    raiseLuaError(L, shape)
+  let title = $lua_tolstring(L, 1, nil)
+  var secret = false
+  var prefill = ""
+  if optsIndex > 0:
+    (secret, prefill) = readInputOptions(L, optsIndex)
+  if state.isNil:
+    answerWithoutUi(L, fnIndex, boolean = false)
+    lua_pushnil(L)
+    return 1
+  if not state[].question.isNil:
+    raiseLuaError(L, "a question is already open")
+  # No options at all: the free-text row IS the question, so it is selected
+  # from the start and Enter answers it (nimterm puts the selection there when
+  # the option list is empty).
+  let options: seq[QuestionOption] = @[]
+  let widget = newQuestion(title, options, allowFreeText = true, secret = secret)
+  if prefill.len > 0:
+    widget.freeText.setText(prefill)
+  lua_pushvalue(L, fnIndex)
+  setQuestion(state, widget, luaL_ref(L, luaRegistryIndex), boolean = false)
   lua_pushnil(L)
   result = 1
 
@@ -1474,7 +1551,7 @@ proc exposeUi*(L: LuaState) =
     lua_pop(L, 1)
     raise newException(LuaError,
       "the ui primitives require the neopi table (call newHookBus first)")
-  lua_createtable(L, 0, 9)
+  lua_createtable(L, 0, 10)
   lua_pushcfunction(L, luaUiHeader)
   lua_setfield(L, -2, "header")
   lua_pushcfunction(L, luaUiStatus)
@@ -1491,6 +1568,8 @@ proc exposeUi*(L: LuaState) =
   lua_setfield(L, -2, "select")
   lua_pushcfunction(L, luaUiConfirm)
   lua_setfield(L, -2, "confirm")
+  lua_pushcfunction(L, luaUiInput)
+  lua_setfield(L, -2, "input")
   lua_setfield(L, -2, "ui")
   # The guard extensions need to skip UI work instead of calling a no-op: the
   # TUI flips it in exposeTuiSink, and it is the one read a headless mode can

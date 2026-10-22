@@ -1278,6 +1278,95 @@ suite "the turn drive":
       removeDir(root)
       removeFile(path)
 
+  test "an input asks for a line and answers through the callback":
+    let root = freshWorkspace("neopi-tp-input")
+    let path = freshSessionPath("input")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      discard evalJson(L, """
+        neopi._answer = "unanswered"
+        neopi.ui.input("paste your key", function(answer)
+          neopi._answer = answer or "cancelled"
+        end)
+        return true
+      """)
+      # The callback shape again: a Lua handler cannot wait, so the call is
+      # back before the user types and the answer arrives later.
+      check evalJson(L, "return neopi._answer").getStr == "unanswered"
+      var canvas = newCanvas(size(40, 12))
+      st.screen.render(canvas, rect(0, 0, 40, 12))
+      check "paste your key" in canvas.plainText
+      # The question owns the keys while it is open, so the typed line is its
+      # business and never the composer's.
+      check st.inputW.text == ""
+      for c in "sk-or-1":
+        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
+      backend.events.add UiEvent(kind: uiKey, key: keyEnter)
+      discard pumpApp(addr st)
+      check evalJson(L, "return neopi._answer").getStr == "sk-or-1"
+      check st.inputW.text == ""
+      # The question is gone once answered.
+      canvas = newCanvas(size(40, 12))
+      st.screen.render(canvas, rect(0, 0, 40, 12))
+      check "paste your key" notin canvas.plainText
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "a secret input hides the line, and Esc answers nil":
+    let root = freshWorkspace("neopi-tp-input-secret")
+    let path = freshSessionPath("input-secret")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      discard evalJson(L, """
+        neopi._answer = "unanswered"
+        neopi.ui.input("paste your key", {secret = true}, function(answer)
+          neopi._answer = answer or "cancelled"
+        end)
+        return true
+      """)
+      for c in "sk-1":
+        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
+      discard pumpApp(addr st)
+      # Masked on screen, intact at the callback: the secret is the caller's,
+      # the screen is not allowed to echo it.
+      var canvas = newCanvas(size(40, 12))
+      st.screen.render(canvas, rect(0, 0, 40, 12))
+      check "sk-1" notin canvas.plainText
+      backend.events.add UiEvent(kind: uiKey, key: keyEnter)
+      discard pumpApp(addr st)
+      check evalJson(L, "return neopi._answer").getStr == "sk-1"
+      # Esc is the cancelled answer, which is nil and not an empty string.
+      discard evalJson(L, """
+        neopi._answer = "unanswered"
+        neopi.ui.input("paste your key", function(answer)
+          neopi._answer = answer or "cancelled"
+        end)
+        return true
+      """)
+      backend.events.add UiEvent(kind: uiKey, key: keyEscape)
+      discard pumpApp(addr st)
+      check evalJson(L, "return neopi._answer").getStr == "cancelled"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
 suite "the footer":
   test "the totals are the branch's and the memo notices every change":
     # `refreshFooter` memoizes the branch's token totals (the walk is
