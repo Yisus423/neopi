@@ -96,9 +96,15 @@ row paints the "○ Other" marker (`question.nim:159-166`). `setText` exists
   Lua. The holder the builtins mutate is the same `ProviderContext` the
   exposure already owns.
 - **`/model` uses the real catalog** (S5): a `GET <baseUrl>/models` over the
-  existing wire, parsed into ids, offered through the `QuestionWidget`'s option
-  list; the answer rebinds `neopi._tuiModel`. Page/limit handling is bounded to
-  what the endpoint returns (OpenRouter and OpenAI both answer one page).
+  existing wire, parsed into ids, offered through a **third `MenuKind`
+  (`mkModel`) over nimterm's `Menu`** — and not through a `QuestionWidget`, as
+  this bullet first said. The implementation proved the bullet wrong: the
+  catalog can be long, the `Menu` keeps the selection in view (`scrollOffset`
+  plus `keepSelectionVisible(rows)` in its paint) and the `QuestionWidget`
+  moves its selection with no scrolling at all, so a long catalog would have
+  moved the cursor out of sight. The answer rebinds `neopi._tuiModel` **and**
+  `state.model`. Page/limit handling is bounded to what the endpoint returns
+  (OpenRouter and OpenAI both answer one page).
 - **Persistence is deferred** (S4): the key lives in the session's provider
   only; `~/.neopi/` (a global config) and its `auth.json`/`.lua` shape are
   ROADMAP #23's, together with the auth shape per provider.
@@ -111,12 +117,75 @@ row paints the "○ Other" marker (`question.nim:159-166`). `setText` exists
 
 | ID | What | Specs | Route | Commit |
 |---|---|---|---|---|
-| T1 | This record: the study, the map and the specs | S1-S6 | inline | `docs(tui): the session commands and the input study` — `d363c3a` |
-| T2 | `neopi.ui.input` (the plain and the `secret` variant) + its tests | S3 | inline | `feat(ui): ui.input asks for a line and answers through a callback` |
-| T3 | The core's provider holder: the runtime rebuild path `/login`/`/logout` use | S3, S4 | inline | `feat(tui): the provider can be rebuilt at runtime` |
-| T4 | `/model`: `GET /v1/models` over the wire + the select | S5 | inline | `feat(tui): /model offers the provider's real catalog` |
-| T5 | `/login` and `/logout`, and the keyless start | S3, S4 | inline | `feat(tui): /login and /logout manage the key` |
-| T6 | Docs (README's API table and command list, ROADMAP) and the close | S1-S6 | inline | `docs(tui): the session commands join the record` |
+| T1 | This record: the study, the map and the specs | S1-S6 | inline | `docs(tui): the session commands and the input study` — `d363c3a`, plus `docs(tui): the record names its own commit` — `48c1af2` |
+| T2 | `neopi.ui.input` (the plain and the `secret` variant) + its tests | S3 | inline | `feat(ui): ui.input asks for a line and answers through a callback` — `d36b02f`, plus the README's `neopi.ui` row in `docs(ui): ui.input joins the extension surface table` — `f1defd3` |
+| T3 | The core's provider holder: the runtime rebuild path `/login`/`/logout` use | S3, S4 | delegated (inline here) | `feat(tui): the provider can be rebuilt at runtime` — `373c2e2` |
+| T4a | The catalog over the wire: `GET <baseUrl>/models` and `listModels(p)` | S5 | delegated | `feat(provider): the model catalog comes from the endpoint` — `d31554d` |
+| T4b | `/model`: the picker over a third `MenuKind`, and the per-turn rebind | S5 | inline | `feat(tui): /model picks from the provider's real catalog` — `1c93912` |
+| T5 | `/login` and `/logout`, and the keyless start | S3, S4 | delegated, then inline | `feat(tui): /login and /logout manage the key, and the TUI starts without one` — `7f61b75` |
+| T6 | The Evidence section below, the README's command list and the ROADMAP's row | S1-S6 | inline | `docs(tui): the session commands join the record` — the commit that carries this section |
+
+## Evidence
+
+Each task's gate, verbatim, then the batch gate and the two rules the parent
+applied to every delegated unit.
+
+- **T1** — the record itself; no gate.
+- **T2** — focused `tests/tp_tui.nim` **56/56 OK**; RED observed first as
+  `attempt to call field 'input' (a nil value)`.
+- **T3** — focused `tests/tp_expose.nim` **21/21 OK**; RED was a compile error,
+  `undeclared identifier: 'currentProvider'`.
+- **T4a** — focused `tests/tp_openai_compat.nim` **28/28 OK**, re-run by the
+  parent on a file that does not import the module the concurrent writer had in
+  flight; RED was `attempting to call undeclared routine: 'listModels'`.
+- **T5** — focused `tests/tp_tui.nim` **62/62 OK**, `EXIT=0`.
+- **T4b** — focused `tests/tp_tui.nim` **65/65 OK**, `EXIT=0`.
+- **T6** — no code: this section, the README's command list and the ROADMAP's
+  row.
+- **The batch gate** — the parent, on the whole tree, `set -o pipefail`:
+  `nimble test` → `[Summary] 176 tests run (3.37s): 176 OK, 0 FAILED, 0
+  SKIPPED` and `22 successes / 0 failures / 0 errors / 0 pending`, `EXIT=0`.
+  176 = the 156 the tree carried before the slice plus the 20 added here
+  (2 + 4 + 5 + 6 + 3).
+- **The two rules** the parent applied to each delegated unit: read the
+  delivered diff before committing it, and re-run a focused test file that does
+  not depend on the file a concurrent writer has in flight.
+
+### What this slice learned the hard way
+
+- **The borrowed label — a real bug, fixed in `1c93912`.** `setModel` read the
+  picker's label *after* `closeMenu` had released the picker, so the status line
+  stored `model: 0\x00ta` — a NUL byte; `cat -v` showed `0^@ta` — where
+  `model: beta` belonged, the same length, while `state.model` and
+  `neopi._tuiModel`, both taken with the menu still alive, read correctly. That
+  is what made the corruption look impossible until the order of the reads was
+  written down. The name is now materialized before the picker is released, and
+  `setModel`'s doc comment carries the lesson: a string taken from a widget is
+  good only for as long as that widget lives.
+- **`closeResume` became `closeMenu`,** its guard widened from `!= mkResume` to
+  `notin {mkResume, mkModel}`. The narrow guard is exactly the shape of the
+  earlier F1 bug — a stale `menuKind` silences the completion for the rest of
+  the session — so copying it for the model picker would have planted the same
+  bug a second time.
+- **The completion list grew** by `/model`, `/login` and `/logout`, and the
+  core's list now ends with `quit`. That moves the indices three pre-existing
+  completion tests pin (`commandItems`, the no-registry case, and the composer's
+  menu): those projections were updated together with the count assertions, no
+  assertion was dropped, and the code's order and the tests' were aligned to the
+  same list.
+- **The `| tail` trap.** The earlier gates of this slice were run as
+  `nimble test 2>&1 | tail -N` and reported "exit 0" — which was `tail`'s exit
+  code, not the gate's. The content evidence was real (it was read from the
+  log), but the exit-code claim was not. Every gate after that ran under
+  `set -o pipefail`, which is what makes the batch gate's `EXIT=0` a fact.
+- **Two incidents, for the record.** The writer handed T5 stalled after leaving
+  its RED tests in place; the parent finished the three pieces those tests
+  pinned (the `coreCommands` entries, the `runCommand` branches and the
+  `sendTurn` guard). The writer that was to close this record timed out twice
+  before producing anything, so the record and the two user-facing docs were
+  finished inline instead of retried a third time. Neither incident invalidated
+  the plan: the contracts were already in the tests and the code, and the
+  record's own `## Log` carries what the user said about it.
 
 ## Log
 
@@ -132,3 +201,7 @@ row paints the "○ Other" marker (`question.nim:159-166`). `setText` exists
 - **L5** (verbatim, the S6 remainder): "para 23, pero seguramente sea un
   auth.json/.lua en la config global" — the user's own reading of where the key
   will land, recorded so #23 has it.
+- **L6** (verbatim): "sigamos, hubo un corte de luz que apagó la compu :(" — the
+  session was interrupted by a power outage after T4b's implementation and
+  before its gate. The work resumed from the committed state plus the memory
+  mirror, and no uncommitted work was lost.

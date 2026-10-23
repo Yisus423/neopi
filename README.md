@@ -30,7 +30,8 @@ config file you own, the `require` mechanism loads what it references.
    Options: `--provider openai|openrouter` (default openrouter),
    `--model <id>` (default `inclusionai/ling-3.0-flash-vl`). Keys neopi
    reads: `<PROVIDER>_API_KEY`, optionally `<PROVIDER>_MODEL` (there is no
-   `.env.example` template).
+   `.env.example` template). The print mode needs that key; the TUI does not
+   — it starts without one and `/login` asks for it.
 
 3. Or open the interactive TUI (no prompt argument):
 
@@ -47,7 +48,10 @@ config file you own, the `require` mechanism loads what it references.
    scroll the transcript; **Ctrl+O** expands or collapses the thinking and the
    tool output; **/resume** opens the sessions picker (Enter loads, Esc
    cancels), **/new** starts a fresh session, **/compact** summarizes the
-   conversation now (it waits for the model), and **/quit** (or Ctrl+C) exits.
+   conversation now (it waits for the model), **/model** lists the provider's
+   real catalog and switches the model, **/login** asks for the provider's API
+   key in a masked line that never enters the session, **/logout** drops it,
+   and **/quit** (or Ctrl+C) exits.
    Dragging the mouse over the transcript selects text, and the selection
    copies to the clipboard. The transcript renders the deltas live, and the model's thinking
    arrives as a collapsed item you can expand with Ctrl+O.
