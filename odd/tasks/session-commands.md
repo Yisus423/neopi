@@ -146,7 +146,9 @@ applied to every delegated unit.
   `nimble test` → `[Summary] 176 tests run (3.37s): 176 OK, 0 FAILED, 0
   SKIPPED` and `22 successes / 0 failures / 0 errors / 0 pending`, `EXIT=0`.
   176 = the 156 the tree carried before the slice plus the 20 added here
-  (2 + 4 + 5 + 6 + 3).
+  (2 + 4 + 5 + 6 + 3). After F1's fix the same gate reads `[Summary] 178 tests
+  run (3.56s): 178 OK, 0 FAILED, 0 SKIPPED` with `22 successes` and `EXIT=0`:
+  178 = 176 plus F1's two focus tests.
 - **The two rules** the parent applied to each delegated unit: read the
   delivered diff before committing it, and re-run a focused test file that does
   not depend on the file a concurrent writer has in flight.
@@ -187,6 +189,46 @@ applied to every delegated unit.
   the plan: the contracts were already in the tests and the code, and the
   record's own `## Log` carries what the user said about it.
 
+### F1 — the bug the slice left behind: a closed dialog left the TUI deaf
+
+Found by the user right after the slice landed: "primera issue, luego de hacer
+login, la tui creo que deja de registrar al teclado o por lo menos el input ya
+no se renderiza".
+
+**What it was.** `QuestionWidget` is a MODAL widget — `modal = not resolved` —
+and the `Menu` (the resume and model pickers) is not, which is why `/resume`
+never showed this and `/login` did, in its first real use. nimterm's `dispatch`
+scopes a modal widget's routing and, on every event, drops an `app.focus` that
+falls outside that scope:
+
+    let scope = if modal.isNil or modal.allowsBackgroundEvent(event): app.root else: modal
+    if not app.focus.isNil and not scope.contains(app.focus): app.focus = nil
+
+`wireApp` claims every KEY while a question is open, so the composer's focus
+survives the typing — but a NON-key event (a terminal focus report, a resize,
+the wheel: anything `wireApp` answers `eventIgnored` to) reaches that dispatch
+while the modal is in scope, and the composer's focus is dropped. When the
+question then closed, nothing restored it. With no focus, the next key routes
+to `@[scope]` — the root alone — whose `handle` ignores everything: the TUI is
+deaf and the composer paints no cursor. Both of the user's symptoms are that
+one line.
+
+**Why the tests missed it.** They asserted the answer — the callback, the
+provider, the status line — and never that the composer still took the keys
+afterwards; and they queued only key events, so the dispatch that drops the
+focus never ran. Reproduced by queueing one `uiResize` while the question is
+open: both new tests then failed with an empty composer (65/67, `EXIT=1`).
+
+**The fix.** The answer hands the composer its focus back, and only when no
+other question took its place (a chained dialog keeps the keys to itself). It
+sits in the one branch every dialog resolves through, so `ui.select`,
+`ui.confirm` and `ui.input` are covered by the same line: they carried the same
+defect and had simply never been used in a real TUI.
+
+**Gate.** Focused `tests/tp_tui.nim` **67/67 OK**, `EXIT=0`, with the two new
+tests — the `/login` question and `ui.select` — pinning the composer's keys
+after the dialog closes.
+
 ## Log
 
 - **L1** (verbatim, the original request): "arranquemos con #21: el estudio del
@@ -205,3 +247,7 @@ applied to every delegated unit.
   session was interrupted by a power outage after T4b's implementation and
   before its gate. The work resumed from the committed state plus the memory
   mirror, and no uncommitted work was lost.
+- **L7** (verbatim): "primera issue, luego de hacer login, la tui creo que deja
+  de registrar al teclado o por lo menos el input ya no se renderiza" — the
+  first bug reported after the slice landed; it is F1 above, a `/login` symptom
+  of a defect every dialog shared.
