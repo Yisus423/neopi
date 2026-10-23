@@ -1034,6 +1034,45 @@ suite "the /login and /logout builtins":
       removeFile(path)
 
 suite "the /model builtin":
+  test "the composer takes the keys again after the /login question closes":
+    let root = freshWorkspace("neopi-tp-tui-login-focus")
+    let path = freshSessionPath("login-focus")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      st.inputW.setText("/login")
+      sendTurn(addr st, L)
+      # Production-shape: while the modal question is open, a NON-key event (a
+      # terminal focus report, a resize, the wheel) reaches nimterm's tree
+      # dispatch — wireApp claims the keys and only the keys — and with the
+      # modal in scope the dispatch drops the composer's focus, which is
+      # outside it. Nothing gives it back when the question closes.
+      backend.events.add UiEvent(kind: uiResize)
+      discard pumpApp(addr st)
+      for c in "sk-1":
+        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
+      backend.events.add UiEvent(kind: uiKey, key: keyEnter)
+      discard pumpApp(addr st)
+      check currentProvider(L).isSome
+      # The modal question took the focus from the composer while it was open.
+      # Once the question is answered and gone, the composer has to own the
+      # keys again — without that the TUI is deaf and the composer paints with
+      # no cursor, which is what the user hit after /login.
+      for c in "hola":
+        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
+      discard pumpApp(addr st)
+      check st.inputW.text == "hola"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
   test "/model offers the provider's real catalog and switches the model":
     let root = freshWorkspace("neopi-tp-tui-model")
     let path = freshSessionPath("model")
@@ -1515,6 +1554,44 @@ suite "the turn drive":
       canvas = newCanvas(size(40, 12))
       st.screen.render(canvas, rect(0, 0, 40, 12))
       check "pick one" notin canvas.plainText
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "the composer takes the keys again after a select answers":
+    # The same shared path as the core's own questions: nimterm scopes a modal
+    # widget's dispatch and clears the focus it leaves behind, so every dialog
+    # that closes owes the composer its focus back.
+    let root = freshWorkspace("neopi-tp-select-focus")
+    let path = freshSessionPath("select-focus")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      discard evalJson(L, """
+        neopi._answer = "unanswered"
+        neopi.ui.select("pick one", {"alpha", "beta"}, function(answer)
+          neopi._answer = answer or "cancelled"
+        end)
+        return true
+      """)
+      # The same production-shape non-key event as the /login case: it is what
+      # a modal scope uses to drop the composer's focus.
+      backend.events.add UiEvent(kind: uiResize)
+      discard pumpApp(addr st)
+      backend.events.add UiEvent(kind: uiKey, key: keyEnter)
+      discard pumpApp(addr st)
+      check evalJson(L, "return neopi._answer").getStr == "alpha"
+      for c in "hola":
+        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
+      discard pumpApp(addr st)
+      check st.inputW.text == "hola"
     finally:
       removeDir(root)
       removeFile(path)

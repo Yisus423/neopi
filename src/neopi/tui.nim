@@ -1785,6 +1785,18 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
       let response = state[].question.handle(event)
       if response.action.kind == "answer":
         resolveQuestion(state, response.action.value, response.action.cancelled)
+        # The question took the composer's focus while it was open: it is a
+        # MODAL widget (unlike the resume and model menus), so a non-key event
+        # arriving meanwhile — a terminal focus report, a resize, the wheel,
+        # anything wireApp does not claim — puts nimterm's dispatch in the
+        # modal's scope and makes it drop a focus that falls outside it.
+        # Nothing else gives the focus back once the question leaves the tree,
+        # and a nil focus sends every later key to the root alone: the TUI is
+        # deaf and the composer paints no cursor. So the answer hands the
+        # composer its focus back — but only when no other question took its
+        # place (a chained dialog keeps the keys to itself).
+        if state[].question.isNil and not state[].inputW.isNil:
+          app.focus(Widget(state[].inputW))
       app.invalidate()
       return eventHandled
     if state[].working and
