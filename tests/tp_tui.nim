@@ -6,7 +6,7 @@
 import std/[json, options, os, strutils, times]
 import nimterm
 import nimterm/transcript
-import neopi/[expose, extensibility, lua, provider, session]
+import neopi/[expose, extensibility, lua, provider, session, wire]
 import neopi/tui
 import unittest2
 
@@ -288,21 +288,22 @@ suite "the command completion":
         neopi.registerCommand('ping', 'return pong', function() end)
       """)
       # The core's own builtins first, then the registry in registration order:
-      # /resume, /new, /compact, /quit, /login and /logout are commands the
-      # user can type, so the completion that lists what can be typed has to
+      # /resume, /new, /compact, /model, /login, /logout and /quit are commands
+      # the user can type, so the completion that lists what can be typed has to
       # carry them too (S4).
       let items = commandItems(L)
-      check items.len == 8
+      check items.len == 9
       check items[0].label == "resume"
       check items[0].description.len > 0
       check items[1].label == "new"
       check items[2].label == "compact"
-      check items[3].label == "quit"
+      check items[3].label == "model"
       check items[4].label == "login"
       check items[5].label == "logout"
-      check items[6].label == "echo"
-      check items[6].description == "echo the args"
-      check items[7].label == "ping"
+      check items[6].label == "quit"
+      check items[7].label == "echo"
+      check items[7].description == "echo the args"
+      check items[8].label == "ping"
     finally:
       removeDir(root)
       removeFile(path)
@@ -316,13 +317,14 @@ suite "the command completion":
       none(Provider), sess)
     let L = ext.bus.state
     let items = commandItems(L)
-    check items.len == 6
+    check items.len == 7
     check items[0].label == "resume"
     check items[1].label == "new"
     check items[2].label == "compact"
-    check items[3].label == "quit"
+    check items[3].label == "model"
     check items[4].label == "login"
     check items[5].label == "logout"
+    check items[6].label == "quit"
 
   test "the completion prefix is the /token, only at the end of one line":
     check completionPrefix("/", 1) == "/"
@@ -371,15 +373,16 @@ suite "the completion in the composer":
       typeText(backend, addr st, "/")
       check st.menuKind == mkCompletion
       check not st.screen.menu.isNil
-      check st.screen.menu.items.len == 7
+      check st.screen.menu.items.len == 8
       check st.screen.menu.items[0].label == "resume"
       check st.screen.menu.items[1].label == "new"
       check st.screen.menu.items[2].label == "compact"
-      check st.screen.menu.items[3].label == "quit"
+      check st.screen.menu.items[3].label == "model"
       check st.screen.menu.items[4].label == "login"
       check st.screen.menu.items[5].label == "logout"
-      check st.screen.menu.items[6].label == "echo"
-      check st.screen.menu.items[6].description == "echo the args"
+      check st.screen.menu.items[6].label == "quit"
+      check st.screen.menu.items[7].label == "echo"
+      check st.screen.menu.items[7].description == "echo the args"
       typeText(backend, addr st, "ec")
       check st.screen.menu.items.len == 1
       check st.screen.menu.items[0].label == "echo"
@@ -605,7 +608,7 @@ suite "the composer keeps its keys":
       check st.menuKind == mkCompletion
       check not st.screen.menu.isNil
       if not st.screen.menu.isNil:
-        check st.screen.menu.items.len == 7
+        check st.screen.menu.items.len == 8
       # And the composer is on screen, with the draft in it.
       var canvas = newCanvas(size(60, 12))
       st.screen.render(canvas, rect(0, 0, 60, 12))
@@ -1026,6 +1029,104 @@ suite "the /login and /logout builtins":
         labels.add item.label
       check "login" in labels
       check "logout" in labels
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+suite "the /model builtin":
+  test "/model offers the provider's real catalog and switches the model":
+    let root = freshWorkspace("neopi-tp-tui-model")
+    let path = freshSessionPath("model")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openai", "first", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "first")
+      wireApp(addr st, L, st.app)
+      let fake = newFakeTransport()
+      fake.canned(200, @["""{"data":[{"id":"alpha"},{"id":"beta"}]}"""])
+      setProvider(L, some(openAI("k", "http://example.test/v1",
+        transport = fake)))
+      st.inputW.setText("/model")
+      sendTurn(addr st, L)
+      # The catalog came over the wire, and the menu carries it: the Menu and
+      # not a QuestionWidget, because the catalog can be long and only the
+      # Menu scrolls its selection into view.
+      check st.menuKind == mkModel
+      check fake.calls.len == 1
+      check fake.calls[0].httpMethod == "GET"
+      check fake.calls[0].url.endsWith("/models")
+      check not st.screen.menu.isNil
+      check st.screen.menu.items.len == 2
+      check st.screen.menu.items[0].label == "alpha"
+      check st.screen.menu.items[1].label == "beta"
+      # The command never enters the composer or the session.
+      check st.inputW.text == ""
+      check sess.history().len == 0
+      # Enter switches what the loop drives: the state's copy AND the Lua
+      # string the next turn passes, because the model is read per turn.
+      backend.events.add UiEvent(kind: uiKey, key: keyDown)
+      backend.events.add UiEvent(kind: uiKey, key: keyEnter)
+      discard pumpApp(addr st)
+      check st.model == "beta"
+      check evalJson(L, "return neopi._tuiModel").getStr == "beta"
+      check st.menuKind == mkNone
+      check st.transcriptW.transcript.items[^1].kind == tikStatus
+      check "beta" in st.transcriptW.transcript.items[^1].text
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "/model reports a failed catalog instead of crashing the TUI":
+    let root = freshWorkspace("neopi-tp-tui-model-fail")
+    let path = freshSessionPath("model-fail")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openai", "first", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "first")
+      wireApp(addr st, L, st.app)
+      let fake = newFakeTransport()
+      fake.canned(500, @["boom"])
+      setProvider(L, some(openAI("k", "http://example.test/v1",
+        transport = fake)))
+      st.inputW.setText("/model")
+      sendTurn(addr st, L)
+      # A failed catalog is feedback, not a crash and not an empty menu.
+      check st.menuKind == mkNone
+      check st.model == "first"
+      check st.transcriptW.transcript.items[^1].kind == tikStatus
+      check "cannot list the models" in st.transcriptW.transcript.items[^1].text
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "/model with no provider says so and opens nothing":
+    let root = freshWorkspace("neopi-tp-tui-model-noprovider")
+    let path = freshSessionPath("model-noprovider")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "first", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "first")
+      wireApp(addr st, L, st.app)
+      st.inputW.setText("/model")
+      sendTurn(addr st, L)
+      check st.menuKind == mkNone
+      check st.transcriptW.transcript.items[^1].kind == tikStatus
+      check "no provider" in st.transcriptW.transcript.items[^1].text
     finally:
       removeDir(root)
       removeFile(path)

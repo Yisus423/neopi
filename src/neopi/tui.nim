@@ -320,8 +320,8 @@ type
   MenuKind* = enum
     ## Which menu the floating slot holds. They share the widget and the rows
     ## above the composer, but not the key map: Tab completes a command into
-    ## the composer, Enter resumes a session.
-    mkNone, mkResume, mkCompletion
+    ## the composer, Enter resumes a session, Enter picks a model.
+    mkNone, mkResume, mkModel, mkCompletion
 
   QuestionPurpose* = enum
     ## Where a question's answer goes. The extension UI's dialogs deliver to a
@@ -803,9 +803,10 @@ proc coreCommands(): seq[MenuItem] =
     MenuItem(label: "resume", description: "resume a previous session"),
     MenuItem(label: "new", description: "start a new session"),
     MenuItem(label: "compact", description: "summarize the conversation now"),
-    MenuItem(label: "quit", description: "exit neopi"),
+    MenuItem(label: "model", description: "pick the provider's model"),
     MenuItem(label: "login", description: "set the provider's API key"),
-    MenuItem(label: "logout", description: "drop the provider's API key")]
+    MenuItem(label: "logout", description: "drop the provider's API key"),
+    MenuItem(label: "quit", description: "exit neopi")]
 
 proc commandItems*(L: LuaState): seq[MenuItem] =
   ## The commands the composer completes: the core's builtins first, then the
@@ -886,13 +887,15 @@ proc closeCompletion(state: ptr TuiState) =
   if not state[].screen.isNil:
     state[].screen.menu = nil
 
-proc closeResume(state: ptr TuiState) =
-  ## Close the resume picker, releasing the slot AND the kind together. A state
-  ## that kept `mkResume` after the picker left kept the completion shut: the
-  ## change action asks the kind for permission, so a stale `mkResume` is a
+proc closeMenu(state: ptr TuiState) =
+  ## Close the menus that share the slot above the composer, releasing the slot
+  ## AND the kind together: the resume picker and the model picker. A state that
+  ## kept `mkResume` (or `mkModel`) after its menu left kept the completion shut:
+  ## the change action asks the kind for permission, so a stale kind is a
   ## question answered by a menu that is no longer on screen — which is how an
-  ## Esc on the picker silently disabled the completion.
-  if state[].menuKind != mkResume:
+  ## Esc on the picker silently disabled the completion. The completion has its
+  ## own closer, because its Esc must keep the draft.
+  if state[].menuKind notin {mkResume, mkModel}:
     return
   state[].menuKind = mkNone
   state[].menu = nil
@@ -970,7 +973,7 @@ proc startNewSession*(state: ptr TuiState, L: LuaState): string =
     setRegistryPointer(L, "neopi.session", cast[pointer](fresh))
   except CatchableError as e:
     return "cannot start a session: " & e.msg
-  closeResume(state)
+  closeMenu(state)
   state[].working = false
   setCoreStatus(state, "")
   # The fresh session is a new tree, an empty one: rebuild and re-watermark, so
@@ -991,9 +994,9 @@ proc resumeSession*(state: ptr TuiState, L: LuaState, path: string) =
     setRegistryPointer(L, "neopi.session", cast[pointer](fresh))
   except CatchableError as e:
     setCoreStatus(state, "cannot resume " & path & ": " & e.msg)
-    closeResume(state)
+    closeMenu(state)
     return
-  closeResume(state)
+  closeMenu(state)
   state[].working = false
   setCoreStatus(state, "")
   # The loaded session is a new tree: rebuild and re-watermark.
@@ -1115,6 +1118,68 @@ proc logout(state: ptr TuiState) =
   appendStatusLine(state, "logged out: no provider (set " &
     providerEnvVar(state[].provider) & " or run /login)")
 
+proc pushLuaModel(L: LuaState, id: string) =
+  ## Rebind the model string the loop's chunk reads on every turn
+  ## (`neopi._tuiModel`), so the very next turn asks for the new model. A nil
+  ## interpreter has nobody to tell and is left alone.
+  if L.isNil:
+    return
+  lua_getfield(L, luaGlobalsIndex, "neopi")
+  if lua_type(L, -1) == luaTTable:
+    pushString(L, id)
+    lua_setfield(L, -2, "_tuiModel")
+  lua_pop(L, 1)
+
+proc setModel*(state: ptr TuiState, L: LuaState, id: string) =
+  ## Switch the model the loop drives: the state's copy and the Lua string the
+  ## next turn passes both move. Nothing else has to: `agent.runTurn` reads the
+  ## model per turn, which is why a switch needs no reload and no restart. The
+  ## footer names the model, so it is refreshed, and the status line reports the
+  ## switch.
+  ##
+  ## The name is materialized BEFORE `closeMenu` releases the picker that owns
+  ## the buffer it came from. The picker's label reaches this proc borrowed, and
+  ## reading it after the menu was freed wrote a status line with a NUL where
+  ## the name had been — while the state's copy and the Lua push, both taken
+  ## while the menu was alive, still read correctly, which is what made the
+  ## corruption look impossible. Lesson: a string taken from a widget is only
+  ## good for as long as that widget lives.
+  let model = id & ""
+  let line = "model: " & model
+  state[].model = model
+  pushLuaModel(L, model)
+  closeMenu(state)
+  refreshFooter(state)
+  appendStatusLine(state, line)
+
+proc openModel(state: ptr TuiState, L: LuaState) =
+  ## Open `/model`: the provider's real catalog in the menu. The catalog comes
+  ## over the wire in one blocking GET, so a failure is feedback rather than a
+  ## crash and never an empty menu; the Menu (and not a QuestionWidget) carries
+  ## it because the catalog can be long and only the Menu scrolls the selection
+  ## into view.
+  let backing = if L.isNil: none(Provider) else: currentProvider(L)
+  if backing.isNone:
+    appendStatusLine(state, "no provider: run /login or set " &
+      providerEnvVar(state[].provider))
+    return
+  var ids: seq[string]
+  try:
+    ids = listModels(backing.get)
+  except CatchableError as e:
+    appendStatusLine(state, "cannot list the models: " & e.msg)
+    return
+  if ids.len == 0:
+    appendStatusLine(state, "the provider returned no models")
+    return
+  var items: seq[MenuItem]
+  for id in ids:
+    items.add MenuItem(label: id, description: "")
+  state[].menuKind = mkModel
+  state[].menu = newMenu(items, title = "pick a model:")
+  if not state[].screen.isNil:
+    state[].screen.menu = state[].menu
+
 proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
   ## Dispatch a /-prefixed composer input: the core's own builtins (/resume,
   ## /new, /compact, /quit) act here; everything else goes to the runtime's
@@ -1150,6 +1215,10 @@ proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
   if command == "/logout":
     state[].inputW.clear()
     logout(state)
+    return
+  if command == "/model":
+    state[].inputW.clear()
+    openModel(state, L)
     return
   state[].inputW.clear()
   lua_getfield(L, luaGlobalsIndex, "neopi")
@@ -1754,6 +1823,23 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
         app.invalidate()
       else:
         discard
+    elif menuOpen and state[].menuKind == mkModel:
+      case event.key
+      of keyUp, keyDown, keyPageUp, keyPageDown:
+        let response = state[].screen.menu.handle(event)
+        app.invalidate()
+        if response.handled: return response
+      of keyEnter:
+        let menu = state[].screen.menu
+        if menu.items.len > 0:
+          setModel(state, L, menu.items[menu.selected].label)
+        return eventHandled
+      of keyEscape:
+        closeMenu(state)
+        app.invalidate()
+        return eventHandled
+      else:
+        discard
     elif menuOpen:
       case event.key
       of keyUp, keyDown, keyPageUp, keyPageDown:
@@ -1767,7 +1853,7 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
           resumeSession(state, L, picked.description)
         return eventHandled
       of keyEscape:
-        closeResume(state)
+        closeMenu(state)
         app.invalidate()
         return eventHandled
       else:
