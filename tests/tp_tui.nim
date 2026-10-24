@@ -1073,6 +1073,63 @@ suite "the /model builtin":
       removeDir(root)
       removeFile(path)
 
+  test "Ctrl+C exits with a dialog open instead of doing nothing":
+    let root = freshWorkspace("neopi-tp-tui-ctrlc-dialog")
+    let path = freshSessionPath("ctrlc-dialog")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      st.inputW.setText("/login")
+      sendTurn(addr st, L)
+      check not st.question.isNil
+      # Ctrl+C is the app's exit, and the dialog must not swallow it: the
+      # question handles Esc, the arrows, Enter and the editing keys, and
+      # anything else it ignores — but this branch answers `eventHandled` for
+      # every key, so an unhandled Ctrl+C went nowhere and the TUI simply did
+      # not leave. The dialog was the first builtin-opened one, so nobody had
+      # been able to hit it before.
+      st.app.running = true          # what app.run() sets before its loop
+      backend.events.add UiEvent(kind: uiKey, key: keyCtrlC)
+      discard pumpApp(addr st)
+      check not st.app.running
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "Ctrl+C during a turn still aborts instead of exiting":
+    # The neighbouring behaviour, and the reason the exit check cannot simply
+    # move above the turn's own branch: while the drive runs, Ctrl+C asks for
+    # the abort (the stream cancels and the partial turn survives), and the
+    # exit waits for the next press.
+    let root = freshWorkspace("neopi-tp-tui-ctrlc-turn")
+    let path = freshSessionPath("ctrlc-turn")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      st.working = true
+      st.app.running = true
+      backend.events.add UiEvent(kind: uiKey, key: keyCtrlC)
+      discard pumpApp(addr st)
+      check st.abortRequested
+      check st.app.running
+    finally:
+      removeDir(root)
+      removeFile(path)
+
   test "/model offers the provider's real catalog and switches the model":
     let root = freshWorkspace("neopi-tp-tui-model")
     let path = freshSessionPath("model")

@@ -1777,7 +1777,13 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
       return eventHandled
     if event.kind != uiKey:
       return eventIgnored
-    if not state[].question.isNil:
+    # Ctrl+C is not the dialog's. The question handles Esc, the arrows, Enter
+    # and the editing keys and ignores the rest, but the branch below answers
+    # `eventHandled` for EVERY key — so an unhandled Ctrl+C went nowhere and the
+    # TUI simply did not leave. `/login` was the first builtin that opens a
+    # dialog, which is why the state had never been reachable before; it falls
+    # through to the abort while a turn runs, and to the exit otherwise.
+    if not state[].question.isNil and event.key != keyCtrlC:
       # The dialog owns the keys while it is open, Esc included: cancelling the
       # question is the innermost interaction, so it wins over aborting the turn
       # the question was asked from. Every key goes to it, because its free-text
