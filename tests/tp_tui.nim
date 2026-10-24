@@ -271,6 +271,21 @@ suite "the / command dispatch":
       removeDir(root)
       removeFile(path)
 
+suite "the fuzzy matcher":
+  test "a query matches as a case-insensitive subsequence, in order":
+    # The two cases the pickers live on: "gpt5" has to find "openai/gpt-5" (the
+    # dash is never typed) and the order of the query's characters has to
+    # matter, or every long id matches every query.
+    check fuzzyMatch("gpt5", "openai/gpt-5")
+    check fuzzyMatch("GPT", "openai/gpt-5")
+    check fuzzyMatch("openai", "openai/gpt-5")
+    check not fuzzyMatch("gpt6", "openai/gpt-5")
+    check not fuzzyMatch("5gpt", "openai/gpt-5")
+    check not fuzzyMatch("zzz", "openai/gpt-5")
+    # An empty query is not a filter: the pickers only narrow once something is
+    # typed, and the list comes back whole when it is cleared.
+    check fuzzyMatch("", "anything at all")
+
 suite "the command completion":
   test "commandItems lists the core builtin and the runtime's registry":
     let root = freshWorkspace("neopi-tp-tui-complete")

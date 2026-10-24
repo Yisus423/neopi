@@ -856,6 +856,25 @@ proc completionPrefix*(text: string, cursor: int): string =
       return ""
   text
 
+proc fuzzyMatch*(query, text: string): bool =
+  ## Whether `query` matches `text` as a case-insensitive SUBSEQUENCE: every
+  ## character of the query has to appear, in order, but not adjacently — so
+  ## "gpt5" finds "openai/gpt-5" (the dash is never typed) and "5gpt" does not.
+  ## An empty query is not a filter: it matches everything, which is what the
+  ## pickers want while nothing has been typed. One pure proc, the same shape
+  ## the completion's prefix rule has, so both pickers share it and its tests
+  ## need no terminal.
+  if query.len == 0:
+    return true
+  let needle = query.toLowerAscii
+  var q = 0
+  for c in text:
+    if c.toLowerAscii == needle[q]:
+      inc q
+      if q == needle.len:
+        return true
+  false
+
 proc completionMatches*(items: seq[MenuItem], prefix: string): seq[MenuItem] =
   ## The items whose name prefix-matches the typed token, case-insensitively:
   ## "/" alone (the empty name) lists every command. The rule is one pure proc
