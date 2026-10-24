@@ -71,10 +71,16 @@ the same state exceed 4 s on a slower network.
   path.
 - **The selection returns to the first row while a query is active** (pi's
   rule), and stays where it was when the query is cleared.
-- **The blocking fetch is fixed in the same slice**: the catalog GET pumps the
-  app while it waits, the shape the turn drive already uses (`waitFor` with the
-  app stepped and presented), so keys and Ctrl+C keep working — with a
-  "fetching the models…" status so the wait is visible.
+- **The blocking fetch's WAIT stops being silent** — and this bullet used to
+  claim more than that ("the catalog GET pumps the app while it waits"), which
+  the implementation proved wrong: the fetch still blocks the loop, and what
+  ships is that the user is told why nothing answers. The status needs a
+  FORCED frame (`presentApp(state, force = true)`): nimterm's flush respects
+  the frame budget and the outer flush only runs once the action returns, which
+  is after the wait the status explains. The real fix — a fetch that does not
+  block — is an async event source that polls the chronos dispatcher (the shape
+  nimlet's turn source uses), and its trigger is the first provider slow enough
+  to make the freeze hurt.
 - **Out of scope** (S3): pi's phrase tokens, its name filter and its three sort
   orders.
 
@@ -82,11 +88,51 @@ the same state exceed 4 s on a slower network.
 
 | ID | What | Specs | Route | Commit |
 |---|---|---|---|---|
-| T1 | The fuzzy matcher (a pure proc) + its tests | S3 | inline | — |
-| T2 | `/model` filters from the composer as you type | S1, S2 | inline | — |
-| T3 | `/resume` filters the same way | S1, S2 | inline | — |
-| T4 | The catalog GET stops freezing the loop | S1 | inline | — |
-| T5 | Docs (README's keys/commands) and the close | S1-S3 | inline | — |
+| T1 | The fuzzy matcher (a pure proc) + its tests | S3 | inline | `feat(tui): the pickers get a fuzzy matcher` — `597f7c9` |
+| T2 | `/model` filters from the composer as you type | S1, S2 | inline | `feat(tui): /model narrows the catalog as you type` — `6428a21` |
+| T3 | `/resume` filters the same way | S1, S2 | inline | `feat(tui): /resume narrows the sessions as you type` — `c5b7fac` |
+| T4 | The catalog fetch's wait stops being silent | S1 | inline | `feat(tui): the catalog fetch's wait stops being silent` — `4a426f8` |
+| T5 | The README's keys, this evidence, and the close | S1-S3 | inline | `docs(tui): the picker search joins the record` — the commit that carries this section |
+
+## Evidence
+
+One gate per task, then the batch gate and what this slice learned.
+
+- **T1** — focused `tests/tp_tui.nim` **70/70 OK**, `EXIT=0`; RED observed
+  first as a compile error, `undeclared identifier: 'fuzzyMatch'`.
+- **T2** — focused **71/71 OK**, `EXIT=0`; RED observed first as the list
+  staying at three rows while the query was typed (`items.len was 3`).
+- **T3** — focused **72/72 OK**, `EXIT=0`; RED observed first as `items.len was
+  2` with one session matching.
+- **T4** — focused **73/73 OK**, `EXIT=0`; RED observed first as no frame at
+  all (`backend.frames.len was 0`), which is what "the wait is silent" looks
+  like from inside the harness.
+- **The batch gate** (on the whole tree, `set -o pipefail`): `nimble test` →
+  `[Summary] 184 tests run (3.71s): 184 OK, 0 FAILED, 0 SKIPPED` and
+  `22 successes / 0 failures / 0 errors / 0 pending`, `EXIT=0`. 184 = the 180
+  the tree carried when the slice opened plus the four tests it added: the
+  matcher (one test, seven assertions), `/model`'s filter, `/resume`'s filter
+  and the fetch's status frame.
+
+### What this slice learned
+
+- **Filtering a picker surfaced two traps of the F1 family, both fixed in
+  T2.** The completion's recompute ran for any kind that was not `mkResume`:
+  with the model picker open it computed a prefix from the picker's query, found
+  nothing and closed the slot — so typing killed the picker. And `menuOpen` was
+  decided by the item count, so a picker whose query matched nothing could not
+  be closed with Esc and kept its kind set, which is the state that silences
+  the completion for the rest of a session. Now the completion yields to BOTH
+  picker kinds, and the KIND decides whether a menu is open, not how many rows
+  it holds.
+- **A status before a blocking call needs a forced frame (T4).** `presentApp`'s
+  flush respects nimterm's frame budget, and the outer flush only runs after the
+  action returns — which is after the wait the status exists to explain. Without
+  `force` the status is written, deferred and then covered by the picker's frame,
+  and the user sees exactly the freeze it was meant to excuse.
+- **The test can correct the author.** T3's first RED asserted the row label was
+  the session's text; the real label is `<file> — <text>`, and the failing
+  assertion is what taught it.
 
 ## Log
 
