@@ -229,6 +229,44 @@ defect and had simply never been used in a real TUI.
 tests — the `/login` question and `ui.select` — pinning the composer's keys
 after the dialog closes.
 
+### F2 — Ctrl+C did nothing while a dialog was open
+
+Reported right after F1: "ahora veo que salir con ctrl+c no está funcionando,
+creo que eso ocurrió cuando implementamos /exit".
+
+**Found with the tools the user named**, in the order he named them: Engram
+first — the SIGINT history, where Ctrl+C was the terminal's INTR and killed the
+process in the illwill era, which is why the abort had moved to Esc — and
+CodeGraph for the branch order. Neither was decisive on its own, so a pty
+harness (the recipe this repository already documents) ran Ctrl+C in five real
+states: idle, the completion open, the resume picker, the model picker, and a
+dialog. Idle and every menu left with code 0; **the dialog did not** — and the
+dialog was the one state no builtin command could reach before `/login`.
+
+**What it was.** `QuestionWidget.handle` answers Esc, the arrows, Enter and the
+editing keys and ignores everything else — but `wireApp`'s dialog branch
+returned `eventHandled` for EVERY key, so a Ctrl+C the widget ignored went
+nowhere: no abort, no exit, nothing. That branch sits above both the turn's
+abort and the exit check, so it swallowed the one key that leaves.
+
+**The fix.** The dialog does not own Ctrl+C: the branch is skipped for it, so
+it falls through to the abort while a turn runs and to the exit otherwise. Esc
+stays the dialog's — cancelling the question is the innermost interaction — and
+the turn's abort keeps its precedence.
+
+**Gate.** Focused `tests/tp_tui.nim` **69/69 OK**, `EXIT=0`, with two tests:
+one pins that Ctrl+C stops the app with a `/login` question open (RED observed
+first: `st.app.running was true`), the other pins that Ctrl+C during a turn
+still only asks for the abort. The rebuilt binary then ran the same five-state
+pty harness, and every state leaves with code 0.
+
+**Measured while verifying it.** With `/model` the exit arrives about a second
+after Ctrl+C, because `openModel`'s catalog fetch is a BLOCKING GET over the
+provider's transport: while it runs, the loop processes no event at all — not
+Ctrl+C, not a key. That is the blocking-fetch limit the Design already carried,
+now measured. The shape of its fix is the one the turn drive already uses (the
+app is pumped while the wait runs), and it goes with the next slice.
+
 ## Log
 
 - **L1** (verbatim, the original request): "arranquemos con #21: el estudio del
@@ -251,3 +289,9 @@ after the dialog closes.
   de registrar al teclado o por lo menos el input ya no se renderiza" — the
   first bug reported after the slice landed; it is F1 above, a `/login` symptom
   of a defect every dialog shared.
+- **L8** (verbatim): "ok, todo fino, ahora veo que salir con ctrl+c no está
+  funcionando, creo que eso ocurrió cuando implementamos /exit, habría que
+  revisarlo con engram y codegraph. También se siente algo tedioso scrollear
+  entre cientos de modelos, podríamos implementar busqueda en /models y
+  /resume como lo hace pi" — the Ctrl+C report is F2 above; the scrolling and
+  the search request open the next slice.
