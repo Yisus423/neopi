@@ -196,6 +196,52 @@ suite "the /resume builtin":
       removeFile(path)
 
 suite "resumeSession":
+  test "/resume narrows the sessions as the composer is typed into":
+    let root = freshWorkspace("neopi-tp-tui-resume-search")
+    let path = freshSessionPath("resume-search")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      createDir(root / ".neopi" / "sessions")
+      writeFile(root / ".neopi" / "sessions" / "run-1.jsonl",
+        "{\"type\":\"user\",\"id\":1,\"parentId\":null," &
+        "\"timestamp\":\"2026-01-01T00:00:00Z\"," &
+        "\"text\":\"fix the graph parser\"}")
+      writeFile(root / ".neopi" / "sessions" / "run-2.jsonl",
+        "{\"type\":\"user\",\"id\":1,\"parentId\":null," &
+        "\"timestamp\":\"2026-01-01T00:00:00Z\"," &
+        "\"text\":\"write the docs\"}")
+      st.inputW.setText("/resume")
+      sendTurn(addr st, L)
+      check st.menu.items.len == 2
+      # The same mechanism as /model: the picker keeps its arrows, Enter and
+      # Esc, the composer holds the query, and the row's words are what the
+      # filter looks at.
+      for c in "graph":
+        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
+      discard pumpApp(addr st)
+      check st.menu.items.len == 1
+      check st.menu.items[0].label == "run-1 — fix the graph parser"
+      # A fragment of the FILE matches too — the row shows the prompt, but the
+      # path is what the row's second line carries and what a user can recall.
+      for _ in 1 .. 5:
+        backend.events.add UiEvent(kind: uiKey, key: keyBackspace)
+      for c in "run-2":
+        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
+      discard pumpApp(addr st)
+      check st.menu.items.len == 1
+      check st.menu.items[0].label == "run-2 — write the docs"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
   test "the swap rebinds the session and the registry pointer":
     let root = freshWorkspace("neopi-tp-tui-swap")
     let path = freshSessionPath("swap")

@@ -1002,12 +1002,18 @@ proc openResume*(state: ptr TuiState) =
   ## Open the resume menu with the workspace's sessions (the /resume
   ## builtin). An empty sessions dir reports on the status line instead.
   var items: seq[MenuItem] = @[]
+  var texts: seq[string] = @[]
   for (value, label) in listSessions(state[].root):
     items.add MenuItem(label: label, description: value)
+    # The row's own words and the file behind it: pi's session search matches
+    # the name and the path, and both are what a user remembers.
+    texts.add label & " " & value
   if items.len == 0:
     setCoreStatus(state, "no sessions to resume")
     refreshFooter(state)
     return
+  state[].pickerSource = items
+  state[].pickerText = texts
   state[].menuKind = mkResume
   state[].menu = newMenu(items, title = "resume a session:")
   if not state[].screen.isNil:
