@@ -740,15 +740,21 @@ proc pumpApp*(state: ptr TuiState): bool =
     discard
   state[].abortRequested
 
-proc presentApp*(state: ptr TuiState) =
+proc presentApp*(state: ptr TuiState, force = false) =
   ## Present the frame through the app, which owns the canvas, the dirty flag
   ## and the frame budget. The stream sink used to clear, render and present by
   ## hand, which is how it could present a frame nothing had invalidated.
+  ##
+  ## `force` skips the frame budget, and one caller needs that: an action about
+  ## to BLOCK the loop (`/model`'s catalog fetch) has to get its explanation on
+  ## screen BEFORE the block, and the budget would defer exactly that frame —
+  ## the outer flush only runs once the action returns, which is after the wait
+  ## it was meant to explain.
   refreshFooter(state)
   if not state[].appReady:
     return
   state[].app.invalidate()
-  state[].app.flush()
+  state[].app.flush(force = force)
 
 
 proc postRunFinished*(state: ptr TuiState) =
@@ -1233,12 +1239,24 @@ proc openModel(state: ptr TuiState, L: LuaState) =
     appendStatusLine(state, "no provider: run /login or set " &
       providerEnvVar(state[].provider))
     return
+  # The fetch BLOCKS the loop for as long as the provider takes to answer —
+  # about a second against a real endpoint, more on a slow network, and during
+  # it the app processes no event at all (measured while F2 was verified). The
+  # wait gets a status and a FORCED frame, because the budget would otherwise
+  # defer the explanation until after the wait it explains. Making the fetch
+  # itself non-blocking belongs to an async event source (one that polls the
+  # chronos dispatcher, the shape nimlet's turn source uses) and is not this
+  # slice's: what ships here is that the freeze stops being silent.
+  setCoreStatus(state, "fetching the models…")
+  presentApp(state, force = true)
   var ids: seq[string]
   try:
     ids = listModels(backing.get)
   except CatchableError as e:
+    setCoreStatus(state, "")
     appendStatusLine(state, "cannot list the models: " & e.msg)
     return
+  setCoreStatus(state, "")
   if ids.len == 0:
     appendStatusLine(state, "the provider returned no models")
     return

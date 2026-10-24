@@ -1285,6 +1285,43 @@ suite "the /model builtin":
       removeDir(root)
       removeFile(path)
 
+  test "/model shows why nothing answers while the catalog is fetched":
+    let root = freshWorkspace("neopi-tp-tui-model-fetch")
+    let path = freshSessionPath("model-fetch")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openai", "first", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "first")
+      wireApp(addr st, L, st.app)
+      let fake = newFakeTransport()
+      fake.canned(200, @["""{"data":[{"id":"alpha"}]}"""])
+      setProvider(L, some(openAI("k", "http://example.test/v1",
+        transport = fake)))
+      st.inputW.setText("/model")
+      sendTurn(addr st, L)
+      check st.menuKind == mkModel
+      # The fetch blocks the loop for as long as the provider takes to answer,
+      # so the frame the user is looking at when it starts has to say why
+      # nothing responds: a presented frame carries the status, and the picker's
+      # own frame no longer does.
+      var sawFetching = false
+      for frame in backend.frames:
+        if "fetching the models" in frame:
+          sawFetching = true
+      check sawFetching
+      # That status was the WAIT's, not the picker's: the next presented frame
+      # shows the list without it.
+      presentApp(addr st)
+      check "fetching the models" notin backend.frames[^1]
+    finally:
+      removeDir(root)
+      removeFile(path)
+
   test "/model reports a failed catalog instead of crashing the TUI":
     let root = freshWorkspace("neopi-tp-tui-model-fail")
     let path = freshSessionPath("model-fail")
