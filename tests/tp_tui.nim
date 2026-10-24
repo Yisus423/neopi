@@ -1192,6 +1192,53 @@ suite "the /model builtin":
       removeDir(root)
       removeFile(path)
 
+  test "/model narrows the catalog as the composer is typed into":
+    let root = freshWorkspace("neopi-tp-tui-model-search")
+    let path = freshSessionPath("model-search")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openai", "first", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "first")
+      wireApp(addr st, L, st.app)
+      let fake = newFakeTransport()
+      fake.canned(200, @["""{"data":[{"id":"openai/gpt-5"},
+        {"id":"openai/gpt-5-mini"},{"id":"anthropic/claude-4"}]}"""])
+      setProvider(L, some(openAI("k", "http://example.test/v1",
+        transport = fake)))
+      st.inputW.setText("/model")
+      sendTurn(addr st, L)
+      check st.screen.menu.items.len == 3
+      # The picker's own keys are the arrows, Enter and Esc, so the editor keeps
+      # the focus: typing narrows the list through the composer's change action,
+      # the same mechanism the command completion uses. "gpt5" has to reach
+      # "openai/gpt-5" with the dash never typed, and the provider in the search
+      # text is what lets a provider-prefixed query land on the right rows.
+      for c in "gpt5":
+        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
+      discard pumpApp(addr st)
+      check st.screen.menu.items.len == 2
+      check st.screen.menu.items[0].label == "openai/gpt-5"
+      check st.screen.menu.items[1].label == "openai/gpt-5-mini"
+      for c in "-mini":
+        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
+      discard pumpApp(addr st)
+      check st.screen.menu.items.len == 1
+      check st.screen.menu.items[0].label == "openai/gpt-5-mini"
+      # Deleting the query brings the whole catalog back: an empty query is not
+      # a filter.
+      for _ in 1 .. 9:
+        backend.events.add UiEvent(kind: uiKey, key: keyBackspace)
+      discard pumpApp(addr st)
+      check st.screen.menu.items.len == 3
+    finally:
+      removeDir(root)
+      removeFile(path)
+
   test "/model reports a failed catalog instead of crashing the TUI":
     let root = freshWorkspace("neopi-tp-tui-model-fail")
     let path = freshSessionPath("model-fail")

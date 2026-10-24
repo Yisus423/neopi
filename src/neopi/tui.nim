@@ -368,8 +368,16 @@ type
     footerW*: TextWidget
     menu*: Menu
     menuKind*: MenuKind
-      ## Which menu the floating slot holds (the completion or the resume
-      ## picker), because their key maps differ.
+      ## Which menu the floating slot holds (the completion, the resume picker
+      ## or the model picker), because their key maps differ.
+    pickerSource*: seq[MenuItem]
+      ## The list a picker was opened with, kept whole while the composer's text
+      ## narrows it: the model catalog arrives over the network and cannot be
+      ## refetched on every keystroke.
+    pickerText*: seq[string]
+      ## The search text of each `pickerSource` entry, in the same order. It is
+      ## built where the picker opens (the model picker leads with the provider,
+      ## pi's rule: a provider-prefixed query must not lose to a proxy id).
     chrome*: Chrome
       ## The extension-filled chrome (the header rows, the keyed status rows and
       ## the placed blocks), shared by reference with the root widget.
@@ -918,6 +926,12 @@ proc closeMenu(state: ptr TuiState) =
     return
   state[].menuKind = mkNone
   state[].menu = nil
+  state[].pickerSource = @[]
+  state[].pickerText = @[]
+  if not state[].inputW.isNil:
+    # The composer held the picker's QUERY, not a draft for the editor: it
+    # leaves with the picker.
+    state[].inputW.clear()
   if not state[].screen.isNil:
     state[].screen.menu = nil
 
@@ -930,6 +944,34 @@ proc applyCompletion(state: ptr TuiState, item: MenuItem) =
   state[].inputW.setText("/" & item.label & " ")
   closeCompletion(state)
 
+proc updatePickerSearch(state: ptr TuiState) =
+  ## Narrow the open picker from the composer's text. A picker keeps only its
+  ## own keys — the arrows, Enter and Esc — so the editor holds the focus and
+  ## every edit arrives here through the composer's `change` action, the same
+  ## no-polling mechanism the command completion uses. An empty query restores
+  ## the source whole (and puts the row back where it was, pi's rule); no match
+  ## leaves the picker empty but OPEN, so backspacing brings the list back and
+  ## Esc still closes it.
+  if state[].menuKind notin {mkResume, mkModel}:
+    return
+  if state[].menu.isNil or state[].pickerSource.len == 0:
+    return
+  let query = state[].inputW.text
+  var items: seq[MenuItem] = @[]
+  for i, item in state[].pickerSource:
+    if i < state[].pickerText.len and fuzzyMatch(query, state[].pickerText[i]):
+      items.add item
+  let kept = state[].menu.selected
+  state[].menu = newMenu(items, title = state[].menu.title)
+  if query.len == 0 and items.len > 0:
+    state[].menu.selected = min(kept, items.len - 1)
+  if not state[].screen.isNil:
+    state[].screen.menu = state[].menu
+  if query.len > 0 and items.len == 0:
+    setCoreStatus(state, "no matches: backspace to widen the search")
+  else:
+    setCoreStatus(state, "")
+
 proc updateCompletion(state: ptr TuiState, L: LuaState) =
   ## Recompute the completion from the composer: the menu opens while the
   ## cursor sits at the end of a single-line /token that matches at least one
@@ -937,9 +979,12 @@ proc updateCompletion(state: ptr TuiState, L: LuaState) =
   ## here through the editor's own change action — no polling, and no work
   ## inside paint.
   ##
-  ## The resume picker on screen is not the completion's to touch: it belongs
-  ## to `openResume`/`resumeSession`.
-  if state[].menuKind == mkResume:
+  ## An open picker is not the completion's to touch: it belongs to
+  ## `openResume`/`openModel` and to `updatePickerSearch`. Without this the
+  ## completion would compute a prefix from the picker's query, find no match
+  ## and close the slot — which is how a kind could outlive or kill a menu it
+  ## does not own.
+  if state[].menuKind in {mkResume, mkModel}:
     return
   let prefix = completionPrefix(state[].inputW.text, state[].inputW.cursor)
   var matches: seq[MenuItem] = @[]
@@ -1192,8 +1237,15 @@ proc openModel(state: ptr TuiState, L: LuaState) =
     appendStatusLine(state, "the provider returned no models")
     return
   var items: seq[MenuItem]
+  var texts: seq[string]
   for id in ids:
     items.add MenuItem(label: id, description: "")
+    # The provider leads the search text, pi's rule: a provider-prefixed query
+    # has to land on the ids this provider serves instead of losing to a
+    # proxy-provider id that merely contains the same string.
+    texts.add state[].provider & " " & id
+  state[].pickerSource = items
+  state[].pickerText = texts
   state[].menuKind = mkModel
   state[].menu = newMenu(items, title = "pick a model:")
   if not state[].screen.isNil:
@@ -1838,8 +1890,11 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
     # and then falls through to the editor, so the submit rides with it and the
     # completed command runs in the same keystroke. Every other key goes to the
     # editor, whose change action recomputes the menu.
+    # The KIND decides, not the item count: a picker whose query matches
+    # nothing is still open — Esc has to close it, and a kind left behind
+    # without its menu is what silenced the completion before.
     let menuOpen = not state[].screen.isNil and
-      not state[].screen.menu.isNil and state[].screen.menu.items.len > 0
+      not state[].screen.menu.isNil and state[].menuKind != mkNone
     if menuOpen and state[].menuKind == mkCompletion:
       let menu = state[].screen.menu
       case event.key
@@ -1924,6 +1979,7 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
     ## shared action dispatch.
     if action.kind == "change":
       updateCompletion(state, L)
+      updatePickerSearch(state)
       app.invalidate()
       return
     if action.kind == "submit" and state[].working:
