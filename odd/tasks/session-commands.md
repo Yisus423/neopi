@@ -267,6 +267,39 @@ Ctrl+C, not a key. That is the blocking-fetch limit the Design already carried,
 now measured. The shape of its fix is the one the turn drive already uses (the
 app is pumped while the wait runs), and it goes with the next slice.
 
+### F3 — Ctrl+C did nothing while a turn was running
+
+Reported after F2: "aún no puedo salir usando ctrl+c".
+
+**The diagnosis cleared two suspects before the code.** The tree came first:
+ every commit of this slice is in `HEAD`, the only later commit is the license
+one, and the binary the user runs was checked with `strings` — it carries
+`no matches: backspace to widen the search` and `fetching the models`, so it
+was built from a tree that already includes F2. That left the one branch that
+still swallowed the key: `wireApp` answered Ctrl+C with `abortRequested = true`
+whenever `working` was up.
+
+**What that cost.** Honouring that request is the stream sink's job, and the
+sink only sees the flag while the stream it is reading produces events — so a
+provider that never answers, or a turn whose `working` never cleared, left
+Ctrl+C with nothing to do and no way out of the app. The README promised the
+opposite all along: "**Esc** aborts the stream … **Ctrl+C** exits".
+
+**The fix.** Ctrl+C exits unconditionally — Esc keeps the abort, the half that
+cancels the stream and preserves the partial turn — and the turn drive's
+`working` flag is cleared in a `finally`, so an exception out of the drive
+cannot leave it set. A stuck flag no longer traps the exit, but it still broke
+the next submit (steering into a turn that had ended) and the footer's working
+token, so the `finally` earns its place regardless.
+
+**Gate.** Focused `tests/tp_tui.nim` **74/74 OK**, `EXIT=0`: the inverted test
+pins that Ctrl+C stops the app *while* `working` is up (RED observed first,
+`st.app.running was true`) and its neighbour pins that Esc during a turn still
+only asks for the abort. The full suite reads `[Summary] 185 tests run (3.56s):
+185 OK, 0 FAILED, 0 SKIPPED` with `22 successes`, `EXIT=0`, and the rebuilt
+binary left all five states of the pty harness with code 0 — idle, the
+completion, both pickers and the dialog.
+
 ## Log
 
 - **L1** (verbatim, the original request): "arranquemos con #21: el estudio del
@@ -295,3 +328,8 @@ app is pumped while the wait runs), and it goes with the next slice.
   entre cientos de modelos, podríamos implementar busqueda en /models y
   /resume como lo hace pi" — the Ctrl+C report is F2 above; the scrolling and
   the search request open the next slice.
+- **L9** (verbatim): "aún no puedo salir usando ctrl+c" — the third defect of
+  the exit family, F3 above. F1 was the dialog stealing the composer's focus,
+  F2 the dialog swallowing Ctrl+C, and F3 the running turn swallowing it; the
+  three were found one at a time by the same user, each after the previous fix
+  shipped.
