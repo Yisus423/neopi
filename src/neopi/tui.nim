@@ -1402,23 +1402,30 @@ proc sendTurn*(state: ptr TuiState, L: LuaState) =
     "{model = neopi._tuiModel, onEvent = neopi._tuiOnEvent})"
   state[].working = true
   state[].abortRequested = false
-  while true:
-    var response: JsonNode
-    try:
-      response = evalJson(L, chunk)
-    except LuaError as e:
-      appendStatusLine(state, "the loop failed: " & e.msg)
-      break
-    # The turn's run is over: the streamed text was provisional and the session
-    # now carries the entry it belongs to. Closing the run in the widget first
-    # is what lets the sync append the real entry instead of leaving both.
-    postRunFinished(state)
-    syncTranscript(state)
-    # The gap between turns: the app drains the keys and presents.
-    let steered = drainGapKeys(state, L)
-    if state[].abortRequested or not turnContinues(response, steered):
-      break
-  state[].working = false
+  try:
+    while true:
+      var response: JsonNode
+      try:
+        response = evalJson(L, chunk)
+      except LuaError as e:
+        appendStatusLine(state, "the loop failed: " & e.msg)
+        break
+      # The turn's run is over: the streamed text was provisional and the
+      # session now carries the entry it belongs to. Closing the run in the
+      # widget first is what lets the sync append the real entry instead of
+      # leaving both.
+      postRunFinished(state)
+      syncTranscript(state)
+      # The gap between turns: the app drains the keys and presents.
+      let steered = drainGapKeys(state, L)
+      if state[].abortRequested or not turnContinues(response, steered):
+        break
+  finally:
+    # The flag decides whether the footer says the model is working AND whether
+    # the next submit sends or steers. An exception out of the drive (nimterm
+    # turns it into a uiError event) must not leave it set, or every later
+    # submit would steer into a turn that ended.
+    state[].working = false
   postRunFinished(state)
   syncTranscript(state)
   presentApp(state)
@@ -1900,8 +1907,14 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
           app.focus(Widget(state[].inputW))
       app.invalidate()
       return eventHandled
-    if state[].working and
-        (event.key == keyEscape or event.key == keyCtrlC):
+    # Esc aborts the turn — the stream cancels and the partial turn survives —
+    # and Ctrl+C LEAVES, whatever is running: the README's contract, and an
+    # escape hatch this TUI cannot do without. While a turn ran, Ctrl+C used to
+    # only ASK for the abort, and honouring that request is the stream sink's
+    # job: a provider that never answers (or a turn whose flag never cleared)
+    # left the user pressing the only key that leaves and getting nothing back,
+    # with no way out of the app.
+    if state[].working and event.key == keyEscape:
       state[].abortRequested = true
       return eventHandled
     if event.key == keyCtrlC:

@@ -1164,11 +1164,13 @@ suite "the /model builtin":
       removeDir(root)
       removeFile(path)
 
-  test "Ctrl+C during a turn still aborts instead of exiting":
-    # The neighbouring behaviour, and the reason the exit check cannot simply
-    # move above the turn's own branch: while the drive runs, Ctrl+C asks for
-    # the abort (the stream cancels and the partial turn survives), and the
-    # exit waits for the next press.
+  test "Ctrl+C leaves even while a turn is running":
+    # The README's contract, and the escape hatch this TUI needed: Esc aborts
+    # the stream (the partial turn survives) and Ctrl+C exits, always. While a
+    # turn ran, Ctrl+C used to only ASK for the abort — and the abort is the
+    # stream sink's to honour, so a provider that never answers (or a turn whose
+    # flag never cleared) left the user pressing the one key that leaves and
+    # getting nothing back.
     let root = freshWorkspace("neopi-tp-tui-ctrlc-turn")
     let path = freshSessionPath("ctrlc-turn")
     try:
@@ -1184,6 +1186,31 @@ suite "the /model builtin":
       st.working = true
       st.app.running = true
       backend.events.add UiEvent(kind: uiKey, key: keyCtrlC)
+      discard pumpApp(addr st)
+      check not st.app.running
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "Esc during a turn still aborts it instead of exiting":
+    # The neighbouring behaviour, and the half of the contract that must not
+    # move: the abort is Esc's, it cancels the stream and the partial turn
+    # stays, and the app keeps running.
+    let root = freshWorkspace("neopi-tp-tui-esc-turn")
+    let path = freshSessionPath("esc-turn")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      st.working = true
+      st.app.running = true
+      backend.events.add UiEvent(kind: uiKey, key: keyEscape)
       discard pumpApp(addr st)
       check st.abortRequested
       check st.app.running
