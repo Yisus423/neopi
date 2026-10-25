@@ -330,6 +330,57 @@ pane settled in five seconds what three layers of source reading could not.
 Before blaming the layer above, spend five seconds looking at the bytes the
 layer below actually hands over.
 
+### F4 — Ctrl+C did nothing inside the multiplexer, and the fix lives in nimterm
+
+Reported after F3, with the fact that narrowed it: **inside herdr — a terminal
+workspace manager for AI agents — Ctrl+C did nothing in ANY of the five
+states, while outside it every one of them left the app.**
+
+**What proved it** was a pane, a real neopi, and the three encodings of the
+same key sent as raw bytes with `herdr pane send-text`:
+
+| sent | neopi |
+|---|---|
+| `CSI 27;5;99~` (xterm modifyOtherKeys) | ignored, still alive |
+| `CSI 99;5u` (kitty CSI-u) | ignored, still alive |
+| `0x03` (the classic byte) | **exited** |
+
+**The chain.** herdr sets `TERM=xterm-256color` in its panes, so nimterm's
+capability detection (`platform_posix.nim`) turned on `modifyOtherKeys` — a
+mode in which the terminal stops sending the classic control bytes and answers
+with the modified encoding instead. herdr is a full terminal emulator and
+honors that mode, so Ctrl+C arrived as `27;5;99~`. nimterm's escape parser
+knew three hardcoded modified forms — Ctrl+V for paste, Ctrl+O, Ctrl+Shift+C
+for copy — and every other Ctrl+letter fell through and was dropped. Outside
+herdr the real terminal ignored the mode, the classic `0x03` arrived, and
+`decodeRaw` mapped it to `keyCtrlC`. That is why the key died only there, and
+why `cat -v` in a pane still showed `^C`: cat never asks for the mode.
+
+**The fix, in nimterm (our fork), commit `194aa6f`:** `modifiedCtrlKey` — the
+general case behind the hardcoded ones — maps modifier 5 (Ctrl alone) plus a
+letter's ASCII code through the same `ctrlKey` the classic byte uses, and the
+escape chain consults it AFTER the specific forms, so Ctrl+Shift+C is still
+copy and Ctrl+V is still paste. RED/GREEN in the fork: its suite reports
+`[FAILED] normalizes modified key encodings` without the patch and passes with
+it.
+
+**Verified end to end, with a control:** in a herdr pane,
+`herdr pane send-keys ctrl+c` left the unpatched binary alive and made the
+patched one exit.
+
+**Pending:** the fork's commit exists locally; neopi's pin (`neopi.nimble`,
+`800bf7f`) moves to it once the fork is PUSHED, because nimble cannot fetch an
+unpushed commit. Until then the binary carrying the fix is the one built
+against the local fork with `--path`.
+
+**The lesson.** An app that enables a terminal mode has to parse what that
+mode makes the terminal send; nimterm asked for one it only half understood.
+And for "a key does nothing", sending the raw byte and the encoded forms side
+by side answers in one experiment what three layers of source reading could
+not — after which the earlier `cat -v` result, which had seemed to exonerate
+the multiplexer, turned out to be consistent with the real cause instead of
+against it.
+
 ## Log
 
 - **L1** (verbatim, the original request): "arranquemos con #21: el estudio del
@@ -363,3 +414,15 @@ layer below actually hands over.
   F2 the dialog swallowing Ctrl+C, and F3 the running turn swallowing it; the
   three were found one at a time by the same user, each after the previous fix
   shipped.
+- **L10** (verbatim): "me salió ^C en herdr, por cierto, herdr no es mío, lo
+  que leíste fué un pull extremadamente viejo, ya lo actualicé y indexé con
+  codegraph" — the byte-level check that killed the two multiplexer theories,
+  plus the correction that herdr is not his and that the checkout read was
+  stale.
+- **L11** (verbatim): "porque no usaste codegrah en ninguno de los repos?" —
+  the third method correction about codegraph: the tool only resolves the
+  current workspace, and the CLI in any directory is the reach that was
+  missing.
+- **L12** (verbatim): "los 5 funcionan fuera de herdr, pero dentro de él
+  ninguno" — the fact that turned F4 from a guess into a hunt, and
+  "dale, haz el patch" — the authorization for the fork patch.
