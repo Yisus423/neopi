@@ -300,6 +300,36 @@ only asks for the abort. The full suite reads `[Summary] 185 tests run (3.56s):
 binary left all five states of the pty harness with code 0 — idle, the
 completion, both pickers and the dialog.
 
+**After F3 the symptom came back once, and it pointed at the multiplexer.**
+neopi is run inside herdr — a terminal workspace manager for AI agents — and
+Ctrl+C worked OUTSIDE it. Two explanations came out of that, and evidence
+killed both.
+
+The first was the kitty keyboard protocol: herdr asks the host terminal to
+report every key as an escape sequence (`src/app/mod.rs:1160`) and tracks the
+protocol per pane (`src/pane/terminal.rs`, `src/pane/kitty_keyboard.rs`), while
+nimterm decides its mode by ENV (`platform_posix.nim:85`: kitty only for
+`KITTY_WINDOW_ID` or a `TERM_PROGRAM` of ghostty/wezterm) and parses CSI-u only
+in hardcoded cases — `86/118`, `'o'`, and `67/99` plus shift (`input.nim`) — so
+kitty's Ctrl+C, `\x1b[99;5u`, would fall through and be dropped. pi is immune
+to exactly that shape, which is why the comparison looked promising: it
+negotiates the protocol (`packages/tui/src/terminal.ts:20`) and parses CSI-u
+generically (`keys.ts:613`).
+
+The second was herdr eating the key. **The user's own `cat -v` test in a pane
+killed both at once: the byte that arrives is `^C`, i.e. 0x03.** Under herdr
+`TERM_PROGRAM=herdr`, so nimterm stays on the legacy path, reads 0x03 as
+`keyCtrlC`, and the exit branch runs. What failed was the STATE, not the
+multiplexer: the presses that did nothing were while the model was working —
+F3 itself — and "outside herdr it works" came from trying it idle outside.
+
+**The lesson, sharpened.** A pty harness creates its own pty and bypasses a
+multiplexer's key routing, so it could never have caught this; but neither
+could a multiplexer theory without a byte-level check — one `cat -v` in the
+pane settled in five seconds what three layers of source reading could not.
+Before blaming the layer above, spend five seconds looking at the bytes the
+layer below actually hands over.
+
 ## Log
 
 - **L1** (verbatim, the original request): "arranquemos con #21: el estudio del
