@@ -14,7 +14,7 @@ requires "chronos >= 4.0.0"
 # nimterm is OUR fork (upstream `martineastwood/nimterm` is the one that got
 # deleted once); the SSE parser's package name is `server_sent_events` even
 # though its module is `sse`.
-requires "https://github.com/Yisus423/nimterm#800bf7f"
+requires "https://github.com/Yisus423/nimterm#194aa6f"
 requires "https://github.com/iceberg-work/sse#87934ce"
 
 task bench, "Run the TUI measurement harness (headless, no terminal)":
