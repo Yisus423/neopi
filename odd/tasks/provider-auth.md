@@ -236,6 +236,32 @@ write, the refusal, the precedence) and by the smoke check, but **no independent
 verification happened**: that is the user's decision (fix the subagent model and
 relaunch a verifier, or accept the parent's gate).
 
+**The native review (RDD) — BLOCKED by configuration, nothing consumed.** The
+switch is on (`global: on`), so the entry rule applied: `assess` over
+`7cfb7b6..HEAD` returned `reviewDue: true` (`reviewDueReason: high_risk`,
+`nativeRisk: high`, `risk: medium`, 13 paths / 927 lines) and a plan whose
+`independentVerifier` is false because no Task Size high-risk item was
+escalated. `inspect` then reported an empty workspace candidate and offered a
+start bound to the committed range, so `start` ran with all four lenses and
+created **lineage `review-8f5ec190e0afd965`** (tier `high`, correction budget
+200). The bound STATUS offered the four materialize slots; the group's forecast
+(transport `pi_host_relay`, 4 model runs, the four lenses in provider order) was
+relayed and acknowledged, and the launch **failed**: `reviewer-config-invalid`
+— "no model is configured for review-risk; assign it a model in the agent model
+routing config". A single-slot probe on `review-resilience` said the same for
+that role, so the whole `review-*` family is unconfigured. Nothing ran and
+nothing burned: `prepared_reviewers: 0`, `submitted_reviewers: 0`,
+`mutation_outcome: none`. The lineage stays `reviewing` at revision
+`sha256:4bfa86f635443cd27701e686de9827f473369cf90dcec9eda06484c3f84a28e3`
+with the four slots reoffered, so assigning the roles their models lets the
+capture resume on THIS lineage — there is no restart, and no replay of what was
+never run.
+
+**Where #23 stands**: the code, its tests and the docs are landed (four commits,
+the gate green); what is missing is the OUTSIDE view (the native review) and the
+independent verification. Both are blocked by the environment, not by the
+change, and both are the user's call.
+
 ## Known limits
 
 - **The space-separated option form** (`--provider x`) does not parse; verified
