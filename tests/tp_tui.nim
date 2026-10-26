@@ -6,7 +6,7 @@
 import std/[json, options, os, strutils, times]
 import nimterm
 import nimterm/transcript
-import neopi/[expose, extensibility, lua, provider, session, wire]
+import neopi/[authstore, expose, extensibility, lua, provider, session, wire]
 import neopi/tui
 import unittest2
 
@@ -28,6 +28,15 @@ proc freshWorkspace(name: string): string =
 proc freshSessionPath(name: string): string =
   result = getTempDir() / ("neopi-tp-tui-" & name & ".jsonl")
   removeFile(result)
+
+proc freshConfig(name: string): string =
+  ## A credential store directory that starts EMPTY, installed as the store's
+  ## environment: a `/login` answer must never write to the real
+  ## `~/.neopi/auth.json`, and a run that died mid-test must not leave its
+  ## credential behind for the next one to read.
+  result = getTempDir() / name
+  removeDir(result)
+  putEnv("NEOPI_CONFIG_DIR", result)
 
 proc escapeLua(s: string): string =
   result = ""
@@ -928,6 +937,7 @@ suite "the /login and /logout builtins":
   test "/login opens a masked question named for the provider's key":
     let root = freshWorkspace("neopi-tp-tui-login-mask")
     let path = freshSessionPath("login-mask")
+    discard freshConfig("neopi-tp-tui-login-mask-auth")
     try:
       let sess = newSession(path)
       let ext = newExtensibility(root, none(Provider), sess)
@@ -956,9 +966,54 @@ suite "the /login and /logout builtins":
       removeDir(root)
       removeFile(path)
 
+  test "providerEnvVar names the entry's environment variable":
+    check providerEnvVar("openrouter") == "OPENROUTER_API_KEY"
+    check providerEnvVar("groq") == "GROQ_API_KEY"
+    check providerEnvVar("ollama") == "OLLAMA_API_KEY"
+    # An id the table does not carry keeps the derivation, so a state built by
+    # hand still asks for something meaningful.
+    check providerEnvVar("weird") == "WEIRD_API_KEY"
+
+  test "/login installs the provider the TABLE declares":
+    # The pair used to be hardcoded (`if name == "openai"`): a state on any
+    # other entry rebuilt an OpenRouter provider instead. The entry decides.
+    let root = freshWorkspace("neopi-tp-tui-login-table")
+    let path = freshSessionPath("login-table")
+    discard freshConfig("neopi-tp-tui-login-table-auth")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("deepseek", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      st.inputW.setText("/login")
+      sendTurn(addr st, L)
+      for c in "sk-ds-1":
+        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
+      backend.events.add UiEvent(kind: uiKey, key: keyEnter)
+      discard pumpApp(addr st)
+      let installed = currentProvider(L)
+      check installed.isSome
+      if installed.isSome:
+        check installed.get.name == "deepseek"
+        check installed.get.baseUrl == "https://api.deepseek.com"
+        check installed.get.apiKey == "sk-ds-1"
+      # The key outlives the session: `/login` wrote it to the global store.
+      check loadApiKey("deepseek") == some("sk-ds-1")
+      # The key is the provider's, never the session's.
+      check sess.history().len == 0
+    finally:
+      removeDir(root)
+      removeFile(path)
+
   test "answering /login installs the rebuilt provider, and the key stays out of the session":
     let root = freshWorkspace("neopi-tp-tui-login")
     let path = freshSessionPath("login")
+    discard freshConfig("neopi-tp-tui-login-auth")
     try:
       let sess = newSession(path)
       let ext = newExtensibility(root, none(Provider), sess)
@@ -996,6 +1051,7 @@ suite "the /login and /logout builtins":
   test "Esc on the /login question leaves the provider exactly as before":
     let root = freshWorkspace("neopi-tp-tui-login-cancel")
     let path = freshSessionPath("login-cancel")
+    discard freshConfig("neopi-tp-tui-login-cancel-auth")
     try:
       let sess = newSession(path)
       let ext = newExtensibility(root, none(Provider), sess)
@@ -1026,6 +1082,7 @@ suite "the /login and /logout builtins":
   test "/logout clears the provider and says so":
     let root = freshWorkspace("neopi-tp-tui-logout")
     let path = freshSessionPath("logout")
+    discard freshConfig("neopi-tp-tui-logout-auth")
     try:
       let sess = newSession(path)
       let ext = newExtensibility(root, none(Provider), sess)
@@ -1038,12 +1095,17 @@ suite "the /login and /logout builtins":
       wireApp(addr st, L, st.app)
       setProvider(L, some(openRouter("before")))
       check currentProvider(L).isSome
+      saveApiKey("openrouter", "before")
+      check loadApiKey("openrouter").isSome
       st.inputW.setText("/logout")
       sendTurn(addr st, L)
       # The provider holder is empty and the status line reports it.
       check currentProvider(L).isNone
       check st.transcriptW.transcript.items[^1].kind == tikStatus
       check "logged out" in st.transcriptW.transcript.items[^1].text
+      # The stored credential goes with the live provider: `/logout` is not only
+      # a session change.
+      check loadApiKey("openrouter").isNone
     finally:
       removeDir(root)
       removeFile(path)
@@ -1098,6 +1160,7 @@ suite "the /model builtin":
   test "the composer takes the keys again after the /login question closes":
     let root = freshWorkspace("neopi-tp-tui-login-focus")
     let path = freshSessionPath("login-focus")
+    discard freshConfig("neopi-tp-tui-login-focus-auth")
     try:
       let sess = newSession(path)
       let ext = newExtensibility(root, none(Provider), sess)

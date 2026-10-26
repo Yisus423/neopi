@@ -149,13 +149,20 @@ proc buildChatRequest*(model: string, messages: seq[Message], system = "",
 
 proc chatHeaders*(apiKey: string): seq[(string, string)] =
   ## The auth and content headers. The key arrives here from the caller —
-  ## the tests pass dummy keys and assert this exact shape.
+  ## the tests pass dummy keys and assert this exact shape. An EMPTY key is a
+  ## keyless provider (a local server, a table entry with `requiresKey: false`):
+  ## no Authorization header at all, because `Bearer ` with nothing after it is
+  ## not a credential. A keyed provider's wire stays byte-identical.
+  if apiKey.len == 0:
+    return @[("Content-Type", "application/json")]
   @[("Authorization", "Bearer " & apiKey),
     ("Content-Type", "application/json")]
 
 proc modelsHeaders(apiKey: string): seq[(string, string)] =
   ## The catalog request headers: the bearer key only (a GET carries no
-  ## body, so no content type).
+  ## body, so no content type). A keyless provider sends no header at all.
+  if apiKey.len == 0:
+    return @[]
   @[("Authorization", "Bearer " & apiKey)]
 
 proc buildModelsRequest*(baseUrl, apiKey: string): WireRequest =

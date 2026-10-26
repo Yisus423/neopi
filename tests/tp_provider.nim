@@ -1,4 +1,5 @@
 import std/json
+import std/options
 import neopi/openai_compat
 import neopi/provider
 import unittest2
@@ -113,3 +114,42 @@ suite "provider primitives":
         true)
     check r.text == "done"
     check deltas == 1
+
+suite "the provider table":
+  test "the table carries the built-in providers with an endpoint and a key variable":
+    let specs = knownProviders()
+    check specs.len == 8
+    var ids: seq[string]
+    for spec in specs:
+      ids.add spec.id
+      check spec.baseUrl.len > 0
+      check spec.envVar.len > 0
+    check ids == @["openai", "openrouter", "deepseek", "groq", "together",
+      "cerebras", "ollama", "llamacpp"]
+    for i in 0 ..< ids.len:
+      for j in i + 1 ..< ids.len:
+        check ids[i] != ids[j]
+
+  test "findProvider answers a hit and a miss":
+    check findProvider("groq").isSome
+    check findProvider("groq").get.baseUrl == "https://api.groq.com/openai/v1"
+    check findProvider("nope").isNone
+
+  test "only the local entries are the keyless ones":
+    check findProvider("ollama").get.requiresKey == false
+    check findProvider("llamacpp").get.requiresKey == false
+    check findProvider("openrouter").get.requiresKey == true
+
+  test "newProvider takes the entry's endpoint and honors the override":
+    let spec = findProvider("groq").get
+    check newProvider(spec, "k").name == "groq"
+    check newProvider(spec, "k").baseUrl == "https://api.groq.com/openai/v1"
+    check newProvider(spec, "k", "https://proxy.test/v1").baseUrl ==
+      "https://proxy.test/v1"
+
+  test "openAI and openRouter keep their name and endpoint":
+    # The exported pair the six test files inject through: unchanged.
+    check openAI("k").name == "openai"
+    check openAI("k").baseUrl == "https://api.openai.com/v1"
+    check openRouter("k").name == "openrouter"
+    check openRouter("k").baseUrl == "https://openrouter.ai/api/v1"

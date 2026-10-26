@@ -13,6 +13,7 @@
 import std/[algorithm, json, options, os, strutils, syncio, tables, times]
 import nimterm
 import nimterm/[events as ntevents, term, transcript as nttranscript]
+import neopi/authstore
 import neopi/expose
 import neopi/lua
 import neopi/provider
@@ -471,10 +472,14 @@ const confirmYes* = "Yes"
   ## true: a cancel is not an approval.
 
 proc providerEnvVar*(name: string): string =
-  ## The environment variable a provider's key comes from: the provider name
-  ## uppercased plus `_API_KEY` (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`).
-  ## `/login`'s title asks for it and the no-provider feedback names it, so the
-  ## key is described without ever being echoed.
+  ## The environment variable a provider's key comes from: the table entry's
+  ## (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`), or the derived `<NAME>_API_KEY`
+  ## for an id the table does not carry. `/login`'s title asks for it and the
+  ## no-provider feedback names it, so the key is described without ever being
+  ## echoed.
+  let spec = findProvider(name)
+  if spec.isSome:
+    return spec.get.envVar
   name.toUpperAscii & "_API_KEY"
 
 proc answerLogin(state: ptr TuiState, answer: string, cancelled: bool)
@@ -698,9 +703,25 @@ proc answerLogin(state: ptr TuiState, answer: string, cancelled: bool) =
     appendStatusLine(state, "login cancelled: the provider is unchanged")
     return
   let name = state[].provider
-  let rebuilt = if name == "openai": openAI(answer) else: openRouter(answer)
+  # The TABLE decides the name and the endpoint. The pair used to be hardcoded
+  # (`if name == "openai"`), so `/login` on any other entry rebuilt an OpenRouter
+  # provider under a mismatched name. An id the table does not carry — a state
+  # built by hand, never a production start — keeps the old default endpoint.
+  let spec = findProvider(name).get(ProviderSpec(id: name,
+    baseUrl: defaultOpenRouterBase, envVar: providerEnvVar(name),
+    requiresKey: true))
+  let rebuilt = newProvider(spec, answer)
   setProvider(state[].lua, some(rebuilt))
-  appendStatusLine(state, "logged in to " & rebuilt.name)
+  # The key's home is the global store, so the next START reads it back. A store
+  # that REFUSES (a file that is not a credential file) must not pass silently:
+  # the user would believe the key outlived the session.
+  try:
+    saveApiKey(rebuilt.name, answer)
+    appendStatusLine(state, "logged in to " & rebuilt.name & " (saved in " &
+      authFilePath() & ")")
+  except AuthStoreError as e:
+    appendStatusLine(state, "logged in to " & rebuilt.name &
+      " for this session only: " & e.msg)
 
 proc queueSteering(L: LuaState, text: string) =
   ## Append the draft text to neopi.steeringQueue (the Lua array table the
@@ -1180,6 +1201,14 @@ proc openLogin(state: ptr TuiState) =
   if not state[].question.isNil:
     appendStatusLine(state, "a question is already open")
     return
+  # A keyless entry needs no key: asking for one would install a credential the
+  # endpoint does not want. The variable is still named, because a local server
+  # started with a key does accept one.
+  let spec = findProvider(state[].provider)
+  if spec.isSome and not spec.get.requiresKey:
+    appendStatusLine(state, state[].provider & " needs no key (set " &
+      spec.get.envVar & " only if the server asks for one)")
+    return
   let title = "paste " & providerEnvVar(state[].provider) & " for " &
     state[].provider
   let options: seq[QuestionOption] = @[]
@@ -1187,10 +1216,15 @@ proc openLogin(state: ptr TuiState) =
     secret = true), fnRef = 0, boolean = false, purpose = qpLogin)
 
 proc logout(state: ptr TuiState) =
-  ## Drop the live provider: the next turn has none until `/login` installs one.
-  ## The feedback names the environment variable the key would come from — the
-  ## key itself is never echoed, and it never entered the session either.
+  ## Drop the live provider AND its stored credential: the next turn has none
+  ## until `/login` installs one, and the next START has none either. The feedback
+  ## names the environment variable the key would come from — the key itself is
+  ## never echoed, and it never entered the session either.
   setProvider(state[].lua, none(Provider))
+  try:
+    deleteApiKey(state[].provider)
+  except AuthStoreError as e:
+    appendStatusLine(state, "the stored credential was not removed: " & e.msg)
   appendStatusLine(state, "logged out: no provider (set " &
     providerEnvVar(state[].provider) & " or run /login)")
 

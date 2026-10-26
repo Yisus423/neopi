@@ -11,7 +11,7 @@
 ## next-to-source).
 
 import std/[envvars, json, options, os, parseopt, strutils, syncio, times]
-import neopi/[extensibility, lua, provider, session, tui]
+import neopi/[authstore, extensibility, lua, provider, session, tui]
 
 # Same file-scope typedef as lua.nim and the bridge modules: no C headers
 # exist to declare the opaque state type, and this file's generated C
@@ -23,8 +23,16 @@ const DefaultModel = "inclusionai/ling-3.0-flash-vl"
   ## <PROVIDER>_MODEL.
 
 const Usage = """Usage:
-  neopi "prompt" [--provider openai|openrouter] [--model <id>]
-  neopi [--provider openai|openrouter] [--model <id>]
+  neopi "prompt" [--provider <id>] [--model <id>] [--base-url <url>]
+  neopi [--provider <id>] [--model <id>] [--base-url <url>]
+
+Options:
+  --provider <id>  a built-in provider: openai, openrouter, deepseek, groq,
+                   together, cerebras, ollama, llamacpp (default openrouter)
+  --model <id>     the model to request (the default is <PROVIDER>_MODEL, else
+                   the built-in default)
+  --base-url <url> overrides the provider's endpoint: a gateway whose URL
+                   differs, or an endpoint the table does not carry
 """
 
 proc fatal(msg: string) {.noreturn.} =
@@ -93,18 +101,47 @@ proc loadRuntime(L: LuaState) =
   except LuaError as e:
     fatal("the runtime failed to load: " & e.msg)
 
-proc runPrint(prompt, providerName: string, modelId: string) =
+proc specOf(name: string): ProviderSpec =
+  ## The table entry a `--provider` value names, or a clear failure listing what
+  ## this build carries. The name is validated ONCE, here, so every path below
+  ## reads the same entry.
+  let spec = findProvider(name)
+  if spec.isSome:
+    return spec.get
+  var known: seq[string]
+  for entry in knownProviders():
+    known.add entry.id
+  fatal("unknown provider \"" & name & "\" (known: " & known.join(", ") & ")")
+
+proc resolveKey(spec: ProviderSpec): string =
+  ## The key a start uses, in pi's order: a STORED credential wins, then the
+  ## entry's environment variable (which `.env` has already populated). A stored
+  ## credential owns its provider, so an environment variable never overrides a
+  ## key the user installed with `/login`.
+  let stored = loadApiKey(spec.id)
+  if stored.isSome:
+    return stored.get
+  getEnv(spec.envVar)
+
+proc providerFor(spec: ProviderSpec, baseUrl: string): Option[Provider] =
+  ## The provider a start builds from its entry. An entry that REQUIRES a key and
+  ## has none yields no provider — the state `/login` completes from inside the
+  ## TUI — while a keyless entry always builds one, with whatever key it happens
+  ## to carry.
+  let key = resolveKey(spec)
+  if key.len == 0 and spec.requiresKey:
+    return none(Provider)
+  some(newProvider(spec, key, baseUrl))
+
+proc runPrint(prompt: string, spec: ProviderSpec, modelId, baseUrl: string) =
   ## The print mode: one prompt → one run; the final text on stdout.
   loadDotEnv()
-  let upper = providerName.toUpperAscii
-  case providerName
-  of "openai", "openrouter": discard
-  else: fatal("unknown provider \"" & providerName & "\" (openai or openrouter)")
-  let key = getEnv(upper & "_API_KEY")
-  if key.len == 0:
-    fatal("no " & upper & "_API_KEY in the environment or .env; export it " &
-      "or pass --provider/--model")
-  let p = if providerName == "openai": openAI(key) else: openRouter(key)
+  let key = resolveKey(spec)
+  if key.len == 0 and spec.requiresKey:
+    fatal("no " & spec.envVar & " in the environment or .env, and no stored " &
+      "credential in " & authFilePath() & "; export it, or run the TUI and " &
+      "install it with /login")
+  let p = newProvider(spec, key, baseUrl)
   let root = getCurrentDir()
   let sessionsDir = root / ".neopi" / "sessions"
   try:
@@ -136,24 +173,16 @@ proc runPrint(prompt, providerName: string, modelId: string) =
   if response{"stopReason"}.getStr == "stepLimit":
     stderr.writeLine("neopi: the loop hit its step cap before the model finished")
 
-proc runTui(providerName, modelId: string) =
+proc runTui(spec: ProviderSpec, modelId, baseUrl: string) =
   ## The TUI mode: no prompt argument; the interactive loop drives the
   ## engine (the same agent.run chunk with the stream sink — the deltas
   ## render live) and the session persists through the same JSONL tree.
   loadDotEnv()
-  let upper = providerName.toUpperAscii
-  case providerName
-  of "openai", "openrouter": discard
-  else: fatal("unknown provider \"" & providerName & "\" (openai or openrouter)")
-  let key = getEnv(upper & "_API_KEY")
   # A missing key is not fatal in the TUI: `/login` is the key's runtime home,
   # so a keyless start is reachable. The session opens with no provider and a
   # turn attempted before `/login` reports it as feedback. The print mode keeps
   # its own fatal — it has no `/login`.
-  let backing =
-    if key.len == 0: none(Provider)
-    elif providerName == "openai": some(openAI(key))
-    else: some(openRouter(key))
+  let backing = providerFor(spec, baseUrl)
   let root = getCurrentDir()
   let sessionsDir = root / ".neopi" / "sessions"
   try:
@@ -172,7 +201,7 @@ proc runTui(providerName, modelId: string) =
     loadUserConfig(root, ext.bus.state)
   except LuaError as e:
     stderr.writeLine("neopi: the user config failed to load: " & e.msg)
-  let error = tuiLoop(s, ext.bus.state, providerName, modelId, root)
+  let error = tuiLoop(s, ext.bus.state, spec.id, modelId, root)
   if error.len > 0:
     fatal("the agent loop failed: " & error)
 
@@ -180,6 +209,7 @@ proc main() =
   var prompt = ""
   var providerName = "openrouter"
   var modelId = ""
+  var baseUrl = ""
   var sawPrompt = false
   var p = initOptParser()
   for kind, key, val in p.getopt():
@@ -188,6 +218,7 @@ proc main() =
       case key
       of "provider": providerName = val
       of "model": modelId = val
+      of "base-url": baseUrl = val
       of "h", "help":
         stdout.writeLine(Usage)
         quit(0)
@@ -199,14 +230,15 @@ proc main() =
       prompt = key
       sawPrompt = true
     of cmdEnd: discard
+  let spec = specOf(providerName)
   if modelId.len == 0:
-    modelId = getEnv(providerName.toUpperAscii & "_MODEL", DefaultModel)
+    modelId = getEnv(spec.id.toUpperAscii & "_MODEL", DefaultModel)
   if not sawPrompt:
     # The TUI mode: no prompt argument; the interactive loop drives the
     # engine. A clean exit returns here; a loop failure fatals inside.
-    runTui(providerName, modelId)
+    runTui(spec, modelId, baseUrl)
     quit(0)
-  runPrint(prompt, providerName, modelId)
+  runPrint(prompt, spec, modelId, baseUrl)
 
 when isMainModule:
   main()

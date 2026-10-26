@@ -10,6 +10,7 @@
 ## above this layer.
 
 import std/json
+import std/options
 import neopi/hooks
 import neopi/primitives
 import neopi/openai_compat
@@ -49,24 +50,82 @@ type
     provider*: Provider
     id*: string
 
+  ProviderSpec* = object
+    ## One entry of the built-in provider table: the identity (`id`, which is
+    ## also the `Provider.name` the status line and the footer show), the
+    ## endpoint the OpenAI-compatible wire is appended to, the environment
+    ## variable the key comes from, and whether a key is REQUIRED to start.
+    ## A keyless entry keeps its variable: `requiresKey: false` relaxes the
+    ## requirement, not the credential, so a local server started with a key
+    ## still receives it.
+    id*: string
+    baseUrl*: string
+    envVar*: string
+    requiresKey*: bool
+
+const
+  # The two entries the constructors below name directly. The table and
+  # `openAI`/`openRouter` read this same spec, so they cannot drift apart.
+  openAiSpec = ProviderSpec(id: "openai", baseUrl: defaultOpenAiBase,
+    envVar: "OPENAI_API_KEY", requiresKey: true)
+  openRouterSpec = ProviderSpec(id: "openrouter", baseUrl: defaultOpenRouterBase,
+    envVar: "OPENROUTER_API_KEY", requiresKey: true)
+
+proc knownProviders*(): seq[ProviderSpec] =
+  ## The built-in provider table: the OpenAI-compatible endpoints this build
+  ## knows, each with the variable its key comes from. `openai` and `openrouter`
+  ## are the two neopi exercises; `deepseek`, `groq`, `together` and `cerebras`
+  ## are the four endpoints a real client reaches with this same wire (pi's
+  ## providers for them use its `openai-completions` implementation), and the
+  ## last two are local servers that need no key. `--base-url` reaches anything
+  ## else, so the table is a convenience and never the only way in.
+  @[openAiSpec, openRouterSpec,
+    ProviderSpec(id: "deepseek", baseUrl: "https://api.deepseek.com",
+      envVar: "DEEPSEEK_API_KEY", requiresKey: true),
+    ProviderSpec(id: "groq", baseUrl: "https://api.groq.com/openai/v1",
+      envVar: "GROQ_API_KEY", requiresKey: true),
+    ProviderSpec(id: "together", baseUrl: "https://api.together.ai/v1",
+      envVar: "TOGETHER_API_KEY", requiresKey: true),
+    ProviderSpec(id: "cerebras", baseUrl: "https://api.cerebras.ai/v1",
+      envVar: "CEREBRAS_API_KEY", requiresKey: true),
+    ProviderSpec(id: "ollama", baseUrl: "http://localhost:11434/v1",
+      envVar: "OLLAMA_API_KEY", requiresKey: false),
+    ProviderSpec(id: "llamacpp", baseUrl: "http://127.0.0.1:8080/v1",
+      envVar: "LLAMACPP_API_KEY", requiresKey: false)]
+
+proc findProvider*(id: string): Option[ProviderSpec] =
+  ## The table entry for `id`, or `none` when this build does not carry it.
+  for spec in knownProviders():
+    if spec.id == id:
+      return some(spec)
+  none(ProviderSpec)
+
+proc newProvider*(spec: ProviderSpec, apiKey: string, baseUrl = "",
+    transport: Transport = nil): Provider =
+  ## The provider a table entry describes. A non-empty `baseUrl` overrides the
+  ## entry's endpoint (a gateway whose URL differs, or a provider the table does
+  ## not carry); `transport` injects the wire transport (the pi `client` option
+  ## pattern) and nil uses the production chronos transport. An EMPTY `apiKey`
+  ## is a keyless provider: the wire sends no Authorization header at all.
+  let url = if baseUrl.len > 0: baseUrl else: spec.baseUrl
+  let wire = if transport.isNil: Transport(newChronosTransport()) else: transport
+  Provider(name: spec.id, apiKey: apiKey, baseUrl: url, transport: wire)
+
 proc openAI*(apiKey: string, baseUrl = "", transport: Transport = nil): Provider =
   ## OpenAI-compatible provider over chat completions. `baseUrl` overrides the
   ## endpoint (a BASE url; "/chat/completions" is appended), so any compatible
   ## gateway (OpenRouter, DeepInfra, a local server) works. `transport`
   ## injects the wire transport (the pi `client` option pattern); nil uses the
   ## production chronos transport. neopi speaks chat completions; the switch
-  ## from the Responses API is intentional.
-  let url = if baseUrl.len > 0: baseUrl else: defaultOpenAiBase
-  let wire = if transport.isNil: Transport(newChronosTransport()) else: transport
-  Provider(name: "openai", apiKey: apiKey, baseUrl: url, transport: wire)
+  ## from the Responses API is intentional. The endpoint comes from the table
+  ## entry, so this and `--provider openai` cannot drift apart.
+  newProvider(openAiSpec, apiKey, baseUrl, transport)
 
 proc openRouter*(apiKey: string, transport: Transport = nil): Provider =
   ## OpenRouter provider over its OpenAI-compatible chat completions API.
   ## `transport` injects the wire transport; nil uses the production chronos
-  ## transport.
-  let wire = if transport.isNil: Transport(newChronosTransport()) else: transport
-  Provider(name: "openrouter", apiKey: apiKey, baseUrl: defaultOpenRouterBase,
-    transport: wire)
+  ## transport. The endpoint comes from the table entry.
+  newProvider(openRouterSpec, apiKey, "", transport)
 
 proc scriptedProvider*(steps: seq[ScriptStep]): Provider =
   ## Deterministic provider for tests: one scripted reply per request, served

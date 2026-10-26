@@ -210,6 +210,17 @@ suite "the openai provider on the wire":
     check headers[0] == ("Authorization", "Bearer test-key")
     check headers[1] == ("Content-Type", "application/json")
 
+  test "a keyless provider sends no Authorization header":
+    # An empty key means the header is absent altogether: a local server
+    # (ollama, llama.cpp) must never receive a `Bearer ` with nothing after it.
+    check chatHeaders("") == @[("Content-Type", "application/json")]
+    check buildModelsRequest("http://localhost:11434/v1", "").headers.len == 0
+
+  test "the models request still carries the bearer key":
+    # The keyed catalog request is unchanged by the keyless rule above.
+    check buildModelsRequest("https://x/v1", "test-key").headers ==
+      @[("Authorization", "Bearer test-key")]
+
   test "streamChat streams the deltas and returns the response":
     let fake = newFakeTransport()
     fake.canned(200, @[
