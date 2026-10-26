@@ -16,7 +16,7 @@ config file you own, the `require` mechanism loads what it references.
 1. Build and test (Nim 2.2; the suite is self-contained):
 
    ```bash
-   nimble test                          # 148 Nim tests + 19 busted specs; the live check needs a key
+   nimble test                          # 204 Nim tests + 22 busted specs; the live check needs a key
    nim c -o:build/neopi src/neopi.nim   # the binary (print mode + the TUI)
    ```
 
@@ -27,11 +27,16 @@ config file you own, the `require` mechanism loads what it references.
    ./build/neopi "fix the failing test in tests/foo.nim"
    ```
 
-   Options: `--provider openai|openrouter` (default openrouter),
-   `--model <id>` (default `inclusionai/ling-3.0-flash-vl`). Keys neopi
-   reads: `<PROVIDER>_API_KEY`, optionally `<PROVIDER>_MODEL` (there is no
-   `.env.example` template). The print mode needs that key; the TUI does not
-   — it starts without one and `/login` asks for it.
+   Options: `--provider=<id>` (a table entry — see below; default
+   openrouter), `--model=<id>` (default `inclusionai/ling-3.0-flash-vl`), and
+   `--base-url=<url>` to point an entry at another endpoint (a gateway, or a
+   provider the table does not carry). **The value attaches with `=`** (or
+   `:`): this CLI's parser reads `--provider x` as a positional argument, so
+   the space-separated form fails with "expected one prompt argument" (a known
+   limit below). Keys neopi reads: `<PROVIDER>_API_KEY`, optionally
+   `<PROVIDER>_MODEL` (there is no `.env.example` template). The print mode
+   needs that key; the TUI does not — it starts without one and `/login` asks
+   for it.
 
 3. Or open the interactive TUI (no prompt argument):
 
@@ -54,8 +59,9 @@ config file you own, the `require` mechanism loads what it references.
    cancels), **/new** starts a fresh session, **/compact** summarizes the
    conversation now (it waits for the model), **/model** lists the provider's
    real catalog and switches the model, **/login** asks for the provider's API
-   key in a masked line that never enters the session, **/logout** drops it,
-   and **/quit** (or Ctrl+C) exits.
+   key in a masked line that never enters the session and saves it to
+   `~/.neopi/auth.json`, **/logout** drops the live provider and that saved
+   key, and **/quit** (or Ctrl+C) exits.
    Dragging the mouse over the transcript selects text, and the selection
    copies to the clipboard. The transcript renders the deltas live, and the model's thinking
    arrives as a collapsed item you can expand with Ctrl+O.
@@ -73,6 +79,36 @@ config file you own, the `require` mechanism loads what it references.
 The build needs a disk-backed `TMPDIR` (`/tmp` is a small tmpfs here) and the
 Nim toolchain; the run itself needs nothing beyond the binary and the runtime
 (see [AGENTS.md](AGENTS.md) for the full build recipe).
+
+## Providers and the key
+
+The built-in table holds the OpenAI-compatible endpoints this build knows:
+
+| id | endpoint | key |
+|---|---|---|
+| `openai`, `openrouter` | the two neopi exercises | `<ID>_API_KEY`, required |
+| `deepseek`, `groq`, `together`, `cerebras` | four endpoints a real client reaches with this same wire | `<ID>_API_KEY`, required |
+| `ollama`, `llamacpp` | `http://localhost:11434/v1`, `http://127.0.0.1:8080/v1` | keyless |
+
+A provider the table does not carry is one flag away (`--base-url=`).
+**Keyless means a key is not REQUIRED, not that it is ignored**: an entry keeps
+its variable, so a local server started with a key still receives it. `/model`
+lists whatever the endpoint reports; `/login` opens the provider's key.
+
+**Where the key lives.** `/login` installs the key in the live provider AND
+saves it to `~/.neopi/auth.json` (`NEOPI_CONFIG_DIR` overrides the directory),
+owner-only — a `0700` directory and a `0600` file — with one entry per provider
+in pi's shape:
+
+```json
+{"openrouter": {"type": "api_key", "key": "sk-..."}}
+```
+
+`/logout` removes that entry along with the live provider. A start resolves a
+key in this order: **the stored credential first** (a saved key owns its
+provider), then `<ID>_API_KEY` in the environment, then the project's `.env`. A
+file that is not valid JSON is never rewritten — `/login` reports it instead —
+so the other providers' keys survive a broken one.
 
 ## What it is
 
@@ -138,6 +174,15 @@ sink hands the app its events and lets it dispatch).
 - **The stream mapping trusts the wire's tool-call index** — the accumulator
   grows to the index the gateway sends, so a hostile gateway could ask for a
   huge allocation.
+- **`--provider x` (space-separated) does not parse** — this CLI's `parseopt`
+  only binds a value attached with `=` or `:`; with a space the value arrives
+  as a positional argument and the run fails with "expected one prompt
+  argument". Pre-existing (verified against the previous build), not a
+  regression of the provider table: the attached form is the documented one.
+- **The credential file has no cross-process lock** — the write is atomic (a
+  temp file plus a rename), so the file never corrupts, but two TUIs logging in
+  at the same instant can lose one write. The first concurrent consumer, or
+  OAuth's refresh, is the trigger to add one.
 - **Lexical confinement** — path checks do not resolve symlinks; a symlink
   inside the workspace pointing outside it is followed.
 - **The abort during a thinking pause** waits for the next delta (the

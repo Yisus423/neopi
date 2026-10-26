@@ -183,12 +183,76 @@ rule, never a network call.
 
 | ID | What | Spec | Route | Commit |
 |---|---|---|---|---|
-| T1 | The provider table, `--provider <id>` for any entry, `--base-url`, and keyless (no `Authorization` header when the key is empty) | S3, S5 | inline, RED→GREEN | |
-| T2 | `src/neopi/authstore.nim` + `tests/tp_authstore.nim`: the global store — path and modes, read/save/delete per provider, read-modify-write, temp+rename, refuse to clobber a malformed file | S4 | delegated writer (disjoint new files), gate by the parent | |
-| T3 | The wiring: startup resolves through the store (stored wins over env/.env), `/login` saves and installs, `/logout` deletes, `/login` on a keyless entry reports that no key is needed; the print mode resolves the same way | S3, S4 | inline, RED→GREEN | |
-| T4 | Docs: README (the table, `--base-url`, keyless, where the key lives, the precedence, the modes), ROADMAP (#23 to Done with the hashes; a new item for the global `~/.neopi/` — config AND sessions; the deferred extension-registered providers noted) | S1, S3, S4, S5 | inline | |
-| T5 | The close: `## Evidence` with the gates verbatim, the known limits, and the RDD assessment over the slice's range | S1–S5 | inline | |
-| T6 | Independent verification of the credential handling (file modes, no key in any output or session, the precedence matrix, the malformed-file refusal) | S4 | `gentle-ai-verify` (Risk: item 2 — credentials) | |
+| T1 | The provider table, `--provider <id>` for any entry, `--base-url`, and keyless (no `Authorization` header when the key is empty) | S3, S5 | inline, RED→GREEN | `4a6a055` |
+| T2 | `src/neopi/authstore.nim` + `tests/tp_authstore.nim`: the global store — path and modes, read/save/delete per provider, read-modify-write, temp+rename, refuse to clobber a malformed file | S4 | delegated writer, **UNAVAILABLE** (see Evidence) → inline | `94a503b` |
+| T3 | The wiring: startup resolves through the store (stored wins over env/.env), `/login` saves and installs, `/logout` deletes, `/login` on a keyless entry reports that no key is needed; the print mode resolves the same way | S3, S4 | inline, RED→GREEN | `4a6a055` |
+| T4 | Docs: README (the table, `--base-url`, keyless, where the key lives, the precedence, the modes), ROADMAP (#23 to Done with the hashes; the global `~/.neopi/` item; the CLI parse defect the smoke check found) | S1, S3, S4, S5 | inline | this commit |
+| T5 | The close: `## Evidence` with the gates verbatim, the known limits, and the RDD assessment over the slice's range | S1–S5 | inline | this commit |
+| T6 | Independent verification of the credential handling (file modes, no key in any output or session, the precedence matrix, the malformed-file refusal) | S4 | `gentle-ai-verify` — **UNAVAILABLE** (see Evidence) | — |
+
+## Evidence
+
+The gate (the parent, `set -o pipefail`, 2026-10-26):
+
+- `nim c --hints:off --threads:on --mm:orc -o:build/neopi src/neopi.nim` → **exit 0**.
+- `nimble test` → `[Summary] 204 tests run (3.41s): 204 OK, 0 FAILED, 0 SKIPPED` +
+  `22 successes / 0 failures / 0 errors / 0 pending` → **exit 0**. (204 = the 185
+  the tree carried + 19 new: 2 in `tp_openai_compat`, 5 in `tp_provider`, 10 in
+  `tp_authstore`, 2 in `tp_tui`.)
+- The **RED** was observed before each fix, all three suites exiting 1:
+  `tp_openai_compat` compiled but `chatHeaders("")` still carried the bearer
+  header; `tp_provider` → `Error: undeclared identifier: 'knownProviders'`;
+  `tp_tui` → `Check failed: installed.get.name == "deepseek"` (the hardcoded pair
+  rebuilt an OpenRouter provider); `tp_authstore` (T2) → `Error: cannot open
+  file: neopi/authstore`; and T3, before the wiring →
+  `Check failed: loadApiKey("deepseek") == some("sk-ds-1")` plus
+  `Check failed: loadApiKey("openrouter").isNone`.
+- The store's own tests caught two real defects while it was being written: a
+  SIGSEGV from `std/json`'s `node{key}` yielding **nil** (not `JNull`) for a
+  missing key, and `createDir(dir, mode)` not existing in this Nim (the mode is
+  applied after creation, before the secret is written).
+- The CLI smoke check (a temp cwd, `NEOPI_CONFIG_DIR` set): `--help` exit 0 with
+  the new Usage; `--provider=nope "hi"` exit 1 naming the known ids;
+  `--provider=deepseek "hi"` exit 1 naming `DEEPSEEK_API_KEY`;
+  `--provider=ollama --model=m "hi"` builds a **keyless** provider and reaches
+  the wire (the connection fails — no local server — which is the proof it was
+  built).
+- The **differential against the base commit** (`7cfb7b6` cloned to /tmp and
+  built there): identical exit codes and messages for the prompt-only,
+  `--provider=openrouter`, `--model=x` and `--help` cases; the two intended
+  differences are the unknown-provider hint and the print-mode hint. And
+  **`--provider openrouter "hi"` fails the same way in BOTH builds** — the
+  space-separated form is pre-existing (README known limit + ROADMAP #27), not a
+  regression of this slice.
+
+**Verification (T6) — UNAVAILABLE.** The risk line for this slice is item 2
+(credentials), which requires an independent verifier. Both delegated writers
+timed out **before their first tool call** (`prompt accepted; no first run event
+received for model: nvidia/deepseek-ai/deepseek-v4.1-flash`, 0 turns, 0 tool
+calls — the same failure the previous session recorded), so the subagent path is
+down in this session and every task ran inline. The credential rules are covered
+by the parent's own focused tests (the modes, the read-modify-write, the atomic
+write, the refusal, the precedence) and by the smoke check, but **no independent
+verification happened**: that is the user's decision (fix the subagent model and
+relaunch a verifier, or accept the parent's gate).
+
+## Known limits
+
+- **The space-separated option form** (`--provider x`) does not parse; verified
+  pre-existing. Registered as ROADMAP #27 and in the README.
+- **No cross-process lock on the store**: the write is atomic (temp file plus
+  rename), so the file never corrupts, but two TUIs logging in at the same
+  instant can lose one write. Trigger: the first concurrent consumer, or OAuth's
+  refresh.
+- **Live reachability is unexercised for every entry except `openai` and
+  `openrouter`**: the tests pin the table's shape and the header rule, never a
+  network call. `--base-url` is the escape hatch, and the four new entries are
+  the ones pi reaches with this same wire.
+- **The store holds only `api_key` credentials** — no OAuth shape and no
+  provider-scoped `env`, because the scope stopped at OpenAI-compatible
+  providers with a key.
+- **Extensions registering providers stays deferred** (S5): the table is
+  builtin, and no Lua surface changed in this slice.
 
 ## Log
 
