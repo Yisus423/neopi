@@ -3,6 +3,7 @@
 import unittest2
 import tp_provider
 import tp_wire
+import tp_authstore
 import tp_openai_compat
 import tp_lua
 import tp_fs
