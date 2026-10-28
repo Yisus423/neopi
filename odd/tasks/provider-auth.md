@@ -301,6 +301,25 @@ continuation and execute it unchanged; on a correction route, follow it; on a
 (**T6** stays open separately: the independent verifier needs the SUBAGENT path,
 which is the other, unrelated environment failure.)
 
+**Correction, same session — the BOUND is not the wall (measured).** The RDD
+reminder surfaced a SECOND unreviewed candidate: the two docs commits are a
+one-path delta (`odd/tasks/provider-auth.md`, 46 lines) that the frozen 13-path
+slice does not cover. It got its own lineage (`review-0af74e25b393bbc9`, one
+lens: readability) and its single reviewer ALSO ran the relay bound out:
+**913294 ms against a 913134 ms limit for a 15302-byte materialized prompt**. A
+15 KB prompt — a sixth of the slice's 87 KB — burning the same ~15 minutes
+refutes the prompt-size reading: the reviewer's model run is not COMPLETING at
+all, and the shape matches this session's subagent failure (`no first run event
+received`, 0 turns). The relay therefore declared the slot unachievable and the
+provider STOPPED that lineage (`reason_code: unachievable_lens_slot`,
+`mutation_outcome: committed` — the unachievability is recorded, and the slot
+carries a `withdraw` command that re-offers the reviewer if the failure was
+transient). **Consequence for the plan**: raising
+`GENTLE_PI_REVIEW_RELAY_PI_TIMEOUT_MS` buys nothing but a longer wait for the same
+non-completion, and shrinking the candidate cannot help either. What the
+reviewers need is a model that answers in this environment — the same root cause
+as T6's blocker, not a bound and not a scope.
+
 **Where #23 stands**: the code, its tests and the docs are landed (five commits,
 the gate green); what is missing is the OUTSIDE view (the native review) and the
 independent verification. Both are blocked by the environment, not by the
