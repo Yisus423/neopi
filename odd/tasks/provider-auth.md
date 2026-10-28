@@ -275,6 +275,32 @@ continuation: less contention, the same bound), (c) a NEW transaction over the
 high-risk commit alone (`94a503b`, the store — roughly a third of the prompt) so
 the outside view lands where the risk is, or (d) no native review.
 
+**The chosen path (user, same session): raise the bound and retry the group.**
+Set `GENTLE_PI_REVIEW_RELAY_PI_TIMEOUT_MS` (30 min gives ~2x the measured wall;
+the ceiling is 7200000 ms) in the Pi host's environment and restart the session —
+the variable is read when the host starts, not in flight.
+
+**How to resume (the recipe, so nobody rediscovers it).** In the new session:
+`mem_context`, read this record, then bound STATUS:
+`gentle_review` `{"operation":"status","lineageId":"review-8f5ec190e0afd965"}`.
+It reoffers the four materialize slots (revision
+`sha256:4bfa86f635443cd27701e686de9827f473369cf90dcec9eda06484c3f84a28e3`).
+Then submit the group with `gentle_review_capture_group` in provider order
+(risk 0, resilience 1, readability 2, reliability 3) passing the bindings as the
+**bare objects** that the STATUS's `collectBinding` strings contain — the
+wrapper objects exactly as STATUS returns them are REJECTED (`collectBindings
+must be the complete distinct current reviewer group in exact provider order`).
+Submit WITHOUT the acknowledgement first: a fresh forecast is expected (the
+earlier one was relayed and acknowledged, but its run died at launch/timeout
+with nothing admitted, so treat it as a new capture). Relay the forecast
+losslessly, then resubmit the same exact bindings with
+`reviewerRunAcknowledged: true`. From there route only on what comes back: on
+`approved`, ask bound STATUS for the provider's `acknowledge-approved`
+continuation and execute it unchanged; on a correction route, follow it; on a
+`stop`, read its reason code — never rebuild any of it by hand.
+(**T6** stays open separately: the independent verifier needs the SUBAGENT path,
+which is the other, unrelated environment failure.)
+
 **Where #23 stands**: the code, its tests and the docs are landed (five commits,
 the gate green); what is missing is the OUTSIDE view (the native review) and the
 independent verification. Both are blocked by the environment, not by the
