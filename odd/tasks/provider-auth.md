@@ -257,7 +257,25 @@ with the four slots reoffered, so assigning the roles their models lets the
 capture resume on THIS lineage — there is no restart, and no replay of what was
 never run.
 
-**Where #23 stands**: the code, its tests and the docs are landed (four commits,
+**Update, same session — the models are configured; the RELAY BOUND is the new
+wall.** The user assigned models to the `review-*` roles, a bound STATUS
+reoffered the same four slots unchanged, and the acknowledged group capture was
+retried on this same lineage. The reviewers LAUNCHED this time — and the relay
+aborted them at its own bound: `pi-host-relay-timeout`, "aborted after 974767ms
+against a 974703ms limit for a 87035-byte materialized prompt". Nothing was
+admitted (`prepared_reviewers: 0`, `submitted_reviewers: 0`,
+`mutation_outcome: none`), so the authority is untouched and the four slots stay
+reoffered. The relay's own advice: raise
+`GENTLE_PI_REVIEW_RELAY_PI_TIMEOUT_MS` above the reviewer's real wall time
+(ceiling 7200000 ms) or shrink the materialized prompt — and it warns that
+relaunching the same slot unchanged reaches the SAME wall. So the open choice is
+the user's: (a) raise that bound in the Pi host and retry the group on this
+lineage, (b) four sequential single-slot captures (the bridge's prescribed
+continuation: less contention, the same bound), (c) a NEW transaction over the
+high-risk commit alone (`94a503b`, the store — roughly a third of the prompt) so
+the outside view lands where the risk is, or (d) no native review.
+
+**Where #23 stands**: the code, its tests and the docs are landed (five commits,
 the gate green); what is missing is the OUTSIDE view (the native review) and the
 independent verification. Both are blocked by the environment, not by the
 change, and both are the user's call.
