@@ -116,6 +116,55 @@ shared `MenuKind`, the status line for feedback.
 | T4 | Docs: README (the picker, its two modes, the states) + ROADMAP's row when the slice closes | S1-S5 | inline | |
 | T5 | The close: `## Evidence` with the gates, the known limits, slice B's handoff | S1-S6 | inline | |
 
+## Evidence
+
+The gate (the parent, 2026-11-02): `nim c --hints:off --threads:on --mm:orc
+-o:build/neopi src/neopi.nim` → **exit 0**; `nimble test` → `[Summary] 213 tests
+run (3.52s): 213 OK, 0 FAILED, 0 SKIPPED` + `22 successes / 0 failures /
+0 errors / 0 pending` → **exit 0**. (213 = the 204 the tree carried + 9: 4 in
+`tp_provider`, 5 in `tp_tui`.)
+
+The RED came before each fix and was observed, not assumed: T1 → `Error:
+undeclared field: 'label'` with `exit=1`; T2 → `Error: undeclared identifier:
+'openProvider'` with `exit=1`; T3 ran against the rewired tests and the SUITE
+found the seventh one the inventory missed (`Ctrl+C exits with a dialog open`
+types `/login` without saying so in its name).
+
+Three test rounds were the TESTS' fault, and each is written where it was
+learned: `updatePickerSearch` is private, so the tests drive the picker by typing
+(the production path) instead of calling it; and `"llama"` matches **Ollama**
+too — the matcher is a fuzzy subsequence — so the by-id case uses the full id.
+
+`logout` was deleted on the **blast radius** (`codegraph`), not on a hunch: after
+the rewire nothing called it. The same call taught a caveat worth keeping: the
+index re-reads its SOURCE blocks from disk, but the caller graph can lag a file
+that was just edited (`logout` was not listed while `runCommand` still called
+it), so a stale-looking radius is a reason to look, never a licence to skip the
+look.
+
+## Known limits
+
+- **A pick rebuilds the live provider from the store and the environment**, so a
+  `--base-url` given on the command line does not follow a pick. `/login`'s
+  answer dropped it too, so this is not new — it is the same behaviour, now
+  reachable one step earlier.
+- **The picker lists the built-in table**: extensions registering a provider stay
+  deferred (S5 of `provider-auth`), and `--base-url` is the way to reach an
+  endpoint the table does not carry.
+- **The active provider is not preselected**: the picker opens on the first row,
+  so configuring the provider you are already on costs a type or two arrows. pi
+  opens the same way.
+- **The switch lives inside `/login` until slice B**: a pick moves the
+  conversation to that provider and asks for its key, and escaping the question
+  leaves the switch (it was the pick, not the answer). There is no command that
+  ONLY switches; that path arrives with `/model` across providers.
+- **`/logout` drops the picked entry's credential**, and clears the live provider
+  only when it was the one it pointed at: logging out of a provider is not a
+  request to start talking to it.
+- **The search is the shared fuzzy matcher** (a case-insensitive subsequence), so
+  short queries land on several entries — `llama` hits Ollama as well. The search
+  text is the label, the id AND the variable.
+
 ## Log
 
 - **L1** (2026-11-01, the request, verbatim): "Deberíamos meter una seleccion de
