@@ -96,10 +96,12 @@ shared `MenuKind`, the status line for feedback.
   `Together AI`, `llama.cpp`). The help that already builds itself from the table
   keeps printing the ID — that is what you type — while the picker prints the
   label: what you read.
-- **Slice B's handoff** (written here so it is not rediscovered): the cache is
-  per provider (`{models, checkedAt}` at least, validators if we take the
-  conditional path), written through the store's atomic write, restored before
-  the fetch; `/model` lists every configured provider's models as
+- **Slice B's handoff** (written here so it is not rediscovered): the cache
+  lives in **`~/.neopi/models-store.json`** — pi's file name, the user's call
+  ("creo que deberíamos usar el mismo nombre que pi en vez de catalogs.json"),
+  one entry per provider (`{models, checkedAt}` at least, plus the validators if
+  we take the conditional path), written through the store's atomic write and
+  **restored before the fetch**; `/model` lists every configured provider's models as
   `id [provider]`, with the header "Only showing models from configured
   providers" and the counter; the non-blocking refresh waits for #16, which is
   where the loop's async mechanism lands.
@@ -108,9 +110,9 @@ shared `MenuKind`, the status line for feedback.
 
 | ID | What | Spec | Route | Commit |
 |---|---|---|---|---|
-| T1 | `label` on `ProviderSpec` + the pure row/state builder with its tests | S3, S4 | inline, RED→GREEN | |
-| T2 | The picker: `mkProvider`, the two titles, the selection action, the composer search | S2, S4 | inline, RED→GREEN | |
-| T3 | The wiring: `/login` and `/logout` open it; configure asks and saves for the picked entry; logout deletes that entry; the active provider moves | S4 | inline, RED→GREEN | |
+| T1 | `label` on `ProviderSpec` + the pure row/state builder with its tests | S3, S4 | inline, RED→GREEN | `d9e9b59` |
+| T2 | The picker: `mkProvider`, the two titles, the selection action, the composer search | S2, S4 | inline, RED→GREEN | `747e746` |
+| T3 | The wiring: `/login` and `/logout` open it; configure asks and saves for the picked entry; logout deletes that entry; the active provider moves | S4 | inline, RED→GREEN — and it rewrites the six existing tests that assume `/login` opens the question directly (`/login opens a masked question…`, `answering /login installs…`, `/login installs the provider the TABLE declares`, `Esc on the /login question…`, `/logout clears the provider…`, `the composer takes the keys again after the /login question closes`): each gains the picker step, and none of their assertions may be dropped to make that easier | |
 | T4 | Docs: README (the picker, its two modes, the states) + ROADMAP's row when the slice closes | S1-S5 | inline | |
 | T5 | The close: `## Evidence` with the gates, the known limits, slice B's handoff | S1-S6 | inline | |
 
