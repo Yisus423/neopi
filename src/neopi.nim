@@ -22,18 +22,33 @@ const DefaultModel = "inclusionai/ling-3.0-flash-vl"
   ## The tp_real default (openrouter-flavored); override with --model or
   ## <PROVIDER>_MODEL.
 
-const Usage = """Usage:
-  neopi "prompt" [--provider <id>] [--model <id>] [--base-url <url>]
-  neopi [--provider <id>] [--model <id>] [--base-url <url>]
-
-Options:
-  --provider <id>  a built-in provider: openai, openrouter, deepseek, groq,
-                   together, cerebras, ollama, llamacpp (default openrouter)
-  --model <id>     the model to request (the default is <PROVIDER>_MODEL, else
-                   the built-in default)
-  --base-url <url> overrides the provider's endpoint: a gateway whose URL
-                   differs, or an endpoint the table does not carry
-"""
+proc usage(): string =
+  ## The help text, built from the provider TABLE so the list can never drift
+  ## from what `--provider` accepts: every entry's id, the endpoint it targets
+  ## and the variable its key comes from (or that it needs none). The synopsis
+  ## spells the `=` form because that is the one this CLI parses — a
+  ## space-separated value arrives as a positional argument.
+  var providers = ""
+  for spec in knownProviders():
+    let key = if spec.requiresKey: spec.envVar else: "keyless"
+    providers.add "  " & spec.id.alignLeft(11) & spec.baseUrl.alignLeft(36) &
+      key & "\n"
+  result = "Usage:\n" &
+    "  neopi \"prompt\" [--provider=<id>] [--model=<id>] [--base-url=<url>]\n" &
+    "  neopi [--provider=<id>] [--model=<id>] [--base-url=<url>]\n" &
+    "\n" &
+    "Options:\n" &
+    "  --provider=<id>   which provider to use (default openrouter)\n" &
+    "  --model=<id>      the model to request: <PROVIDER>_MODEL when set, else\n" &
+    "                    " & DefaultModel & "\n" &
+    "  --base-url=<url>  overrides the endpoint — a gateway whose URL differs,\n" &
+    "                    or one the table does not carry\n" &
+    "\n" &
+    "Providers:\n" & providers &
+    "\n" &
+    "The key comes from " & authFilePath() & " (a stored credential\n" &
+    "wins), then the provider's variable, then the project's .env; a keyless\n" &
+    "server needs none. The TUI's /login writes the store.\n"
 
 proc fatal(msg: string) {.noreturn.} =
   ## A clear failure message on stderr and a non-zero exit.
@@ -220,13 +235,13 @@ proc main() =
       of "model": modelId = val
       of "base-url": baseUrl = val
       of "h", "help":
-        stdout.writeLine(Usage)
+        stdout.writeLine(usage())
         quit(0)
       else:
-        fatal("unknown option --" & key & "; " & Usage)
+        fatal("unknown option --" & key & "; " & usage())
     of cmdArgument:
       if sawPrompt:
-        fatal("expected one prompt argument; " & Usage)
+        fatal("expected one prompt argument; " & usage())
       prompt = key
       sawPrompt = true
     of cmdEnd: discard
