@@ -325,6 +325,20 @@ the gate green); what is missing is the OUTSIDE view (the native review) and the
 independent verification. Both are blocked by the environment, not by the
 change, and both are the user's call.
 
+**Closed by the switch, not by a verdict (2026-11-01).** The user turned
+receipt-driven development OFF, so everything above is HISTORY: no review ever
+ran to completion, no lineage was consumed, and nothing here approves the slice.
+What the section leaves is the evidence of two environment failures and one
+measured lesson — the reviewer's model never completed a run (15 KB and 87 KB
+both burned the whole relay bound), the same root cause as T6's blocker — plus
+what the authority still holds: lineage `review-8f5ec190e0afd965` (`reviewing`,
+its four slots reoffered, nothing consumed) and lineage
+`review-0af74e25b393bbc9` (stopped, its single readability slot recorded
+unachievable, withdrawable only if that failure was transient). The process
+corollary worth keeping: documenting the review INSIDE the reviewed file mints a
+new candidate per commit — three targets (`9248d61c`, `4a76883c`, `819164ea`)
+came from that alone.
+
 ## Known limits
 
 - **The space-separated option form** (`--provider x`) does not parse; verified
