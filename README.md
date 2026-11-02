@@ -58,10 +58,14 @@ config file you own, the `require` mechanism loads what it references.
    tool output; **/resume** opens the sessions picker (Enter loads, Esc
    cancels), **/new** starts a fresh session, **/compact** summarizes the
    conversation now (it waits for the model), **/model** lists the provider's
-   real catalog and switches the model, **/login** asks for the provider's API
-   key in a masked line that never enters the session and saves it to
-   `~/.neopi/auth.json`, **/logout** drops the live provider and that saved
-   key, and **/quit** (or Ctrl+C) exits.
+   real catalog and switches the model, **/login** and **/logout** open the
+   provider picker — every entry of the table with its label and its state
+   (`stored`, `env: VAR`, `keyless`, `not configured`), the composer as its
+   search field, and pi's two titles: "Select provider to configure:" and
+   "Select provider to logout:" — where picking a provider makes it the active
+   one and opens the masked question for ITS key (saved to
+   `~/.neopi/auth.json`, never into the session), while the logout mode drops
+   that entry's saved credential, and **/quit** (or Ctrl+C) exits.
    Dragging the mouse over the transcript selects text, and the selection
    copies to the clipboard. The transcript renders the deltas live, and the model's thinking
    arrives as a collapsed item you can expand with Ctrl+O.
@@ -93,7 +97,9 @@ The built-in table holds the OpenAI-compatible endpoints this build knows:
 A provider the table does not carry is one flag away (`--base-url=`).
 **Keyless means a key is not REQUIRED, not that it is ignored**: an entry keeps
 its variable, so a local server started with a key still receives it. `/model`
-lists whatever the endpoint reports; `/login` opens the provider's key.
+lists whatever the endpoint reports; `/login` opens the picker over this table
+— each entry with its label and its state — and `/logout` opens the same picker
+to drop a credential.
 
 **Where the key lives.** `/login` installs the key in the live provider AND
 saves it to `~/.neopi/auth.json` (`NEOPI_CONFIG_DIR` overrides the directory),
