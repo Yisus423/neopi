@@ -950,6 +950,11 @@ suite "the /login and /logout builtins":
       wireApp(addr st, L, st.app)
       st.inputW.setText("/login")
       sendTurn(addr st, L)
+      # The picker first, then that entry's question: /login configures THROUGH
+      # the picker (the user's call), and the picker leaves the composer empty.
+      check st.menuKind == mkProvider
+      typeText(backend, addr st, "openrouter")
+      pressKey(backend, addr st, keyEnter)
       # The core's own question, with no Lua callback: the widget is masked free
       # text and the composer is empty (the key never reaches it).
       check not st.question.isNil
@@ -1144,6 +1149,10 @@ suite "the /login and /logout builtins":
       wireApp(addr st, L, st.app)
       st.inputW.setText("/login")
       sendTurn(addr st, L)
+      # The pick is what decides which provider is being configured — the point
+      # of the table replacing the hardcoded pair.
+      typeText(backend, addr st, "deepseek")
+      pressKey(backend, addr st, keyEnter)
       for c in "sk-ds-1":
         backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
       backend.events.add UiEvent(kind: uiKey, key: keyEnter)
@@ -1179,6 +1188,8 @@ suite "the /login and /logout builtins":
       check currentProvider(L).isNone
       st.inputW.setText("/login")
       sendTurn(addr st, L)
+      typeText(backend, addr st, "openrouter")
+      pressKey(backend, addr st, keyEnter)
       for c in "sk-or-1":
         backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
       backend.events.add UiEvent(kind: uiKey, key: keyEnter)
@@ -1214,9 +1225,15 @@ suite "the /login and /logout builtins":
       let backend = wireFakeApp(addr st)
       exposeTuiSink(L, addr st, "scripted")
       wireApp(addr st, L, st.app)
-      setProvider(L, some(openRouter("before")))
+      # A STORED credential, which is how a live provider gets its key in
+      # production (the `/login` answer saves it too): the pick rebuilds the
+      # live provider from the store, so a key that lived only in the session
+      # would be gone before the question ever opened.
+      saveApiKey("openrouter", "before")
       st.inputW.setText("/login")
       sendTurn(addr st, L)
+      typeText(backend, addr st, "openrouter")
+      pressKey(backend, addr st, keyEnter)
       backend.events.add UiEvent(kind: uiKey, key: keyEscape)
       discard pumpApp(addr st)
       # A cancel is "no change": the same provider is still live, and the
@@ -1251,6 +1268,11 @@ suite "the /login and /logout builtins":
       check loadApiKey("openrouter").isSome
       st.inputW.setText("/logout")
       sendTurn(addr st, L)
+      # The same picker in its other mode, and the pick is what names the entry
+      # being dropped.
+      check st.menuKind == mkProvider
+      typeText(backend, addr st, "openrouter")
+      pressKey(backend, addr st, keyEnter)
       # The provider holder is empty and the status line reports it.
       check currentProvider(L).isNone
       check st.transcriptW.transcript.items[^1].kind == tikStatus
@@ -1325,6 +1347,8 @@ suite "the /model builtin":
       wireApp(addr st, L, st.app)
       st.inputW.setText("/login")
       sendTurn(addr st, L)
+      typeText(backend, addr st, "openrouter")
+      pressKey(backend, addr st, keyEnter)
       # Production-shape: while the modal question is open, a NON-key event (a
       # terminal focus report, a resize, the wheel) reaches nimterm's tree
       # dispatch — wireApp claims the keys and only the keys — and with the
@@ -1362,8 +1386,13 @@ suite "the /model builtin":
       let backend = wireFakeApp(addr st)
       exposeTuiSink(L, addr st, "scripted")
       wireApp(addr st, L, st.app)
+      discard freshConfig("neopi-tp-tui-ctrlc-dialog-auth")
       st.inputW.setText("/login")
       sendTurn(addr st, L)
+      # /login opens the picker now; the masked question is one pick away, and
+      # the dialog this test is about is the one that follows it.
+      typeText(backend, addr st, "openrouter")
+      pressKey(backend, addr st, keyEnter)
       check not st.question.isNil
       # Ctrl+C is the app's exit, and the dialog must not swallow it: the
       # question handles Esc, the arrows, Enter and the editing keys, and

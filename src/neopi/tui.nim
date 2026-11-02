@@ -1225,19 +1225,6 @@ proc openLogin(state: ptr TuiState) =
   setQuestion(state, newQuestion(title, options, allowFreeText = true,
     secret = true), fnRef = 0, boolean = false, purpose = qpLogin)
 
-proc logout(state: ptr TuiState) =
-  ## Drop the live provider AND its stored credential: the next turn has none
-  ## until `/login` installs one, and the next START has none either. The feedback
-  ## names the environment variable the key would come from — the key itself is
-  ## never echoed, and it never entered the session either.
-  setProvider(state[].lua, none(Provider))
-  try:
-    deleteApiKey(state[].provider)
-  except AuthStoreError as e:
-    appendStatusLine(state, "the stored credential was not removed: " & e.msg)
-  appendStatusLine(state, "logged out: no provider (set " &
-    providerEnvVar(state[].provider) & " or run /login)")
-
 proc pushLuaModel(L: LuaState, id: string) =
   ## Rebind the model string the loop's chunk reads on every turn
   ## (`neopi._tuiModel`), so the very next turn asks for the new model. A nil
@@ -1426,12 +1413,15 @@ proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
     quitTui(state)
     return
   if command == "/login":
+    # The picker first (the user's call): /login configures the provider it
+    # picks, through pi's "Select provider to configure:" list.
     state[].inputW.clear()
-    openLogin(state)
+    openProvider(state, ppmConfigure)
     return
   if command == "/logout":
+    # The same component in its other mode, pi's "Select provider to logout:".
     state[].inputW.clear()
-    logout(state)
+    openProvider(state, ppmLogout)
     return
   if command == "/model":
     state[].inputW.clear()
