@@ -112,6 +112,16 @@ proc findProvider*(id: string): Option[ProviderSpec] =
       return some(spec)
   none(ProviderSpec)
 
+proc findProviderByLabel*(label: string): Option[ProviderSpec] =
+  ## The entry whose human label is `label`. The picker resolves a selection by
+  ## the row it shows — the Menu carries the label, not the id — and the labels
+  ## are unique, a property the table's own test pins, so this cannot quietly
+  ## answer with the wrong provider.
+  for spec in knownProviders():
+    if spec.label == label:
+      return some(spec)
+  none(ProviderSpec)
+
 proc providerState*(spec: ProviderSpec): ProviderState =
   ## The entry's configuration state. A STORED credential wins (pi's rule: a
   ## saved key owns its provider), then the entry's variable — which `.env` has

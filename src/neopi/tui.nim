@@ -321,8 +321,15 @@ type
   MenuKind* = enum
     ## Which menu the floating slot holds. They share the widget and the rows
     ## above the composer, but not the key map: Tab completes a command into
-    ## the composer, Enter resumes a session, Enter picks a model.
-    mkNone, mkResume, mkModel, mkCompletion
+    ## the composer, Enter resumes a session, Enter picks a model, Enter picks a
+    ## provider.
+    mkNone, mkResume, mkModel, mkProvider, mkCompletion
+
+  ProviderPickerMode* = enum
+    ## Which job the provider picker was opened for — pi's two titles over one
+    ## component. `ppmConfigure` moves the active provider there and asks for its
+    ## key; `ppmLogout` drops that entry's stored credential.
+    ppmConfigure, ppmLogout
 
   QuestionPurpose* = enum
     ## Where a question's answer goes. The extension UI's dialogs deliver to a
@@ -379,6 +386,9 @@ type
       ## The search text of each `pickerSource` entry, in the same order. It is
       ## built where the picker opens (the model picker leads with the provider,
       ## pi's rule: a provider-prefixed query must not lose to a proxy id).
+    pickerMode*: ProviderPickerMode
+      ## Which job the OPEN provider picker is doing. The other pickers do not
+      ## need it: their kind already says what they are.
     chrome*: Chrome
       ## The extension-filled chrome (the header rows, the keyed status rows and
       ## the placed blocks), shared by reference with the root widget.
@@ -949,7 +959,7 @@ proc closeMenu(state: ptr TuiState) =
   ## question answered by a menu that is no longer on screen — which is how an
   ## Esc on the picker silently disabled the completion. The completion has its
   ## own closer, because its Esc must keep the draft.
-  if state[].menuKind notin {mkResume, mkModel}:
+  if state[].menuKind notin {mkResume, mkModel, mkProvider}:
     return
   state[].menuKind = mkNone
   state[].menu = nil
@@ -979,7 +989,7 @@ proc updatePickerSearch(state: ptr TuiState) =
   ## the source whole (and puts the row back where it was, pi's rule); no match
   ## leaves the picker empty but OPEN, so backspacing brings the list back and
   ## Esc still closes it.
-  if state[].menuKind notin {mkResume, mkModel}:
+  if state[].menuKind notin {mkResume, mkModel, mkProvider}:
     return
   if state[].menu.isNil or state[].pickerSource.len == 0:
     return
@@ -1007,11 +1017,11 @@ proc updateCompletion(state: ptr TuiState, L: LuaState) =
   ## inside paint.
   ##
   ## An open picker is not the completion's to touch: it belongs to
-  ## `openResume`/`openModel` and to `updatePickerSearch`. Without this the
-  ## completion would compute a prefix from the picker's query, find no match
-  ## and close the slot — which is how a kind could outlive or kill a menu it
-  ## does not own.
-  if state[].menuKind in {mkResume, mkModel}:
+  ## `openResume`/`openModel`/`openProvider` and to `updatePickerSearch`. Without
+  ## this the completion would compute a prefix from the picker's query, find no
+  ## match and close the slot — which is how a kind could outlive or kill a menu
+  ## it does not own.
+  if state[].menuKind in {mkResume, mkModel, mkProvider}:
     return
   let prefix = completionPrefix(state[].inputW.text, state[].inputW.cursor)
   var matches: seq[MenuItem] = @[]
@@ -1308,6 +1318,84 @@ proc openModel(state: ptr TuiState, L: LuaState) =
   state[].menu = newMenu(items, title = "pick a model:")
   if not state[].screen.isNil:
     state[].screen.menu = state[].menu
+
+proc providerItems*(): seq[MenuItem] =
+  ## The provider picker's rows: the entry's human label, and its configuration
+  ## state as the Menu's description — the two things a row has to say.
+  for spec in knownProviders():
+    result.add MenuItem(label: spec.label, description: providerStateText(spec))
+
+proc openProvider*(state: ptr TuiState, mode: ProviderPickerMode) =
+  ## Open the provider picker: every entry of the table with its label and its
+  ## state, the composer as its search field (the shared picker plumbing), and
+  ## the title of the job it was opened for — pi's two titles, one component.
+  state[].pickerMode = mode
+  state[].pickerSource = providerItems()
+  state[].pickerText = @[]
+  for spec in knownProviders():
+    # The label is what you read and the id is what you type: both have to land,
+    # and the variable is a third way in for someone who knows it by heart.
+    state[].pickerText.add spec.label & " " & spec.id & " " & spec.envVar
+  state[].menuKind = mkProvider
+  state[].menu = newMenu(state[].pickerSource,
+    title = if mode == ppmConfigure: "Select provider to configure:"
+            else: "Select provider to logout:")
+  if not state[].inputW.isNil:
+    # The composer becomes the picker's query field, as it does for the other
+    # pickers: the command that opened it leaves no draft behind.
+    state[].inputW.clear()
+  if not state[].screen.isNil:
+    state[].screen.menu = state[].menu
+
+proc setActiveProvider*(state: ptr TuiState, L: LuaState, spec: ProviderSpec) =
+  ## Move the active provider: the state's name, the footer, and the live holder
+  ## the `neopi.provider` closures read. The key comes from the store first (a
+  ## stored credential owns its provider, pi's rule) and then from the entry's
+  ## variable. An entry with no key yet is still installed — the question that
+  ## follows a configure pick is what fills it, and a turn before that reports
+  ## the failure instead of quietly talking to the previous provider.
+  let stored = loadApiKey(spec.id)
+  let key = if stored.isSome: stored.get else: getEnv(spec.envVar)
+  state[].provider = spec.id
+  if not L.isNil:
+    setProvider(L, some(newProvider(spec, key)))
+  refreshFooter(state)
+
+proc pickProvider*(state: ptr TuiState, L: LuaState, item: MenuItem) =
+  ## Act on the provider picker's selection, with the MODE deciding what a pick
+  ## means. `ppmConfigure` moves the active provider and opens the masked key
+  ## question for it — the answer's destination is the state's provider, so the
+  ## existing answer path saves it for the entry that was just picked.
+  ## `ppmLogout` drops that entry's stored credential, and the live provider only
+  ## when it was the one it pointed at: logging out of a provider is not a
+  ## request to start talking to it.
+  ##
+  ## Every string is materialized BEFORE the menu is released: a string taken
+  ## from a widget is good only for as long as that widget lives (the NUL in the
+  ## status line `setModel` paid for).
+  let label = item.label & ""
+  let spec = findProviderByLabel(label)
+  if spec.isNone:
+    closeMenu(state)
+    return
+  case state[].pickerMode
+  of ppmConfigure:
+    setActiveProvider(state, L, spec.get)
+    closeMenu(state)
+    openLogin(state)
+  of ppmLogout:
+    var line = "logged out of " & label
+    try:
+      deleteApiKey(spec.get.id)
+    except AuthStoreError as e:
+      line = label & ": the stored credential was not removed: " & e.msg
+    if state[].provider == spec.get.id:
+      if not L.isNil:
+        setProvider(L, none(Provider))
+      line.add(" — no provider now: set " & spec.get.envVar & " or run /login")
+    closeMenu(state)
+    refreshFooter(state)
+    appendStatusLine(state, line)
 
 proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
   ## Dispatch a /-prefixed composer input: the core's own builtins (/resume,
@@ -1996,6 +2084,23 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
         let menu = state[].screen.menu
         if menu.items.len > 0:
           setModel(state, L, menu.items[menu.selected].label)
+        return eventHandled
+      of keyEscape:
+        closeMenu(state)
+        app.invalidate()
+        return eventHandled
+      else:
+        discard
+    elif menuOpen and state[].menuKind == mkProvider:
+      case event.key
+      of keyUp, keyDown, keyPageUp, keyPageDown:
+        let response = state[].screen.menu.handle(event)
+        app.invalidate()
+        if response.handled: return response
+      of keyEnter:
+        let menu = state[].screen.menu
+        if menu.items.len > 0:
+          pickProvider(state, L, menu.items[menu.selected])
         return eventHandled
       of keyEscape:
         closeMenu(state)

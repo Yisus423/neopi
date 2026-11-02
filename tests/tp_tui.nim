@@ -966,6 +966,158 @@ suite "the /login and /logout builtins":
       removeDir(root)
       removeFile(path)
 
+  test "the provider picker lists every entry with its label and its state":
+    let root = freshWorkspace("neopi-tp-tui-provider-list")
+    let path = freshSessionPath("provider-list")
+    discard freshConfig("neopi-tp-tui-provider-list-auth")
+    putEnv("GROQ_API_KEY", "sk-env")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      openProvider(addr st, ppmConfigure)
+      check st.menuKind == mkProvider
+      check not st.screen.menu.isNil
+      check st.screen.menu.title == "Select provider to configure:"
+      # Every table entry, in the table's order, with the state the store and
+      # the environment give it.
+      let items = st.screen.menu.items
+      check items.len == knownProviders().len
+      check items[0].label == "OpenAI"
+      check items[0].description == "not configured"
+      check items[3].label == "Groq"
+      check items[3].description == "env: GROQ_API_KEY"
+      check items[6].label == "Ollama"
+      check items[6].description == "keyless"
+      check items[7].label == "llama.cpp"
+      # The other mode is the same component with pi's other title.
+      openProvider(addr st, ppmLogout)
+      check st.screen.menu.title == "Select provider to logout:"
+    finally:
+      delEnv("GROQ_API_KEY")
+      removeDir(root)
+      removeFile(path)
+
+  test "the composer narrows the provider picker by label and by id":
+    let root = freshWorkspace("neopi-tp-tui-provider-search")
+    let path = freshSessionPath("provider-search")
+    discard freshConfig("neopi-tp-tui-provider-search-auth")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      openProvider(addr st, ppmConfigure)
+      typeText(backend, addr st, "cere")
+      check st.screen.menu.items.len == 1
+      check st.screen.menu.items[0].label == "Cerebras"
+      # The id is part of the search text: the label is what you read, the id is
+      # what you type, and both have to land. Re-opening starts from an empty
+      # query (the composer is the picker's field, not a draft).
+      openProvider(addr st, ppmConfigure)
+      check st.inputW.text == ""
+      check st.screen.menu.items.len == knownProviders().len
+      # The full id, not "llama": the matcher is a fuzzy subsequence, so
+      # "llama" legitimately lands on Ollama too (o-l-l-a-m-a).
+      typeText(backend, addr st, "llamacpp")
+      check st.screen.menu.items.len == 1
+      check st.screen.menu.items[0].label == "llama.cpp"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "Esc closes the provider picker and forgets its kind":
+    let root = freshWorkspace("neopi-tp-tui-provider-esc")
+    let path = freshSessionPath("provider-esc")
+    discard freshConfig("neopi-tp-tui-provider-esc-auth")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      openProvider(addr st, ppmConfigure)
+      pressKey(backend, addr st, keyEscape)
+      # The kind leaves WITH the menu: a kind that outlived its menu is the bug
+      # that silenced the completion for a whole session.
+      check st.menuKind == mkNone
+      check st.screen.menu.isNil
+      check st.inputW.text == ""
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "picking a provider in the configure mode moves the active one and asks for its key":
+    let root = freshWorkspace("neopi-tp-tui-provider-pick")
+    let path = freshSessionPath("provider-pick")
+    discard freshConfig("neopi-tp-tui-provider-pick-auth")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      openProvider(addr st, ppmConfigure)
+      typeText(backend, addr st, "deepseek")
+      pressKey(backend, addr st, keyEnter)
+      # The switch and the question, in that order: the masked line asks for the
+      # variable the PICKED entry carries.
+      check st.provider == "deepseek"
+      check not st.question.isNil
+      var canvas = newCanvas(size(60, 12))
+      st.screen.render(canvas, rect(0, 0, 60, 12))
+      check "deepseek" in canvas.plainText
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "picking in the logout mode drops that entry's credential":
+    let root = freshWorkspace("neopi-tp-tui-provider-logout")
+    let path = freshSessionPath("provider-logout")
+    discard freshConfig("neopi-tp-tui-provider-logout-auth")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openrouter", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      saveApiKey("groq", "sk-groq")
+      check loadApiKey("groq").isSome
+      openProvider(addr st, ppmLogout)
+      typeText(backend, addr st, "groq")
+      pressKey(backend, addr st, keyEnter)
+      check loadApiKey("groq").isNone
+      # The active provider was openrouter, so it stays: logout drops the
+      # credential it was pointed at, it does not switch to it.
+      check st.provider == "openrouter"
+      check "logged out" in st.transcriptW.transcript.items[^1].text
+    finally:
+      removeDir(root)
+      removeFile(path)
+
   test "providerEnvVar names the entry's environment variable":
     check providerEnvVar("openrouter") == "OPENROUTER_API_KEY"
     check providerEnvVar("groq") == "GROQ_API_KEY"
