@@ -1,8 +1,16 @@
-import std/json
-import std/options
+import std/[json, options, os]
+import neopi/authstore
 import neopi/openai_compat
 import neopi/provider
 import unittest2
+
+proc freshConfig(name: string): string =
+  ## A credential store that starts EMPTY, installed as the store's
+  ## environment: the state of an entry depends on what is stored, so these
+  ## tests must never read (or write) the real `~/.neopi/auth.json`.
+  result = getTempDir() / name
+  removeDir(result)
+  putEnv("NEOPI_CONFIG_DIR", result)
 
 suite "provider primitives":
   test "scripted generate returns the response text":
@@ -114,6 +122,50 @@ suite "provider primitives":
         true)
     check r.text == "done"
     check deltas == 1
+
+suite "the provider state":
+  test "every entry carries a human label, and they are distinct":
+    var labels: seq[string]
+    for spec in knownProviders():
+      check spec.label.len > 0
+      labels.add spec.label
+    for i in 0 ..< labels.len:
+      for j in i + 1 ..< labels.len:
+        check labels[i] != labels[j]
+
+  test "a stored key wins over the environment":
+    discard freshConfig("neopi-tp-provider-state")
+    let groq = findProvider("groq").get
+    check providerState(groq) == psUnconfigured
+    check providerStateText(groq) == "not configured"
+    putEnv("GROQ_API_KEY", "sk-env")
+    check providerState(groq) == psEnv
+    saveApiKey("groq", "sk-stored")
+    check providerState(groq) == psStored
+    check providerStateText(groq) == "stored"
+    # A stored credential owns its provider: the variable stops mattering.
+    delEnv("GROQ_API_KEY")
+    check providerState(groq) == psStored
+
+  test "the environment state names the variable":
+    discard freshConfig("neopi-tp-provider-state-env")
+    let spec = findProvider("cerebras").get
+    putEnv("CEREBRAS_API_KEY", "sk-env")
+    check providerStateText(spec) == "env: CEREBRAS_API_KEY"
+    delEnv("CEREBRAS_API_KEY")
+
+  test "keyless is the state of an entry that needs no key, and only then":
+    discard freshConfig("neopi-tp-provider-state-keyless")
+    let spec = findProvider("ollama").get
+    check providerState(spec) == psKeyless
+    check providerStateText(spec) == "keyless"
+    # A local server started WITH a key reports the key: keyless relaxes the
+    # requirement, it does not ignore a credential.
+    putEnv("OLLAMA_API_KEY", "sk-set")
+    check providerState(spec) == psEnv
+    saveApiKey("ollama", "sk-stored")
+    check providerState(spec) == psStored
+    delEnv("OLLAMA_API_KEY")
 
 suite "the provider table":
   test "the table carries the built-in providers with an endpoint and a key variable":

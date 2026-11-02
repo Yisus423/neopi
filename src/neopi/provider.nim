@@ -11,6 +11,8 @@
 
 import std/json
 import std/options
+import std/os
+import neopi/authstore
 import neopi/hooks
 import neopi/primitives
 import neopi/openai_compat
@@ -62,14 +64,24 @@ type
     baseUrl*: string
     envVar*: string
     requiresKey*: bool
+    label*: string
+      ## The human name the picker shows (`OpenRouter`, `Together AI`,
+      ## `llama.cpp`). `id` stays what you type and what the wire carries; the
+      ## label is what you read.
+
+  ProviderState* = enum
+    ## What the picker reports about an entry: a key in the global store, a
+    ## variable in the environment, a local server that needs none, or nothing
+    ## configured yet.
+    psStored, psEnv, psKeyless, psUnconfigured
 
 const
   # The two entries the constructors below name directly. The table and
   # `openAI`/`openRouter` read this same spec, so they cannot drift apart.
   openAiSpec = ProviderSpec(id: "openai", baseUrl: defaultOpenAiBase,
-    envVar: "OPENAI_API_KEY", requiresKey: true)
+    envVar: "OPENAI_API_KEY", requiresKey: true, label: "OpenAI")
   openRouterSpec = ProviderSpec(id: "openrouter", baseUrl: defaultOpenRouterBase,
-    envVar: "OPENROUTER_API_KEY", requiresKey: true)
+    envVar: "OPENROUTER_API_KEY", requiresKey: true, label: "OpenRouter")
 
 proc knownProviders*(): seq[ProviderSpec] =
   ## The built-in provider table: the OpenAI-compatible endpoints this build
@@ -81,17 +93,17 @@ proc knownProviders*(): seq[ProviderSpec] =
   ## else, so the table is a convenience and never the only way in.
   @[openAiSpec, openRouterSpec,
     ProviderSpec(id: "deepseek", baseUrl: "https://api.deepseek.com",
-      envVar: "DEEPSEEK_API_KEY", requiresKey: true),
+      envVar: "DEEPSEEK_API_KEY", requiresKey: true, label: "DeepSeek"),
     ProviderSpec(id: "groq", baseUrl: "https://api.groq.com/openai/v1",
-      envVar: "GROQ_API_KEY", requiresKey: true),
+      envVar: "GROQ_API_KEY", requiresKey: true, label: "Groq"),
     ProviderSpec(id: "together", baseUrl: "https://api.together.ai/v1",
-      envVar: "TOGETHER_API_KEY", requiresKey: true),
+      envVar: "TOGETHER_API_KEY", requiresKey: true, label: "Together AI"),
     ProviderSpec(id: "cerebras", baseUrl: "https://api.cerebras.ai/v1",
-      envVar: "CEREBRAS_API_KEY", requiresKey: true),
+      envVar: "CEREBRAS_API_KEY", requiresKey: true, label: "Cerebras"),
     ProviderSpec(id: "ollama", baseUrl: "http://localhost:11434/v1",
-      envVar: "OLLAMA_API_KEY", requiresKey: false),
+      envVar: "OLLAMA_API_KEY", requiresKey: false, label: "Ollama"),
     ProviderSpec(id: "llamacpp", baseUrl: "http://127.0.0.1:8080/v1",
-      envVar: "LLAMACPP_API_KEY", requiresKey: false)]
+      envVar: "LLAMACPP_API_KEY", requiresKey: false, label: "llama.cpp")]
 
 proc findProvider*(id: string): Option[ProviderSpec] =
   ## The table entry for `id`, or `none` when this build does not carry it.
@@ -99,6 +111,31 @@ proc findProvider*(id: string): Option[ProviderSpec] =
     if spec.id == id:
       return some(spec)
   none(ProviderSpec)
+
+proc providerState*(spec: ProviderSpec): ProviderState =
+  ## The entry's configuration state. A STORED credential wins (pi's rule: a
+  ## saved key owns its provider), then the entry's variable — which `.env` has
+  ## already populated, so both arrive through the environment — then
+  ## `psKeyless` for an entry that needs no key at all, and `psUnconfigured`
+  ## otherwise. An entry with `requiresKey: false` reports a key it DOES have:
+  ## keyless relaxes the requirement, it never ignores a credential.
+  if loadApiKey(spec.id).isSome:
+    return psStored
+  if getEnv(spec.envVar).len > 0:
+    return psEnv
+  if not spec.requiresKey:
+    return psKeyless
+  psUnconfigured
+
+proc providerStateText*(spec: ProviderSpec): string =
+  ## That state as the picker's status column: `stored`, `env: <VAR>`,
+  ## `keyless` or `not configured`. The marker that decorates it (a tick, a
+  ## dot) belongs to whoever renders the row, not here.
+  case providerState(spec)
+  of psStored: "stored"
+  of psEnv: "env: " & spec.envVar
+  of psKeyless: "keyless"
+  of psUnconfigured: "not configured"
 
 proc newProvider*(spec: ProviderSpec, apiKey: string, baseUrl = "",
     transport: Transport = nil): Provider =
