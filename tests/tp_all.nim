@@ -7,6 +7,7 @@ import tp_authstore
 import tp_openai_compat
 import tp_lua
 import tp_pump
+import tp_process
 import tp_fs
 import tp_tools
 import tp_expose
