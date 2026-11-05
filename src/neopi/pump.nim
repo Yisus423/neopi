@@ -12,13 +12,16 @@
 ## killing the child, keeping a partial result or ending the turn belongs to
 ## the call site.
 ##
-## The effects are deliberately unconstrained (like the tool `execute` closure
-## in primitives.nim): an owner that pumps by driving its own event loop does
-## what its loop does, and forcing a `raises` contract here would make every
-## future owner prove something it cannot, at the wrong layer.
+## The hook carries the same effect contract as the stream callback it sits
+## next to (primitives.StreamCallback) because it is called from inside
+## chronos's async read loop: that loop is `gcsafe` and declares
+## `raises: [CatchableError]`, so a pump that could raise or that touched the
+## garbage collector's globals would poison the wire. An owner whose pump can
+## fail decides what that means inside its own closure — to swallow it there,
+## with the reason recorded, or to let the wait's own error path speak.
 
 type
-  Pump* = proc (): bool {.closure.}
+  Pump* = proc (): bool {.closure, gcsafe, raises: [].}
     ## Called between polls by a blocking wait. Returns true when the owner
     ## asks the running work to abort.
 

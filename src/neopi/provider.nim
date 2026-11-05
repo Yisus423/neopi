@@ -15,6 +15,7 @@ import std/os
 import neopi/authstore
 import neopi/hooks
 import neopi/primitives
+import neopi/pump
 import neopi/openai_compat
 import neopi/wire
 
@@ -46,6 +47,7 @@ type
     apiKey*: string
     baseUrl*: string
     transport: Transport
+    pump: Pump
 
   Model* = object
     ## A provider plus the model identifier to request.
@@ -180,6 +182,14 @@ proc scriptedProvider*(steps: seq[ScriptStep]): Provider =
   ## stays "fake" (the exposure tests assert it).
   Provider(name: "fake", transport: newScriptedTransport(steps))
 
+proc setPump*(p: var Provider, pump: Pump) =
+  ## Install the pump a streamed turn hands control to between body reads. The
+  ## owner of the frame (the TUI) sets it once on the live provider; nil means
+  ## the wait never hands control anywhere, which is what print mode and every
+  ## test rely on. The transport stays private, but the pump is a plain hook:
+  ## setting it never swaps the backend.
+  p.pump = pump
+
 proc model*(p: Provider, id: string): Model =
   ## Create a model reference for a provider and model ID.
   Model(provider: p, id: id)
@@ -282,7 +292,7 @@ proc runTurn(m: Model, system: string, conversation: seq[Message],
       onEvent(e)
     result = streamChat(m.provider.transport, m.provider.baseUrl,
       m.provider.apiKey, m.id, messages, inner, system = system, tools = tools,
-      readTimeoutMs = defaultReadTimeoutMs)
+      readTimeoutMs = defaultReadTimeoutMs, pump = m.provider.pump)
     let stop = result.toolCalls.len == 0 or not canExecute(tools)
     if stop or step >= maxSteps:
       if not stop:

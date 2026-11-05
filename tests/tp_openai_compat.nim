@@ -2,10 +2,11 @@
 ## the neopi StreamEvents and the accumulated Response. The hand-written
 ## chunks pin the wire shape; the two captured OpenRouter fixtures replay
 ## the real stream end-to-end (L1 — keyless, no network).
-import std/[json, strutils]
+import std/[json, strutils, times]
 import chronos
 import chronos/timer
 import neopi/openai_compat
+import neopi/pump
 import neopi/wire
 import neopi/provider except CancelledError
 import sse
@@ -286,6 +287,44 @@ suite "the openai provider on the wire":
     check r.toolCalls[0].id == "c1"
     check r.toolCalls[0].name == "write"
     check r.toolCalls[0].args == parseJson("{\"path\": \"a\"}")
+
+  test "an aborting pump cancels a stream that is waiting":
+    # The thinking pause: the body sends nothing at all, so the sink never gets
+    # a delta to pump from. The pump is the only thing that can notice the
+    # owner asked to stop, and the cancellation it raises is the SAME one the
+    # callback's `false` raises (the loop cannot tell them apart).
+    let fake = newFakeTransport()
+    fake.cannedResponse(newSlowResponse(timer.seconds(30)))
+    var polls = 0
+    let pump: Pump = proc (): bool =
+      inc polls
+      polls >= 2
+
+    let started = epochTime()
+    expect provider.CancelledError:
+      discard streamChat(fake, "https://x/v1", "test-key", "m", @[],
+        proc (e: StreamEvent): bool = true, pump = pump)
+    let elapsed = epochTime() - started
+
+    # Aborted while the body was still silent, far below its own 30s silence.
+    check polls >= 2
+    check elapsed < 1.0
+
+  test "a pump that never aborts still lets a waiting stream finish":
+    let fake = newFakeTransport()
+    fake.cannedResponse(newSlowResponse(timer.milliseconds(120)))
+    var polls = 0
+    let pump: Pump = proc (): bool =
+      inc polls
+      false
+
+    let r = streamChat(fake, "https://x/v1", "test-key", "m", @[],
+      proc (e: StreamEvent): bool = true, pump = pump)
+
+    # The pump is consulted while the read is waiting, and its `false` leaves
+    # the stream's own end semantics alone.
+    check polls > 0
+    check r.text == ""
 
   test "streamChat times out on a silent stream":
     let fake = newFakeTransport()

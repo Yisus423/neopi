@@ -6,9 +6,15 @@
 ## seFinished after the done.
 import std/json
 import chronos
+import neopi/pump
 import neopi/wire
 import neopi/primitives except CancelledError
 import sse
+
+const pumpTickMs = 50
+  ## How long a body read may wait before handing control back to the pump.
+  ## The TUI's own frame budget is ~16 ms, so 50 ms keeps the interface alive
+  ## while costing one timer per tick on an otherwise idle wait.
 
 type
   ToolCallAccum* = object
@@ -190,15 +196,66 @@ proc parseModels*(body: string): seq[string] =
     if id.kind == JString and id.getStr("").len > 0:
       result.add id.getStr()
 
+proc nextChunk(resp: WireResponse, pump: Pump,
+    readTimeoutMs: int): Future[string] {.async: (raises: [CatchableError]).} =
+  ## The next body chunk of a streamed response. With no pump this is the
+  ## original wait: `resp.next()`, bounded by `readTimeoutMs` when it is set
+  ## (0 disables the bound). With a pump the wait becomes a sequence of
+  ## bounded ticks, and a tick that expires asks the pump whether the owner
+  ## wants to stop — the thinking-pause seam, where the body may stay silent
+  ## for minutes and no delta ever reaches the sink to be pumped from.
+  let hasDeadline = readTimeoutMs > 0
+  # chronos's own monotonic clock: the same one `sleepAsync` measures with, so
+  # the deadline and the ticks cannot drift apart.
+  let deadline =
+    if hasDeadline: Moment.now() + readTimeoutMs.milliseconds
+    else: Moment.now()
+  var pending: Future[string] = nil
+  while true:
+    if pending.isNil:
+      pending = resp.next()
+    # How long this turn of the wait may last: the pump's tick when a pump
+    # exists, the remaining read timeout when a deadline exists, and no bound
+    # at all when neither does (the plain await the suite pins today).
+    var waitMs = -1
+    if hasDeadline:
+      waitMs = milliseconds(deadline - Moment.now()).int
+      if waitMs <= 0:
+        await pending.cancelAndWait()
+        raise newException(ProviderError,
+          "the stream read timed out after " & $readTimeoutMs & "ms")
+    if not pump.isNil:
+      waitMs = if waitMs < 0: pumpTickMs else: min(waitMs, pumpTickMs)
+    if waitMs < 0:
+      return await pending
+    let tick = sleepAsync(waitMs.milliseconds)
+    let winner = await race(FutureBase(pending), FutureBase(tick))
+    if winner != FutureBase(tick):
+      await tick.cancelAndWait()
+      return await pending
+    # The tick expired with the body still silent: hand control to the owner.
+    # An abort cancels exactly like the callback returning false does, so the
+    # loop cannot tell an abort during a pause from one during a delta.
+    if not pump.isNil and pumpAbort(pump):
+      await pending.cancelAndWait()
+      raise newException(primitives.CancelledError,
+        "the stream was cancelled")
+    if hasDeadline and milliseconds(deadline - Moment.now()) <= 0:
+      await pending.cancelAndWait()
+      raise newException(ProviderError,
+        "the stream read timed out after " & $readTimeoutMs & "ms")
+
 proc streamChatAsync*(transport: Transport, baseUrl: string, apiKey: string,
     model: string, messages: seq[Message], onEvent: primitives.StreamCallback,
-    system = "", tools: seq[Tool] = @[], readTimeoutMs = 0):
+    system = "", tools: seq[Tool] = @[], readTimeoutMs = 0,
+    pump: Pump = nil):
     Future[Response] {.async: (raises: [CatchableError]).} =
   ## One streamed model turn over the wire: the SSE parser and the mapping
   ## consume the body, the callback sees the events (false cancels — the
   ## CancelledError unwinds, expose.nim builds the partial response), and
   ## the accumulated Response returns. readTimeoutMs bounds each body read
-  ## (0 disables; a silent stream is the hung-stream failure mode).
+  ## (0 disables; a silent stream is the hung-stream failure mode), and a
+  ## pump lets the owner of the frame abort a read that is still silent.
   let wireReq = WireRequest(url: baseUrl & "/chat/completions",
     httpMethod: "POST", headers: chatHeaders(apiKey),
     body: $buildChatRequest(model, messages, system, tools))
@@ -231,19 +288,7 @@ proc streamChatAsync*(transport: Transport, baseUrl: string, apiKey: string,
   var parser = initSSEParser()
   try:
     while true:
-      var chunk: string
-      if readTimeoutMs > 0:
-        let readFut = resp.next()
-        let timeoutFut = sleepAsync(readTimeoutMs.milliseconds)
-        let winner = await race(FutureBase(readFut), FutureBase(timeoutFut))
-        if winner == FutureBase(timeoutFut):
-          await readFut.cancelAndWait()
-          raise newException(ProviderError,
-            "the stream read timed out after " & $readTimeoutMs & "ms")
-        await timeoutFut.cancelAndWait()
-        chunk = await readFut
-      else:
-        chunk = await resp.next()
+      let chunk = await nextChunk(resp, pump, readTimeoutMs)
       if chunk.len == 0:
         break
       for ev in parser.feed(chunk):
@@ -264,11 +309,12 @@ proc streamChatAsync*(transport: Transport, baseUrl: string, apiKey: string,
 
 proc streamChat*(transport: Transport, baseUrl: string, apiKey: string,
     model: string, messages: seq[Message], onEvent: primitives.StreamCallback,
-    system = "", tools: seq[Tool] = @[], readTimeoutMs = 0): Response =
+    system = "", tools: seq[Tool] = @[], readTimeoutMs = 0,
+    pump: Pump = nil): Response =
   ## The blocking boundary (the shape the Lua surface calls): chronos's
   ## waitFor pumps the loop while the stream runs.
   waitFor streamChatAsync(transport, baseUrl, apiKey, model, messages,
-    onEvent, system, tools, readTimeoutMs)
+    onEvent, system, tools, readTimeoutMs, pump)
 
 proc listModelsAsync*(transport: Transport, baseUrl: string, apiKey: string):
     Future[seq[string]] {.async: (raises: [CatchableError]).} =
