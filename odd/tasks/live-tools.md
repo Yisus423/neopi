@@ -191,8 +191,10 @@ pumping**: the blocking waits hand control back to the App between polls.
    existing sink and transport injections.
 3. **The TUI (`src/neopi/tui.nim`)** — installs the pump: it is `pumpApp`
    (which already returns `abortRequested`) plus the presentation the sink
-   already does, so the tool's streamed output lands in the transcript as it
-   arrives and Esc keeps meaning "abort the turn".
+   already does, so the frame keeps painting and Esc keeps meaning "abort the
+   turn". The tool's output arrives with its result when the command ends:
+   showing it live would ride the same pump loop, but it is not one of this
+   slice's specs and it is listed as a known limit below.
 
 **Abort semantics (the user-visible contract, to be tested):**
 
@@ -248,11 +250,44 @@ pumping**: the blocking waits hand control back to the App between polls.
 
 ## Evidence
 
-_(filled as the tasks land: commit → task → the check that passed)_
+- **T1** — `94f7360`: the seam and its nil-safety. RED: `cannot open file:
+  neopi/pump` (exit 1, the module absent); GREEN: `tests/tp_pump.nim` 3/3;
+  gate `nimble test` 213 OK + 22 busted, exit 0.
+- **T2** — `de033e0`: the polling runner. RED: `Error: undeclared identifier:
+  'runCommand'`; GREEN: `tests/tp_process.nim` 6/6 — a short command's exact
+  output and exit code, stdout+stderr merged, a `sleep 3` aborted in under a
+  second with the partial output kept, the group's descendants killed, a
+  never-aborting pump left alone, and the Lua result shape plus the Lua abort
+  error; gate 219 OK + 22 busted, exit 0.
+- **T3** — `d694607`: the wait pumps. RED: `unknown named parameter: pump`;
+  GREEN: `tests/tp_openai_compat.nim` 32/32 — an abort during a 30 s silence
+  lands in under a second, through the SAME `CancelledError` the sink's `false`
+  raises, and a non-aborting pump is consulted while waiting without disturbing
+  the stream — plus `tests/tp_pump.nim` 3/3 after the type earned
+  `gcsafe, raises: []`; gate 221 OK + 22 busted, exit 0.
+- **T6** — the nimterm write-up, committed in that repo (`a321146`): the six
+  limits of the Verified basis, each citing its source line, followed by what a
+  library-side fix would pick off first.
 
 ## Known limits
 
-_(filled at closure)_
+- **Cooperation is a cadence, not a scheduler**: the wire's wait hands control
+  to the pump every 50 ms (`pumpTickMs`, `openai_compat.nim`) and the child's
+  loop every 5 ms (`PollTimeoutMs`, `process.nim`). A human sees a live
+  interface; a frame budget tighter than that is not honoured during a silent
+  wait.
+- **The tool's output is not shown live**: `neopi.process.run` returns it when
+  the command ends, the shape the Lua loop already consumed. Streaming it into
+  the transcript would ride the same pump loop, which is already called there,
+  but no spec asks for it yet.
+- **The pump is installed by the owner, and nil means nobody**: print mode, the
+  harness tests, and any embedder that does not install one keep the previous
+  behaviour, freeze included.
+- **POSIX only**: the polling child is `startProcess` over a non-blocking pipe
+  plus `killpg`; the Windows branch still calls `execCmdEx` and blocks.
+- **The abort is a group kill**: the child runs in its own process group
+  (`poDaemon` is `POSIX_SPAWN_SETPGROUP`), so an abort reaches its descendants,
+  but a process that escapes the group survives it.
 
 ## Log
 
@@ -268,6 +303,14 @@ _(filled at closure)_
 - **L3** (the accesses, verbatim): "lee ambos, yo te sugeriria leer nimterm
   desde ~/proyectos/nimterm, ambos con codegraph para cerlo todo y sin cortar
   el output"
+- **L5** (the lessons T1-T3 paid for, recorded where they were learned): the
+  async boundary dictates the hook's type, not taste — `Pump` is
+  `{.closure, gcsafe, raises: [].}` because chronos's read loop is gcsafe and
+  raises only `CatchableError` (`src/neopi/pump.nim`); `std/times` and chronos
+  collide on `milliseconds` and their `Duration` types differ, so the deadline
+  uses `Moment.now()` with chronos's own extractor; and `poDaemon` on POSIX is
+  `POSIX_SPAWN_SETPGROUP` (an atomic own group, no session detach), which is
+  what makes `killpg` the right abort.
 - **L4** (the decisions, verbatim): "Vamos con A, con ese slice chiquito
   solucionamos el problema de hoy. C podemos anotarla al final del roadmap,
   cuando haya tiempo capaz me ponga a parchear nimterm para mejorarlo, las
