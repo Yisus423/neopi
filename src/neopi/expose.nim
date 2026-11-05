@@ -41,6 +41,7 @@ import std/[json, options]
 import neopi/lua
 import neopi/hooks
 import neopi/provider
+import neopi/pump
 import neopi/session
 
 # Same file-scope typedef as lua.nim/hooks.nim: this module's generated C
@@ -526,6 +527,19 @@ proc setProvider*(L: LuaState, backing: Option[Provider]) =
   if context.isNil:
     return
   context.provider = backing
+
+proc setProviderPump*(L: LuaState, pump: Pump) =
+  ## Give the live provider the pump its streamed turns hand control to between
+  ## body reads: the same holder the `neopi.provider` closures read, so a pump
+  ## installed after assembly (the TUI's own) reaches the next `stream`. A no-op
+  ## (never a crash) when there is no context or no backing yet.
+  let context = cast[ptr ProviderContext](
+    getRegistryPointer(L, providerRegistryKey))
+  if context.isNil or context.provider.isNone:
+    return
+  var live = context.provider.get
+  setPump(live, pump)
+  context.provider = some(live)
 
 proc luaEmit(L: LuaState): cint {.cdecl.} =
   ## Lua-side `neopi.emit(event, payload)`: fire the hook bus's handlers for

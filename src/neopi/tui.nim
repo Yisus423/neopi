@@ -16,7 +16,9 @@ import nimterm/[events as ntevents, term, transcript as nttranscript]
 import neopi/authstore
 import neopi/expose
 import neopi/lua
+import neopi/process
 import neopi/provider
+import neopi/pump
 import neopi/session
 from neopi/hooks import lua_error
 
@@ -787,6 +789,43 @@ proc presentApp*(state: ptr TuiState, force = false) =
   state[].app.invalidate()
   state[].app.flush(force = force)
 
+
+proc tuiPump*(state: ptr TuiState): Pump =
+  ## The pump both blocking waits call: it drains the app exactly like the
+  ## stream sink does — the keys, the menus, the transcript, the frame — and
+  ## reports whether the user asked to leave or to abort.
+  ##
+  ## The cast asserts what a closure's signature cannot: the pump is created and
+  ## called on the one thread that owns the app (the stream's `waitFor` and the
+  ## child's polling loop both run inside the turn's `lua_pcall`). The catch is
+  ## the last line rather than a shrug: nimterm's own dispatch already turns a
+  ## callback failure into a `uiError` event, so what can still raise here is the
+  ## frame's own I/O, and a terminal that cannot be painted is a reason to end
+  ## the wait instead of retrying it forever.
+  result = proc (): bool {.gcsafe, raises: [].} =
+    if state.isNil:
+      return false
+    var unusable = false
+    {.cast(gcsafe).}:
+      try:
+        if state[].appReady:
+          discard pumpApp(state)
+          presentApp(state)
+      except Exception:
+        # A pump may not raise, so the wait ends instead of retrying forever: a
+        # catchable failure here is the frame's own I/O (a terminal that cannot
+        # be painted), and a defect is a bug in the app's plumbing.
+        unusable = true
+    state[].quit or state[].abortRequested or unusable
+
+proc installTuiPump*(L: LuaState, state: ptr TuiState) =
+  ## Hand the TUI's pump to both waits that can hold this thread: the stream's
+  ## body read (`neopi.provider`) and the command runner (`neopi.process`). A
+  ## wait whose exposure never ran is a no-op, which is what the headless tests
+  ## rely on.
+  let pump = tuiPump(state)
+  setProviderPump(L, pump)
+  setProcessPump(L, pump)
 
 proc postRunFinished*(state: ptr TuiState) =
   ## Close the streamed run in the widget. The deltas were provisional — the
@@ -2030,7 +2069,11 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
       state[].abortRequested = true
       return eventHandled
     if event.key == keyCtrlC:
+      # Both halves of leaving: the app this callback was handed is the one its
+      # loop is running (nimterm passes it), and the state carries the same
+      # request because a wait in flight reads the STATE, not that app.
       app.running = false
+      state[].quit = true
       return eventHandled
     # The two menus share the slot above the composer and not their keys. The
     # completion: Tab completes (and answering it is what keeps nimterm's
@@ -2174,6 +2217,10 @@ proc tuiLoop*(sess: Session, L: LuaState, provider, model: string,
   discard installTuiTheme(getEnv("NEOPI_THEME"), detectDepth())
   var state = initTuiState(provider, model, sess, root)
   exposeTuiSink(L, addr state, model)
+  # The waits that hold this thread while the turn runs: without the pump the
+  # app is only pumped by the sink's deltas, so a command or a thinking pause
+  # froze it.
+  installTuiPump(L, addr state)
   let screenWidget = buildScreen(addr state)
   var app = newApp(newPlatformBackend(fullscreen = true), screenWidget)
   # The app owns the frame from here: the sink hands it events and lets it

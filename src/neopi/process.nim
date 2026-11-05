@@ -235,6 +235,8 @@ proc luaRun(L: LuaState): cint {.cdecl.} =
   lua_setfield(L, -2, "code")
   result = 1
 
+const processRegistryKey = "neopi.process"
+
 proc exposeProcess*(L: LuaState, workspaceRoot: string,
     emit: proc (event: string, payload: JsonNode): HookOutcome {.closure.} = nil,
     pump: Pump = nil) =
@@ -247,6 +249,11 @@ proc exposeProcess*(L: LuaState, workspaceRoot: string,
   context.workspaceRoot = workspaceRoot
   context.emit = emit
   context.pump = pump
+  # The same holder in two places: the closure's upvalue (what `run` reads on
+  # every call) and the Lua registry (what `setProcessPump` finds once the owner
+  # of the frame exists, which is later than this assembly). One context, so a
+  # pump installed afterwards reaches the op.
+  setRegistryPointer(L, processRegistryKey, cast[pointer](context))
   lua_getfield(L, luaGlobalsIndex, "neopi")
   if lua_type(L, -1) != luaTTable:
     lua_pop(L, 1)
@@ -258,4 +265,14 @@ proc exposeProcess*(L: LuaState, workspaceRoot: string,
   lua_setfield(L, -2, "run")
   lua_setfield(L, -2, "process")
   lua_pop(L, 1)
+
+proc setProcessPump*(L: LuaState, pump: Pump) =
+  ## Install the pump the command runner hands control to between child-output
+  ## polls. A no-op (never a crash) when the exposure never ran or the workspace
+  ## root was empty, which is what the headless tests and print mode rely on.
+  let context = cast[ptr ProcessContext](
+    getRegistryPointer(L, processRegistryKey))
+  if context.isNil:
+    return
+  context.pump = pump
 {.pop.}

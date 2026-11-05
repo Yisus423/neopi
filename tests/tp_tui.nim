@@ -2405,3 +2405,88 @@ suite "the footer":
     finally:
       removeDir(root)
       removeFile(path)
+
+suite "the tui pump":
+  # The turn runs inside one lua_pcall, so the app is pumped by hand: the
+  # stream sink pumps it per delta, and before this slice nothing pumped it
+  # while a command ran. The pump is what carries a queued key to its handler
+  # during that wait — and what turns the key into a killed child.
+  test "an Esc queued while a command runs kills it instead of waiting it out":
+    let root = freshWorkspace("neopi-tp-tui-pump-esc")
+    let path = freshSessionPath("pump-esc")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      installTuiPump(L, addr st)
+      # The key is queued BEFORE the turn, and nothing else pumps the app while
+      # the command runs: the pump is the only thing that can dispatch it.
+      st.working = true
+      backend.events.add UiEvent(kind: uiKey, key: keyEscape)
+      runScript(L, """
+        neopi.provider.setScripted({
+          {toolCalls = {{id = "call-1", name = "bash",
+            args = {command = "printf partial; sleep 3"}}}},
+          {text = "after the tool"},
+        })
+      """)
+      st.inputW.setText("go")
+
+      let started = epochTime()
+      sendTurn(addr st, L)
+      let elapsed = epochTime() - started
+
+      # The command really ran (its result reached the session) and it was
+      # killed: the `sleep 3` did not hold the turn.
+      check sess.history().len >= 3
+      check st.abortRequested
+      check elapsed < 1.5
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "Ctrl+C queued while a command runs kills it and leaves":
+    let root = freshWorkspace("neopi-tp-tui-pump-ctrlc")
+    let path = freshSessionPath("pump-ctrlc")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      installTuiPump(L, addr st)
+      st.working = true
+      st.app.running = true
+      backend.events.add UiEvent(kind: uiKey, key: keyCtrlC)
+      runScript(L, """
+        neopi.provider.setScripted({
+          {toolCalls = {{id = "call-1", name = "bash",
+            args = {command = "printf partial; sleep 3"}}}},
+          {text = "after the tool"},
+        })
+      """)
+      st.inputW.setText("go")
+
+      let started = epochTime()
+      sendTurn(addr st, L)
+      let elapsed = epochTime() - started
+
+      # Ctrl+C does not ask for an abort, it leaves — and leaving must not
+      # leave the command behind holding the terminal.
+      check st.quit
+      check not st.app.running
+      check sess.history().len >= 3
+      check elapsed < 1.5
+    finally:
+      removeDir(root)
+      removeFile(path)
