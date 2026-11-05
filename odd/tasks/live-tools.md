@@ -265,6 +265,13 @@ pumping**: the blocking waits hand control back to the App between polls.
   raises, and a non-aborting pump is consulted while waiting without disturbing
   the stream — plus `tests/tp_pump.nim` 3/3 after the type earned
   `gcsafe, raises: []`; gate 221 OK + 22 busted, exit 0.
+- **T4** — `ec3d661`: the wiring. RED: `undeclared identifier:
+  'installTuiPump'`; GREEN: `tests/tp_tui.nim` 83/83, including the two new
+  tests — with a key queued BEFORE the turn and nothing else pumping the app,
+  a `printf partial; sleep 3` command is killed by Esc and by Ctrl+C (which
+  also leaves), both turns finishing in ~0.3 s, and the tool's result reaching
+  the session is what proves the command really ran; gate: `./build/tp_all`
+  223 OK + 22 busted, exit 0.
 - **T6** — the nimterm write-up, committed in that repo (`a321146`): the six
   limits of the Verified basis, each citing its source line, followed by what a
   library-side fix would pick off first.
@@ -288,6 +295,10 @@ pumping**: the blocking waits hand control back to the App between polls.
 - **The abort is a group kill**: the child runs in its own process group
   (`poDaemon` is `POSIX_SPAWN_SETPGROUP`), so an abort reaches its descendants,
   but a process that escapes the group survives it.
+- **A frame that cannot be painted ends the wait**: the pump's closure catches
+  `Exception` around `pumpApp`/`presentApp` (a pump may not raise) and asks for
+  the abort, so a broken terminal ends the turn instead of retrying it — and a
+  defect in the app's plumbing would be attributed to the wait.
 
 ## Log
 
