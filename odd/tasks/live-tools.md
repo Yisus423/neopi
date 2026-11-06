@@ -272,6 +272,24 @@ pumping**: the blocking waits hand control back to the App between polls.
   also leaves), both turns finishing in ~0.3 s, and the tool's result reaching
   the session is what proves the command really ran; gate: `./build/tp_all`
   223 OK + 22 busted, exit 0.
+- **T5** — the independent verification, and the round it forced. **Round 1
+  (verdict: blockers, NOT verified)** on the real binary under a pty: keys
+  pressed while `printf hi; sleep 5` ran produced **0 terminal bytes** (an idle
+  key produced 27, so the harness was sound), the first frame arrived only at
+  t=5.549s; Esc left the process group alive after 3.036s and the tool result
+  came back `isError:false` with `hi\n` — never aborted; Ctrl+C left the group
+  alive and the binary had to be SIGKILLed at 6.034s. Static finding in the same
+  round: the aborted partial output was dropped at the Lua boundary.
+  **The cause**, reproduced hermetically before the fix: `tuiLoop` took
+  `state.app = app` BEFORE `wireApp` installed the callbacks and the focus on
+  the real app, and nimterm copies those fields by value — so the app the pump
+  drove had a nil `onEvent` and a nil focus, the frame it painted was identical
+  (no bytes on a differential present) and every key was dropped before
+  dispatch. **The fix** (`685bde5`): `wireApp` takes the copy last, the partial
+  output travels inside the abort message, and the two hermetic tests (the
+  production order with its invariant, and the nested pump requiring each key
+  exactly once) landed with it. **Round 2** runs after that commit; its verdict
+  is recorded at the end of this Evidence list.
 - **T6** — the nimterm write-up, committed in that repo (`a321146`): the six
   limits of the Verified basis, each citing its source line, followed by what a
   library-side fix would pick off first.
@@ -295,6 +313,18 @@ pumping**: the blocking waits hand control back to the App between polls.
 - **The abort is a group kill**: the child runs in its own process group
   (`poDaemon` is `POSIX_SPAWN_SETPGROUP`), so an abort reaches its descendants,
   but a process that escapes the group survives it.
+- **A wiring-ORDER defect is invisible to the fake backend**: the test helpers
+  wire the app the state already holds, so they exercise the invariant rather
+  than production's object split — which is how 223 green tests coexisted with
+  keys being dropped before dispatch. The fix made the invariant structural
+  (`wireApp` takes the copy last, so no caller order can break it) and the order
+  is pinned by a test; a NEW production-only ordering would still need an eye or
+  a real-terminal pass.
+- **The pty stays a manual technique, not a gate**: the standing gate is
+  Canvas + FakeBackend (`ROADMAP.md`, item 25) plus the bench harness, and the
+  pty (AGENTS.md's `openpty`/`TIOCSCTTY`/`TIOCSWINSZ` note) is what an
+  independent verification reaches for when the fake path cannot see the
+  question.
 - **A frame that cannot be painted ends the wait**: the pump's closure catches
   `Exception` around `pumpApp`/`presentApp` (a pump may not raise) and asks for
   the abort, so a broken terminal ends the turn instead of retrying it — and a
@@ -314,6 +344,16 @@ pumping**: the blocking waits hand control back to the App between polls.
 - **L3** (the accesses, verbatim): "lee ambos, yo te sugeriria leer nimterm
   desde ~/proyectos/nimterm, ambos con codegraph para cerlo todo y sin cortar
   el output"
+- **L6** (the lesson the verification bought, recorded where it was learned): a
+  fake harness proves the path it is wired for, and ours wired the app the STATE
+  holds — production wires a different object and takes the copy in a different
+  order, so 223 green tests could not see keys dropped before dispatch. Two
+  things landed with the fix: the invariant became the wiring's (`wireApp` takes
+  the copy last), and the regression is a hermetic test that reproduces
+  production's order and asserts `onEvent`/`focus` are set, plus one that drives
+  the nested pump and requires each key exactly once. The pty was NOT committed
+  as a test: a second harness in another language, outside `nimble test`, would
+  rot, and the project's standing gate is Canvas + FakeBackend.
 - **L5** (the lessons T1-T3 paid for, recorded where they were learned): the
   async boundary dictates the hook's type, not taste — `Pump` is
   `{.closure, gcsafe, raises: [].}` because chronos's read loop is gcsafe and
