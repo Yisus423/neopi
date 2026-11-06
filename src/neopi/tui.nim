@@ -394,6 +394,13 @@ type
     chrome*: Chrome
       ## The extension-filled chrome (the header rows, the keyed status rows and
       ## the placed blocks), shared by reference with the root widget.
+    turnRunId*: string
+      ## The id of the turn being streamed, and the key of its PREVIEW item in
+      ## the transcript. The widget builds an item's id from the event's runId,
+      ## so an empty one keys every turn alike: a later turn's thinking and text
+      ## piled onto the previous turn's item.
+    turnSeq: int
+      ## The counter behind `turnRunId` (one TUI, one sequence).
     workingText*: string
       ## The extension's override for the footer's working token
       ## (`ui.working`); empty means the default.
@@ -758,8 +765,10 @@ proc postAgent*(state: ptr TuiState, event: AgentUiEvent) =
   state[].app.post(agentEvent(event))
 
 proc postDelta*(state: ptr TuiState, text: string) =
-  ## Hand one streamed message delta to the app as an agent event.
-  postAgent(state, AgentUiEvent(kind: ueTextDelta, text: text))
+  ## Hand one streamed message delta to the app as an agent event, keyed by the
+  ## turn it belongs to (see `turnRunId`).
+  postAgent(state, AgentUiEvent(kind: ueTextDelta, runId: state[].turnRunId,
+    text: text))
 
 proc pumpApp*(state: ptr TuiState): bool =
   ## Drain everything pending through the app's own dispatch — the keys, the
@@ -828,16 +837,26 @@ proc installTuiPump*(L: LuaState, state: ptr TuiState) =
   setProcessPump(L, pump)
 
 proc postRunFinished*(state: ptr TuiState) =
-  ## Close the streamed run in the widget. The deltas were provisional — the
-  ## session carries the entry they belong to — and a run that never ends would
-  ## leave its pending item behind, so the sync would append the real entry
-  ## beside it and the same text would show twice. The event goes through the
-  ## queue like every other one, and the pump right after is what settles the
-  ## widget state before the sync reads it.
+  ## Close the streamed run in the widget. The deltas were a PREVIEW of an entry
+  ## the session owns, and `syncTranscript` appends that entry as its own item,
+  ## so the preview is REMOVED here: left in place it is the same text twice, and
+  ## left `pending` it takes the next turn's deltas with it. The finish event
+  ## travels the queue like every other one, and the pump right after is what
+  ## settles the widget state before the sync reads it.
   if not state[].appReady:
     return
-  state[].app.post(agentEvent(AgentUiEvent(kind: ueRunFinished)))
+  state[].app.post(agentEvent(AgentUiEvent(kind: ueRunFinished,
+    runId: state[].turnRunId)))
   discard pumpApp(state)
+  if state[].turnRunId.len == 0:
+    return
+  var kept: seq[nttranscript.TranscriptItem]
+  for item in state[].transcriptW.transcript.items:
+    if item.runId != state[].turnRunId:
+      kept.add item
+  if kept.len != state[].transcriptW.transcript.items.len:
+    state[].transcriptW.transcript.items = kept
+    state[].transcriptW.invalidateLines()
 
 proc sessionLabel*(path: string): string =
   ## The label for one session file: the first user entry's text (truncated
@@ -1165,7 +1184,7 @@ proc tuiOnEventCB(L: LuaState): cint {.cdecl.} =
     # reasoning under its own key because it is not the message.
     if event.hasKey("thinking"):
       postAgent(state, AgentUiEvent(kind: ueThinkingDelta,
-        text: event["thinking"].getStr("")))
+        runId: state[].turnRunId, text: event["thinking"].getStr("")))
     elif event.hasKey("text"):
       postDelta(state, event["text"].getStr(""))
   let abort = pumpApp(state)
@@ -1553,6 +1572,10 @@ proc sendTurn*(state: ptr TuiState, L: LuaState) =
     "{model = neopi._tuiModel, onEvent = neopi._tuiOnEvent})"
   state[].working = true
   state[].abortRequested = false
+  # A fresh key for this turn's preview items, so no turn can inherit the
+  # previous one's item (the widget's item id is built from the runId).
+  inc state[].turnSeq
+  state[].turnRunId = "turn-" & $state[].turnSeq
   try:
     while true:
       var response: JsonNode

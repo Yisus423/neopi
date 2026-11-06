@@ -293,6 +293,21 @@ pumping**: the blocking waits hand control back to the App between polls.
 - **T6** — the nimterm write-up, committed in that repo (`a321146`): the six
   limits of the Verified basis, each citing its source line, followed by what a
   library-side fix would pick off first.
+- **T5 round 2** (`685bde5`, the fix) — **verified on the real binary under a
+  pty, all four claims**: keys pressed while `printf hi; sleep 5` ran produced
+  **27 bytes each** (p/r/o/b/e, Enter 31) and the turn still finished; Esc
+  removed the process group in **0.149 s** and the session's toolResult carried
+  `"process.run aborted\nhi"` with `isError:true`; Ctrl+C removed the group in
+  **0.158 s** and the binary exited **0**; and one Enter during the command
+  produced **exactly one** steering entry `probe`. The source audit found no
+  production read consuming a pre-wiring copy.
+  **Outstanding, and NOT this slice's**: in the verifier's isolated-HOME
+  environment one `/resume` test fails (`st.menu.items.len was 2` after the
+  filter — `tests/tp_tui.nim:248`), identically at baseline `ec3d661`, and it
+  does NOT reproduce here (225 OK, including that test, with a fresh and with the
+  usual `TMPDIR`). It is recorded as a lead, not as this slice's regression; the
+  busted half could not run in that isolated HOME (no `busted.runner`), while the
+  local gate ran both halves green.
 
 ## Known limits
 
@@ -344,6 +359,30 @@ pumping**: the blocking waits hand control back to the App between polls.
 - **L3** (the accesses, verbatim): "lee ambos, yo te sugeriria leer nimterm
   desde ~/proyectos/nimterm, ambos con codegraph para cerlo todo y sin cortar
   el output"
+- **L8** (2026-11-05, the regression the fix itself exposed): repairing the
+  wiring turned ON a path that had never run in production. nimterm handles no
+  `uiAgent` event in its widget tree (`src/nimterm/events.nim` declares the kind
+  and `transcript.nim` has no `handle` at all), so the transcript's live preview
+  had been dead since the sink started posting through the app's queue — and
+  only the fake backend, which wires the app the state holds, ever exercised it.
+  Revived, the path showed two defects of its own: the delta items were keyed
+  with an EMPTY `runId` (the widget builds an item's id from it), so every turn
+  landed in one item and a later turn's thinking and text merged with the
+  previous turn's; and the preview was never removed, so the sync's real entry
+  sat beside it (the answer twice). The user reported both from a screenshot.
+  The fix gives each turn its own key (`turnRunId`) and drops that run's preview
+  items when the run closes, with both halves pinned: the preview is pending and
+  keyed while the turn runs, and two turns render once each. The lesson is the
+  mirror of L6: reviving a dead path is shipping a NEW feature, and it needs its
+  own verification rather than the old tests' silence.
+  Separately, T5's isolated-HOME environment exposed a pre-existing
+  test-isolation weakness in `tests/tp_tui.nim`'s `/resume` narrowing test (it
+  fails with a FRESH `TMPDIR`, at baseline `ec3d661` too): a lead of its own,
+  not this slice's.
+- **L7** (2026-11-05, the closure): the mechanism closed with `685bde5` as the
+  last code commit, the verification of round 2 green on the real binary, and the
+  ROADMAP row moved to Done. The approval flow left this slice by the user's call
+  and lives on as its own ROADMAP item, and option C is item #29.
 - **L6** (the lesson the verification bought, recorded where it was learned): a
   fake harness proves the path it is wired for, and ours wired the app the STATE
   holds — production wires a different object and takes the copy in a different

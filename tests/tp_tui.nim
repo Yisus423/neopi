@@ -2596,3 +2596,82 @@ suite "the nested pump":
     finally:
       removeDir(root)
       removeFile(path)
+
+suite "the transcript and two turns":
+  # The live regression: one assistant item accumulated both turns' deltas, and
+  # the session's own entry was appended beside it — every answer twice. The
+  # mechanism is the item KEY: the sink posts its deltas with no runId and no
+  # step, so every turn's deltas land in the same ":0:assistant" item.
+  test "two turns render once each, and never merge into one item":
+    let root = freshWorkspace("neopi-tp-tui-two-turns")
+    let path = freshSessionPath("two-turns")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      discard wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      installTuiPump(L, addr st)
+      runScript(L, """
+        neopi.provider.setScripted({
+          {text = "one"},
+          {text = "two"},
+        })
+      """)
+      st.inputW.setText("first")
+      sendTurn(addr st, L)
+      st.inputW.setText("second")
+      sendTurn(addr st, L)
+
+      var rendered: seq[string]
+      for item in st.transcriptW.transcript.items:
+        rendered.add item.text
+      var ones = 0
+      var twos = 0
+      for text in rendered:
+        if text == "one": inc ones
+        if text == "two": inc twos
+      check ones == 1
+      check twos == 1
+      check rendered.len == 4   # user, assistant, user, assistant
+    finally:
+      removeDir(root)
+      removeFile(path)
+  test "the streamed preview shows while the turn runs and is gone at its end":
+    let root = freshWorkspace("neopi-tp-tui-preview")
+    let path = freshSessionPath("preview")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      discard wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      st.turnRunId = "turn-test"
+
+      # A delta through the exposed sink: the same path the stream uses.
+      # (`runScript`, not `evalString`: the sink answers a boolean.)
+      runScript(L, "local _ = neopi._tuiOnEvent({text = 'partial'})")
+
+      var preview = -1
+      for index, item in st.transcriptW.transcript.items:
+        if item.text == "partial": preview = index
+      check preview >= 0
+      check st.transcriptW.transcript.items[preview].pending
+      check st.transcriptW.transcript.items[preview].runId == "turn-test"
+
+      # The run's end takes the preview away — the session's entry is what
+      # remains, so the same text never shows twice.
+      postRunFinished(addr st)
+      for item in st.transcriptW.transcript.items:
+        check item.text != "partial"
+    finally:
+      removeDir(root)
+      removeFile(path)
