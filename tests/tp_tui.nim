@@ -2490,3 +2490,109 @@ suite "the tui pump":
     finally:
       removeDir(root)
       removeFile(path)
+
+suite "the pump and the app the callbacks live in":
+  # tuiLoop's order, which the fake-app helper above does NOT reproduce: the
+  # state takes its COPY of the app first (`state.app = app`) and `wireApp`
+  # installs the callbacks on the REAL app afterwards. nimterm copies the
+  # callback fields at assignment time, so a pump that drives the copy finds no
+  # `onEvent` — no Esc, no abort, and the command runs to its end.
+  test "the production wiring order serves keys while a command runs":
+    let root = freshWorkspace("neopi-tp-tui-pump-order")
+    let path = freshSessionPath("pump-order")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = TuiFakeBackend()
+      let screen = buildScreen(addr st)
+      var app = newApp(backend, screen)
+      app.focus(Widget(st.inputW))
+      st.app = app                 # the copy tuiLoop takes
+      st.appReady = true
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, app)     # the callbacks land on the REAL app
+      installTuiPump(L, addr st)
+
+      # The invariant the pump depends on: the app the STATE holds must be an
+      # app carrying the wiring, because that is the one every helper (and the
+      # pump) dispatches through. nimterm copies these fields by value.
+      check not st.app.onEvent.isNil
+      check not st.app.focus.isNil
+      st.working = true
+      backend.events.add UiEvent(kind: uiKey, key: keyEscape)
+      runScript(L, """
+        neopi.provider.setScripted({
+          {toolCalls = {{id = "call-1", name = "bash",
+            args = {command = "printf partial; sleep 3"}}}},
+          {text = "after the tool"},
+        })
+      """)
+      st.inputW.setText("go")
+
+      let started = epochTime()
+      sendTurn(addr st, L)
+      let elapsed = epochTime() - started
+
+      # The pair discriminates the two failures: frames growing means the pump
+      # ran (and what it drove had no keys of its own), no frames means the pump
+      # never ran at all.
+      check backend.frames.len > 1
+      check st.abortRequested
+      check elapsed < 1.5
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+suite "the nested pump":
+  # nimterm has no reentrancy guard: the pump's `app.step` runs while the outer
+  # `step` is still inside the dispatch that started the turn. The pty finding
+  # was that keys were lost before dispatch; this suite exercises the nesting
+  # WITH the production wiring order, so a key arriving mid-command must land
+  # exactly once.
+  test "a key arriving while the nested pump runs is dispatched exactly once":
+    let root = freshWorkspace("neopi-tp-tui-nested")
+    let path = freshSessionPath("nested")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = TuiFakeBackend()
+      let screen = buildScreen(addr st)
+      var app = newApp(backend, screen)
+      app.focus(Widget(st.inputW))
+      st.app = app
+      st.appReady = true
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, app)
+      installTuiPump(L, addr st)
+      runScript(L, """
+        neopi.provider.setScripted({
+          {toolCalls = {{id = "call-1", name = "bash",
+            args = {command = "printf hi; sleep 0.4"}}}},
+          {text = "after the tool"},
+        })
+      """)
+      st.inputW.setText("go")
+
+      # The outer take is the submit; the two keys below arrive while the
+      # command runs, so the pump is the only thing that can take them.
+      backend.events.add UiEvent(kind: uiKey, key: keyEnter)
+      backend.events.add UiEvent(kind: uiKey, key: keyChar, text: "x")
+      backend.events.add UiEvent(kind: uiKey, key: keyChar, text: "y")
+      discard st.app.step(0)
+
+      # Exactly once each, in order: a duplicated dispatch would read "xxyy" or
+      # "xyy", a lost key would read "x" or "".
+      check st.inputW.text == "xy"
+      check not st.abortRequested
+      check backend.frames.len > 1
+    finally:
+      removeDir(root)
+      removeFile(path)

@@ -220,7 +220,13 @@ proc luaRun(L: LuaState): cint {.cdecl.} =
   try:
     let outcome = runCommand(command, context.workspaceRoot, context.pump)
     if outcome.aborted:
+      # An abort is an error — the loop must not read a killed command as a
+      # success — and the partial output is the only result that command ever
+      # produced: it travels INSIDE the message instead of being dropped at this
+      # boundary, which is what the record's abort semantics promise.
       failure = "process.run aborted"
+      if outcome.output.len > 0:
+        failure.add "\n" & outcome.output
     else:
       output = outcome.output
       code = outcome.code

@@ -91,13 +91,16 @@ suite "process runner":
     finally:
       removeDir(root)
 
-  test "Lua sees an abort as an error":
+  test "Lua sees an abort as an error, and keeps the partial output":
     let root = freshWorkspace("neopi-tp-process-lua-abort")
     try:
       var polls = 0
+      # Enough polls for the command's own output to have been read before the
+      # abort lands (~50 ms against a printf that answers immediately): the
+      # partial-output claim is only testable once something was produced.
       let pump: Pump = proc (): bool =
         inc polls
-        polls >= 3
+        polls >= 10
       let bus = newHookBus()
       exposeProcess(bus.state, root, nil, pump)
       let outcome = evalString(bus.state, """
@@ -105,6 +108,9 @@ suite "process runner":
         if ok then return "unexpected success" end
         return tostring(err)
       """)
+      # The abort is an error, and the partial output is the command's only
+      # result: the Lua boundary must not drop it.
       check "aborted" in outcome
+      check "partial" in outcome
     finally:
       removeDir(root)

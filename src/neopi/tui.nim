@@ -2205,6 +2205,16 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
     if state[].quit:
       app.running = false
 
+  # The state keeps a COPY of the app (`App` is a value), and nimterm copies the
+  # callback and focus FIELDS at assignment time. So the copy has to be taken
+  # after this wiring, never before it: the app every helper (and the pump)
+  # dispatches through would otherwise carry a nil `onEvent` and a nil focus,
+  # which is exactly how a key pressed while a command ran went nowhere — the
+  # frame painted, the command ran to its end, and Esc never became an abort.
+  # Taking the copy here makes that the wiring's invariant instead of the
+  # caller's ordering.
+  state[].app = app
+
 proc tuiLoop*(sess: Session, L: LuaState, provider, model: string,
               root = ""): string =
   ## Run the TUI: nimterm's App is the loop owner; the send path runs the
