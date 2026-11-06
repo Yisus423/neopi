@@ -852,7 +852,12 @@ proc postRunFinished*(state: ptr TuiState) =
     return
   var kept: seq[nttranscript.TranscriptItem]
   for item in state[].transcriptW.transcript.items:
-    if item.runId != state[].turnRunId:
+    # The text preview is replaced by the session's own entry, so it goes. The
+    # THINKING has no entry to be replaced by (the session does not carry it
+    # yet), and dropping it erased from the screen what the user had just
+    # watched arrive — a mitigation, not the design: persisting the thinking is
+    # its own slice (see the ROADMAP).
+    if item.runId != state[].turnRunId or item.kind == tikThinking:
       kept.add item
   if kept.len != state[].transcriptW.transcript.items.len:
     state[].transcriptW.transcript.items = kept

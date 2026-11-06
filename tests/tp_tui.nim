@@ -2675,3 +2675,36 @@ suite "the transcript and two turns":
     finally:
       removeDir(root)
       removeFile(path)
+
+suite "the thinking and the session":
+  # The session does not carry the model's reasoning yet, so the text preview is
+  # replaced by the session's entry and the thinking is the one thing that has no
+  # replacement: dropping it erased what the user had just watched arrive.
+  test "the turn's thinking survives the run while the text preview does not":
+    let root = freshWorkspace("neopi-tp-tui-thinking")
+    let path = freshSessionPath("thinking")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      discard wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      st.turnRunId = "turn-thinking"
+      runScript(L, "local _ = neopi._tuiOnEvent({thinking = 'let me think'})")
+      runScript(L, "local _ = neopi._tuiOnEvent({text = 'the answer'})")
+      postRunFinished(addr st)
+
+      var thinking = 0
+      var answer = 0
+      for item in st.transcriptW.transcript.items:
+        if item.text == "let me think": inc thinking
+        if item.text == "the answer": inc answer
+      check thinking == 1   # nothing in the session replaces it (yet)
+      check answer == 0     # the session's own entry does
+    finally:
+      removeDir(root)
+      removeFile(path)
