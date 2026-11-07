@@ -20,6 +20,7 @@ import neopi/process
 import neopi/provider
 import neopi/pump
 import neopi/session
+import neopi/settings
 from neopi/hooks import lua_error
 
 # Same file-scope typedef as lua.nim and the bridge modules: no C headers
@@ -421,6 +422,9 @@ type
       ## and it decides that a submit is steering rather than another turn —
       ## and note that until this slice nothing ever set it, so the indicator
       ## never reached a frame.
+    hideThinking*: bool
+      ## Whether the model's reasoning is hidden. The default is false: the
+      ## reasoning is expanded and visible until Ctrl+T folds it.
     syncedId*: int
       ## How far the transcript has been brought up to the session: the highest
       ## entry id it already shows. It tracks what is *displayed*, whoever put
@@ -488,7 +492,7 @@ proc initTuiState*(provider, model: string, sess: Session,
     root: root, transcriptW: transcriptW, inputW: inputW, footerW: footerW,
     quit: false, clipboard: copyToClipboard,
     workingText: "", title: "", titleWriter: terminalTitleWriter,
-    working: false, abortRequested: false,
+    working: false, abortRequested: false, hideThinking: false,
     syncedId: 0, menuKind: mkNone, questionPurpose: qpNone,
     chrome: newChrome())
 
@@ -585,6 +589,32 @@ proc routeTranscriptKey*(state: ptr TuiState, event: UiEvent): bool =
     return false
   discard state[].transcriptW.handle(event)
   true
+
+proc setThinkingExpanded(state: ptr TuiState, expanded: bool,
+                          requireText = false): bool =
+  ## Set the expansion of every thinking item and report whether anything
+  ## changed. The transcript is invalidated once, after the mutation, because
+  ## its cached item lines still carry the previous shape.
+  if state[].transcriptW.isNil:
+    return false
+  var changed = false
+  for item in state[].transcriptW.transcript.items.mitems:
+    if item.kind == tikThinking:
+      if (not requireText or item.text.len > 0) and
+          item.expanded != expanded:
+        item.expanded = expanded
+        changed = true
+  if changed:
+    state[].transcriptW.invalidateLines()
+  changed
+
+proc applyThinkingVisibility(state: ptr TuiState) =
+  ## Apply the visible default after the agent events have been applied: every
+  ## thinking item carrying text is expanded. A hidden preference does nothing
+  ## here, so nimterm's own folded shape remains the hidden one.
+  if state[].hideThinking:
+    return
+  discard setThinkingExpanded(state, expanded = true, requireText = true)
 
 proc branchTokens(sess: Session): tuple[tokensIn, tokensOut: int] =
   ## The active branch's cumulative token usage: the honest walk over the
@@ -719,6 +749,17 @@ proc setCoreStatus*(state: ptr TuiState, text: string) =
   else:
     state[].chrome.setStatus(coreStatusKey, text)
 
+proc toggleThinking(state: ptr TuiState) =
+  ## Flip the reasoning's visibility, apply it to every thinking item and
+  ## persist it globally. A failed write is feedback on the status line, never
+  ## a fatal error: the live preference still changes.
+  state[].hideThinking = not state[].hideThinking
+  discard setThinkingExpanded(state, expanded = not state[].hideThinking)
+  try:
+    saveHideThinking(state[].hideThinking)
+  except SettingsError as e:
+    setCoreStatus(state, "cannot save the thinking preference: " & e.msg)
+
 proc clearTransient*(state: ptr TuiState) =
   ## Drop the messages that belong to the last action: the core's own status
   ## and the extension's transient line. The next submit starts from a clean
@@ -796,6 +837,7 @@ proc pumpApp*(state: ptr TuiState): bool =
     return state[].abortRequested
   while state[].app.step(0):
     discard
+  applyThinkingVisibility(state)
   state[].abortRequested
 
 proc presentApp*(state: ptr TuiState, force = false) =
@@ -2125,6 +2167,13 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
       app.running = false
       state[].quit = true
       return eventHandled
+    if event.key == keyCtrlT:
+      # The same path whether the turn runs or not: the app owns the key, and
+      # the state carries the preference the transcript and the global file
+      # both follow.
+      toggleThinking(state)
+      app.invalidate()
+      return eventHandled
     # The two menus share the slot above the composer and not their keys. The
     # completion: Tab completes (and answering it is what keeps nimterm's
     # dispatch from moving the focus), the arrows navigate, Esc closes the menu
@@ -2276,6 +2325,10 @@ proc tuiLoop*(sess: Session, L: LuaState, provider, model: string,
   # light background, a color-less terminal and a truecolor one alike.
   discard installTuiTheme(getEnv("NEOPI_THEME"), detectDepth())
   var state = initTuiState(provider, model, sess, root)
+  try:
+    state.hideThinking = loadHideThinking()
+  except SettingsError as e:
+    setCoreStatus(addr state, "settings warning: " & e.msg)
   exposeTuiSink(L, addr state, model)
   # The waits that hold this thread while the turn runs: without the pump the
   # app is only pumped by the sink's deltas, so a command or a thinking pause

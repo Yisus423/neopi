@@ -7,6 +7,7 @@ import std/[json, options, os, strutils, times]
 import nimterm
 import nimterm/transcript
 import neopi/[authstore, expose, extensibility, lua, provider, session, wire]
+import neopi/settings
 import neopi/tui
 import unittest2
 
@@ -1957,7 +1958,7 @@ suite "the turn drive":
       removeDir(root)
       removeFile(path)
 
-  test "a thinking delta reaches the transcript as a collapsed pi-shaped item":
+  test "a thinking delta reaches the transcript as an expanded visible item":
     let root = freshWorkspace("neopi-tp-thinking")
     let path = freshSessionPath("thinking")
     try:
@@ -1979,10 +1980,12 @@ suite "the turn drive":
         if item.kind == tikThinking:
           found = true
           check item.text == "weighing it"
-          check not item.expanded
+          # Reasoning is visible by default, so the item is expanded once the
+          # event has been applied and the pump has settled the transcript.
+          check item.expanded
       check found
-      # nimterm already renders the collapsed label pi-shaped, which is why the
-      # label stays its business and no ui.thinkingLabel slot is needed.
+      # nimterm already renders the label pi-shaped, which is why the label
+      # stays its business and no ui.thinkingLabel slot is needed.
       var canvas = newCanvas(size(40, 8))
       st.screen.render(canvas, rect(0, 0, 40, 8))
       check "Thinking" in canvas.plainText
@@ -2771,5 +2774,133 @@ suite "the reasoning's own colour":
       check st.transcriptW.thinkingStyle.foreground !=
         st.transcriptW.assistantStyle.foreground
     finally:
+      removeDir(root)
+      removeFile(path)
+
+suite "the thinking visibility preference":
+  test "Ctrl+T folds and unfolds the reasoning and persists the preference":
+    let root = freshWorkspace("neopi-tp-tui-thinking-toggle")
+    let path = freshSessionPath("thinking-toggle")
+    let config = freshConfig("neopi-tp-tui-thinking-toggle-settings")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      runScript(L, "local _ = neopi._tuiOnEvent({thinking = 'weighing it'})")
+
+      var thinking = -1
+      for index, item in st.transcriptW.transcript.items:
+        if item.kind == tikThinking:
+          thinking = index
+      check thinking >= 0
+      check st.transcriptW.transcript.items[thinking].expanded
+
+      let folded = st.app.onEvent(st.app,
+        UiEvent(kind: uiKey, key: keyCtrlT))
+      check folded.handled
+      check st.hideThinking
+      check not st.transcriptW.transcript.items[thinking].expanded
+      check loadHideThinking()
+
+      let shown = st.app.onEvent(st.app,
+        UiEvent(kind: uiKey, key: keyCtrlT))
+      check shown.handled
+      check not st.hideThinking
+      check st.transcriptW.transcript.items[thinking].expanded
+      check not loadHideThinking()
+      check backend.frames.len > 0
+    finally:
+      if dirExists(config):
+        removeDir(config)
+      removeDir(root)
+      removeFile(path)
+
+  test "the preference decides the initial shape and visible reasoning expands":
+    let root = freshWorkspace("neopi-tp-tui-thinking-preference")
+    let path = freshSessionPath("thinking-preference")
+    let config = freshConfig("neopi-tp-tui-thinking-preference-settings")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      runScript(L, """
+        neopi.provider.setScripted({
+          {thinking = "visible thought", text = "the answer"},
+        })
+      """)
+
+      saveHideThinking(true)
+      var hidden = initTuiState("p", "m", sess, root)
+      hidden.hideThinking = loadHideThinking()
+      discard wireFakeApp(addr hidden)
+      exposeTuiSink(L, addr hidden, "scripted")
+      wireApp(addr hidden, L, hidden.app)
+      runScript(L, "local _ = neopi._tuiOnEvent({thinking = 'hidden thought'})")
+      var hiddenThinking = -1
+      for index, item in hidden.transcriptW.transcript.items:
+        if item.kind == tikThinking:
+          hiddenThinking = index
+      check hiddenThinking >= 0
+      check not hidden.transcriptW.transcript.items[hiddenThinking].expanded
+
+      var visible = initTuiState("p", "m", sess, root)
+      visible.hideThinking = false
+      discard wireFakeApp(addr visible)
+      exposeTuiSink(L, addr visible, "scripted")
+      wireApp(addr visible, L, visible.app)
+      visible.inputW.setText("go")
+      sendTurn(addr visible, L)
+      var visibleThinking = -1
+      for index, item in visible.transcriptW.transcript.items:
+        if item.kind == tikThinking:
+          visibleThinking = index
+      check visibleThinking >= 0
+      check visible.transcriptW.transcript.items[visibleThinking].expanded
+    finally:
+      if dirExists(config):
+        removeDir(config)
+      removeDir(root)
+      removeFile(path)
+
+  test "Ctrl+T still flips the preference while the turn runs":
+    let root = freshWorkspace("neopi-tp-tui-thinking-running")
+    let path = freshSessionPath("thinking-running")
+    let config = freshConfig("neopi-tp-tui-thinking-running-settings")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      runScript(L, "local _ = neopi._tuiOnEvent({thinking = 'weighing it'})")
+
+      st.working = true
+      st.app.running = true
+      backend.events.add UiEvent(kind: uiKey, key: keyCtrlT)
+      discard pumpApp(addr st)
+      check st.hideThinking
+      check loadHideThinking()
+      check st.app.running
+      var thinking = -1
+      for index, item in st.transcriptW.transcript.items:
+        if item.kind == tikThinking:
+          thinking = index
+      check thinking >= 0
+      check not st.transcriptW.transcript.items[thinking].expanded
+    finally:
+      if dirExists(config):
+        removeDir(config)
       removeDir(root)
       removeFile(path)
