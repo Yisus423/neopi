@@ -153,6 +153,19 @@ _(filled at closure)_
   ROADMAP #31 and is not this slice.
 - **L3** (the decisions, verbatim): "Dos slices: #32 el thinking, #33 los tool
   rows" and "Persistido en el dir global, como pi".
+- **L5** (2026-11-06, the report that arrived mid-flight, verbatim): "hay un
+  error en el thinking, este se renderiza una sola ves por pregunta (lo que hace
+  que cuando el modelo llame a una herramienta o de la respuesta abajo luego el
+  bloque thinking de arriba crezca en vez de que se haga uno nuevo abajo)".
+  **The cause**: the widget keys an item by `runId:step:kind`, and the sink posted
+  every delta of a run with `step = 0` — while a run holds several MODEL turns
+  when the model calls a tool, so the second turn's reasoning and text grew the
+  first turn's item. The step is the TUI's own drive loop (`sendTurn` iterates one
+  `agent.runTurn` per model turn), so the fix is TUI-side: `turnStep` reset per run
+  and incremented per iteration. **The lesson**: probing each link in isolation is
+  what localized it, and the two links that silently swallowed the new field — the
+  Lua scripted-steps parser and the assistant payload parser — were invisible from
+  either end of the chain.
 - **L4** (the mitigation that opened the slice, already committed): the turn's
   thinking items are no longer dropped with the rest of the preview
   (`402f522`), because the session had nothing to replace them with. That commit

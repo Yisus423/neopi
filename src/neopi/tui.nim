@@ -401,6 +401,12 @@ type
       ## piled onto the previous turn's item.
     turnSeq: int
       ## The counter behind `turnRunId` (one TUI, one sequence).
+    turnStep*: int
+      ## Which MODEL turn of the current run is streaming. A run holds several
+      ## when the model calls a tool: the widget keys an item by
+      ## `runId:step:kind`, so leaving this at zero made the second model
+      ## turn's reasoning and text grow the first turn's item instead of
+      ## starting their own.
     workingText*: string
       ## The extension's override for the footer's working token
       ## (`ui.working`); empty means the default.
@@ -766,9 +772,9 @@ proc postAgent*(state: ptr TuiState, event: AgentUiEvent) =
 
 proc postDelta*(state: ptr TuiState, text: string) =
   ## Hand one streamed message delta to the app as an agent event, keyed by the
-  ## turn it belongs to (see `turnRunId`).
+  ## turn it belongs to (see `turnRunId` and `turnStep`).
   postAgent(state, AgentUiEvent(kind: ueTextDelta, runId: state[].turnRunId,
-    text: text))
+    step: state[].turnStep, text: text))
 
 proc pumpApp*(state: ptr TuiState): bool =
   ## Drain everything pending through the app's own dispatch — the keys, the
@@ -1189,7 +1195,8 @@ proc tuiOnEventCB(L: LuaState): cint {.cdecl.} =
     # reasoning under its own key because it is not the message.
     if event.hasKey("thinking"):
       postAgent(state, AgentUiEvent(kind: ueThinkingDelta,
-        runId: state[].turnRunId, text: event["thinking"].getStr("")))
+        runId: state[].turnRunId, step: state[].turnStep,
+        text: event["thinking"].getStr("")))
     elif event.hasKey("text"):
       postDelta(state, event["text"].getStr(""))
   let abort = pumpApp(state)
@@ -1581,8 +1588,13 @@ proc sendTurn*(state: ptr TuiState, L: LuaState) =
   # previous one's item (the widget's item id is built from the runId).
   inc state[].turnSeq
   state[].turnRunId = "turn-" & $state[].turnSeq
+  state[].turnStep = 0
   try:
     while true:
+      # One iteration is one MODEL turn (`agent.runTurn` drives a single stream
+      # call), so the step is what keeps a tool round-trip's reasoning from
+      # growing the previous turn's item.
+      inc state[].turnStep
       var response: JsonNode
       try:
         response = evalJson(L, chunk)

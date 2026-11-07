@@ -2708,3 +2708,47 @@ suite "the thinking and the session":
     finally:
       removeDir(root)
       removeFile(path)
+  test "each model turn's reasoning is its own item, never one growing block":
+    # A run holds several model turns when the model calls a tool, and the
+    # widget keys an item by runId:step:kind: with the step left at zero the
+    # second turn's reasoning grew the first turn's item (the block above the
+    # tool result got longer instead of a new one appearing below it).
+    let root = freshWorkspace("neopi-tp-tui-steps")
+    let path = freshSessionPath("steps")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      discard wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+      installTuiPump(L, addr st)
+      runScript(L, """
+        neopi.provider.setScripted({
+          {thinking = "first thought", toolCalls = {{id = "c1", name = "bash",
+            args = {command = "printf hi"}}}},
+          {thinking = "second thought", text = "the answer"},
+        })
+      """)
+      st.inputW.setText("go")
+      sendTurn(addr st, L)
+
+      var thinks: seq[string]
+      for item in st.transcriptW.transcript.items:
+        if item.kind == tikThinking: thinks.add item.text
+      check thinks.len == 2
+      check thinks[0] == "first thought"
+      check thinks[1] == "second thought"
+
+      # And the whole chain behind it: the loop appended each model turn's
+      # reasoning to its own assistant entry, so a reload has it.
+      var persisted: seq[string]
+      for entry in sess.history():
+        if entry.kind == ekAssistant: persisted.add entry.thinking
+      check persisted == @["first thought", "second thought"]
+    finally:
+      removeDir(root)
+      removeFile(path)
