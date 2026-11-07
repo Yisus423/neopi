@@ -4,7 +4,7 @@
 ## credential store's discipline: the directory is resolved once, writes are
 ## atomic, and a malformed file is reported instead of being replaced.
 
-import std/[json, os]
+import std/[json, options, os]
 from neopi/authstore import configDir
 
 type
@@ -76,30 +76,41 @@ proc writeSettings(path: string, node: JsonNode) =
     raise newException(SettingsError,
       "cannot write the settings file: " & path & ": " & e.msg)
 
-proc loadHideThinking*(): bool =
-  ## Whether the model's reasoning is hidden. `false` when the settings file
-  ## or the `hideThinking` key is absent, because reasoning is visible by
-  ## default. A malformed file, a non-object file, or a non-boolean preference
-  ## raises `SettingsError`; the file is never rewritten by a read.
-  let path = settingsFilePath()
-  let node = readSettings(path)
+proc preference(node: JsonNode, path: string): Option[bool] =
+  ## The `hideThinking` preference out of a settings object: none when the key
+  ## is absent, the value when it is a boolean, and a `SettingsError` when it is
+  ## anything else. ONE place decides the type, so a read and a write can never
+  ## disagree about what counts as malformed — which is how a wrong-typed
+  ## preference used to pass the read and then be overwritten by the write that
+  ## followed it.
   if node.isNil:
-    return false
+    return none(bool)
   let value = node{"hideThinking"}
   if value.isNil:
-    return false
+    return none(bool)
   if value.kind != JBool:
     raise newException(SettingsError,
       "hideThinking must be a boolean in: " & path)
-  value.getBool()
+  some(value.getBool())
+
+proc loadHideThinking*(): bool =
+  ## Whether the model's reasoning is hidden. `false` when the settings file or
+  ## the `hideThinking` key is absent, because reasoning is visible by default.
+  ## A malformed file, a non-object file, or a non-boolean preference raises
+  ## `SettingsError`; the file is never rewritten by a read.
+  let path = settingsFilePath()
+  let stored = preference(readSettings(path), path)
+  if stored.isSome: stored.get else: false
 
 proc saveHideThinking*(value: bool) =
   ## Persist whether the model's reasoning is hidden in the global settings
-  ## file, preserving every other key the file carries. The write is atomic.
-  ## A malformed existing file raises `SettingsError` and stays byte-identical:
-  ## settings this module cannot read are not ours to discard.
+  ## file, preserving every other key the file carries. The write is atomic, and
+  ## a malformed EXISTING file raises `SettingsError` and stays byte-identical —
+  ## malformed includes a preference of the wrong type, because settings this
+  ## module cannot read are not ours to discard.
   let path = settingsFilePath()
   var node = readSettings(path)
+  discard preference(node, path)
   if node.isNil:
     node = newJObject()
   node["hideThinking"] = %value

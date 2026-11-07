@@ -150,6 +150,11 @@ text is ever lost in memory.
   left byte-identical, no temporary file left behind) and `tp_tui` 93/93 (the
   toggle, both start preferences, and a toggle while the turn runs). Gate: 22
   busted specs and the Nim suite green, exit 0.
+- **T4** — `7c38e0f`: the resume path and the retirement of #16's mitigation.
+  GREEN: `tp_tui` 95/95 with two new tests — a resumed session shows the
+  reasoning again, FIRST and expanded (pi's order, the visible default), and the
+  run's previews retire so each text appears exactly once (the reasoning
+  included). Gate: 243 OK + 22 busted, exit 0.
 - **The hint** — nimterm's `0399fa1` ("Let an application name the folded
   reasoning's key hint") makes the folded label's key configurable with this
   widget's own key as the default; its suite: 82 OK, 0 FAILED, exit 0. neopi's
@@ -191,6 +196,17 @@ text is ever lost in memory.
   ROADMAP #31 and is not this slice.
 - **L3** (the decisions, verbatim): "Dos slices: #32 el thinking, #33 los tool
   rows" and "Persistido en el dir global, como pi".
+- **L8** (2026-11-07, the blocker the verification found, and the fix): a
+  `hideThinking` present but of the WRONG TYPE (`"yes"`) was reported at startup
+  and then silently rewritten by Ctrl+T — while the module's own contract says a
+  malformed file is never discarded. The cause was two validations that were not
+  one: the READ checked the type, the WRITE only checked that the file parsed.
+  The fix puts the type decision in a single `preference` proc that both paths
+  call, so a read and a write cannot disagree about what is malformed; the test
+  pins the file byte-identical, and the differential (validation disabled) shows
+  it failing exactly on that assertion, which is what makes the test worth
+  keeping. The rest of the verification was green, with the fine evidence in the
+  Evidence entry above.
 - **L7** (2026-11-06, the hint, verbatim): "¿Cambiaste el mensajr de ctrl o en
   thinking?, ya no es necesario" — **no, and it could not be done from neopi**: the
   string lives in nimterm's widget (`widgets/transcript.nim:141-142`). The fix is

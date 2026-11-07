@@ -67,3 +67,21 @@ suite "the global settings":
     finally:
       if dirExists(dir):
         removeDir(dir)
+
+  test "a wrong-typed preference is malformed and stays byte-identical":
+    # Reported by the independent verification: the WRITE path validated only
+    # that the file parses, so Ctrl+T silently rewrote a preference of the wrong
+    # type — the module's own contract says a malformed file is never discarded.
+    let dir = freshConfig("neopi-tp-settings-wrong-type")
+    try:
+      createDir(configDir())
+      writeFile(settingsPath(), "{\"hideThinking\":\"yes\"}")
+      let before = readFile(settingsPath())
+      expect SettingsError:
+        discard loadHideThinking()
+      expect SettingsError:
+        saveHideThinking(true)
+      check readFile(settingsPath()) == before
+    finally:
+      if dirExists(dir):
+        removeDir(dir)
