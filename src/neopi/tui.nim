@@ -80,13 +80,24 @@ proc adapterItem*(entry: SessionEntry): nttranscript.TranscriptItem =
   else:
     discard
 
+proc adapterItems*(entry: SessionEntry): seq[nttranscript.TranscriptItem] =
+  ## The transcript items one session entry becomes. An assistant entry that
+  ## carries the model's reasoning becomes TWO — the reasoning first, then the
+  ## answer — because the transcript renders them as separate items and the
+  ## reasoning is its own collapsible block (pi's order: the reasoning, then the
+  ## message, then that message's tool rows).
+  if entry.kind == ekAssistant and entry.thinking.len > 0:
+    result.add nttranscript.TranscriptItem(kind: tikThinking,
+      id: $entry.id & ":thinking", text: entry.thinking, revision: 1)
+  result.add adapterItem(entry)
+
 proc applySession*(transcript: var nttranscript.Transcript,
                    entries: seq[SessionEntry]) =
   ## Rebuild nimterm's transcript from the active branch's entries: the
   ## adapter applied per entry, in order.
   transcript.items = @[]
   for entry in entries:
-    transcript.items.add adapterItem(entry)
+    transcript.items.add adapterItems(entry)
 
 type
   WidgetPlacement* = enum
@@ -676,6 +687,9 @@ proc seedTranscript*(state: ptr TuiState) =
   let entries = state[].sess.history()
   applySession(state[].transcriptW.transcript, entries)
   state[].transcriptW.invalidateLines()
+  # The reasoning the entries carry paints in whichever shape the preference
+  # asks for: the adapter creates it folded, and the visible default expands it.
+  applyThinkingVisibility(state)
   state[].syncedId = 0
   for entry in entries:
     if entry.id > state[].syncedId:
@@ -695,10 +709,15 @@ proc syncTranscript*(state: ptr TuiState) =
   if state[].sess.currentId < state[].syncedId:
     seedTranscript(state)
     return
+  var appended = false
   for entry in state[].sess.history():
     if entry.id > state[].syncedId:
-      state[].transcriptW.appendItem(adapterItem(entry))
+      for item in adapterItems(entry):
+        state[].transcriptW.appendItem(item)
       state[].syncedId = entry.id
+      appended = true
+  if appended:
+    applyThinkingVisibility(state)
 
 proc buildScreen*(state: ptr TuiState): Widget =
   ## The widget tree: the transcript (its own scroll viewport follows the
@@ -914,12 +933,12 @@ proc postRunFinished*(state: ptr TuiState) =
     return
   var kept: seq[nttranscript.TranscriptItem]
   for item in state[].transcriptW.transcript.items:
-    # The text preview is replaced by the session's own entry, so it goes. The
-    # THINKING has no entry to be replaced by (the session does not carry it
-    # yet), and dropping it erased from the screen what the user had just
-    # watched arrive — a mitigation, not the design: persisting the thinking is
-    # its own slice (see the ROADMAP).
-    if item.runId != state[].turnRunId or item.kind == tikThinking:
+    # Every preview of this run goes: the session carries the message AND the
+    # model's reasoning now, so the `syncTranscript` that follows appends the
+    # real items. (#16's fix had to keep the thinking previews because the
+    # session had nothing to replace them with; that mitigation retires here,
+    # with the persistence that makes it unnecessary.)
+    if item.runId != state[].turnRunId:
       kept.add item
   if kept.len != state[].transcriptW.transcript.items.len:
     state[].transcriptW.transcript.items = kept

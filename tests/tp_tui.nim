@@ -2680,12 +2680,37 @@ suite "the transcript and two turns":
       removeFile(path)
 
 suite "the thinking and the session":
-  # The session does not carry the model's reasoning yet, so the text preview is
-  # replaced by the session's entry and the thinking is the one thing that has no
-  # replacement: dropping it erased what the user had just watched arrive.
-  test "the turn's thinking survives the run while the text preview does not":
-    let root = freshWorkspace("neopi-tp-tui-thinking")
-    let path = freshSessionPath("thinking")
+  # A resumed session must show the reasoning again, in pi's order (the reasoning
+  # first, then the message), and in the shape the preference asks for.
+  test "a resumed session shows the reasoning again, before the answer":
+    let root = freshWorkspace("neopi-tp-tui-resume-thinking")
+    let path = freshSessionPath("resume-thinking")
+    try:
+      let sess = newSession(path)
+      sess.append(SessionEntry(kind: ekUser, text: "go"))
+      sess.append(SessionEntry(kind: ekAssistant, text: "the answer",
+        thinking: "let me think", model: "m", provider: "p"))
+      let st = initTuiState("p", "m", sess, root)
+      # buildScreen seeds the transcript from the session (the resume path).
+      discard buildScreen(unsafeAddr st)
+      let items = st.transcriptW.transcript.items
+      check items.len == 3
+      check items[1].kind == tikThinking
+      check items[1].text == "let me think"
+      check items[1].expanded          # the visible default, pi's way
+      check items[2].kind == tikAssistant
+      check items[2].text == "the answer"
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+  test "the run's previews retire: the session's items replace them, reasoning included":
+    # #16's fix kept the thinking previews because the session had nothing to
+    # replace them with. The persistence retires that mitigation: BOTH previews
+    # go, and the sync appends the real items — the reasoning once, the answer
+    # once, never twice.
+    let root = freshWorkspace("neopi-tp-tui-preview-retires")
+    let path = freshSessionPath("preview-retires")
     try:
       let sess = newSession(path)
       let ext = newExtensibility(root, none(Provider), sess)
@@ -2696,21 +2721,26 @@ suite "the thinking and the session":
       discard wireFakeApp(addr st)
       exposeTuiSink(L, addr st, "scripted")
       wireApp(addr st, L, st.app)
-      st.turnRunId = "turn-thinking"
+      st.turnRunId = "turn-retires"
       runScript(L, "local _ = neopi._tuiOnEvent({thinking = 'let me think'})")
       runScript(L, "local _ = neopi._tuiOnEvent({text = 'the answer'})")
+      # The loop appends the assistant entry with its reasoning (T1's chain).
+      sess.append(SessionEntry(kind: ekAssistant, text: "the answer",
+        thinking: "let me think", model: "m", provider: "p"))
       postRunFinished(addr st)
+      syncTranscript(addr st)
 
       var thinking = 0
-      var answer = 0
+      var answers = 0
       for item in st.transcriptW.transcript.items:
         if item.text == "let me think": inc thinking
-        if item.text == "the answer": inc answer
-      check thinking == 1   # nothing in the session replaces it (yet)
-      check answer == 0     # the session's own entry does
+        if item.text == "the answer": inc answers
+      check thinking == 1
+      check answers == 1
     finally:
       removeDir(root)
       removeFile(path)
+
   test "each model turn's reasoning is its own item, never one growing block":
     # A run holds several model turns when the model calls a tool, and the
     # widget keys an item by runId:step:kind: with the step left at zero the
