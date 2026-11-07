@@ -134,11 +134,49 @@ text is ever lost in memory.
 
 ## Evidence
 
-_(filled as the tasks land: commit → task → the check that passed)_
+- **T1** — `ddfa8fb` (the chain) + `15f333f` (the item's key). RED: `undeclared
+  field: 'thinking'` in `tests/tp_session.nim` and in `tests/tp_openai_compat.nim`;
+  GREEN: `tp_session` 11/11 (including a hand-written pre-existing line that keeps
+  loading with an empty field), `tp_openai_compat` 32/32, `tp_provider` 20/20
+  (the provider's turn carries the reasoning), `tp_expose` 22/22 (the streamed
+  response table carries it), and the end-to-end one in `tp_tui` (a scripted tool
+  round-trip: two thinking items, both reasonings in their own assistant entry).
+  Gate: 233 OK + 22 busted, exit 0.
+- **T2** — `2273b8c`: the reasoning's style is the theme's `muted` plus italic,
+  pinned by a test (italic present, the foreground is the theme's muted and
+  differs from the assistant's). `tp_tui` 90/90.
+- **T3** — `9c89636`: Ctrl+T folds and unfolds every thinking item and persists
+  the preference; `tp_settings` 4/4 (round-trip, absent default, a malformed file
+  left byte-identical, no temporary file left behind) and `tp_tui` 93/93 (the
+  toggle, both start preferences, and a toggle while the turn runs). Gate: 22
+  busted specs and the Nim suite green, exit 0.
+- **The hint** — nimterm's `0399fa1` ("Let an application name the folded
+  reasoning's key hint") makes the folded label's key configurable with this
+  widget's own key as the default; its suite: 82 OK, 0 FAILED, exit 0. neopi's
+  pin moves to it, and the application sets ` (Ctrl+T)`.
 
 ## Known limits
 
-_(filled at closure)_
+- **Ctrl+O still folds thinking and tools together**: the widget's own key does
+  both, while neopi's Ctrl+T is the reasoning's alone. The overlap means Ctrl+O
+  can unfold what Ctrl+T folded — the stored preference then says folded while
+  the screen shows it. A first-class "hide the reasoning" flag in the widget
+  would settle it, which is also why the hint became configurable instead of
+  renamed: this slice does not touch the widget's key map beyond the hint.
+- **The exact shade is the theme's `muted`**: pi carries a dedicated
+  `thinkingText` token (dark `okhsl(226 7% 65%)`, light `okhsl(234 8% 55%)`) and
+  nimterm's `Theme` has no slot for it, so what was ported is the RELATIONSHIP
+  (the muted end of the theme) plus italic.
+- **A theme switch would not re-apply the reasoning's style**: it is set when the
+  screen is built, and neopi has no runtime theme switch today.
+- **The reasoning is stored whole**: never truncated on the way into the file, so
+  a session with reasoning-heavy turns is bigger than it used to be — the same
+  trade the message text already makes.
+- **Compaction does not carry the reasoning**: a summarized-away turn's reasoning
+  is no longer rendered (it stays in the JSONL, exactly like pi's own
+  pre-compaction entries).
+- **The reasoning of a turn that is ABORTED mid-stream** is what the partial
+  response carried, which may be empty: the accumulator only keeps what arrived.
 
 ## Log
 
@@ -153,6 +191,21 @@ _(filled at closure)_
   ROADMAP #31 and is not this slice.
 - **L3** (the decisions, verbatim): "Dos slices: #32 el thinking, #33 los tool
   rows" and "Persistido en el dir global, como pi".
+- **L7** (2026-11-06, the hint, verbatim): "¿Cambiaste el mensajr de ctrl o en
+  thinking?, ya no es necesario" — **no, and it could not be done from neopi**: the
+  string lives in nimterm's widget (`widgets/transcript.nim:141-142`). The fix is
+  a fork patch that makes the hint a field with the widget's own key as its
+  default (`0399fa1`, nimterm's suite 82 OK / 0 FAILED), whose consumption needs
+  the dependency PUSHED and the pin bumped — the user pushed it, and the bump
+  follows AGENTS.md's recipe (leave exactly one installed copy, clear the caches
+  that name the removed path, probe).
+- **L6** (2026-11-06, the default, verbatim): "el thinkin no estaba así por
+  defecto, yo use Ctrl c" and then "dejalo como lo hizo, si el usuario quiere el
+  otro lo puede cambiar con ctrl t". The first sentence corrected a claim of mine
+  (the widget does NOT expand the reasoning by default — the user had pressed the
+  transcript's own key), and the second settled the slice's default: **visible**,
+  pi's way, with Ctrl+T for whoever wants it folded. The record keeps both so
+  nobody re-derives the question.
 - **L5** (2026-11-06, the report that arrived mid-flight, verbatim): "hay un
   error en el thinking, este se renderiza una sola ves por pregunta (lo que hace
   que cuando el modelo llame a una herramienta o de la respuesta abajo luego el

@@ -2904,3 +2904,26 @@ suite "the thinking visibility preference":
         removeDir(config)
       removeDir(root)
       removeFile(path)
+
+suite "the folded reasoning's hint":
+  # The widget prints a key hint on a folded reasoning item, and its default is
+  # its own Ctrl+O. neopi's key is Ctrl+T (the transcript's Ctrl+O folds tools
+  # and thinking together), so the application names it.
+  test "the folded reasoning names Ctrl+T, not the widget's key":
+    let root = freshWorkspace("neopi-tp-tui-hint")
+    let path = freshSessionPath("hint")
+    try:
+      let sess = newSession(path)
+      let st = initTuiState("p", "m", sess, root)
+      discard buildScreen(unsafeAddr st)
+      st.transcriptW.apply AgentUiEvent(kind: ueThinkingDelta, runId: "r",
+        step: 0, text: "private\nreason")
+      st.transcriptW.apply AgentUiEvent(kind: ueStepFinished, runId: "r",
+        step: 0)
+      var canvas = newCanvas(size(40, 10))
+      st.transcriptW.render(canvas, rect(0, 0, 40, 10))
+      check "Thinking · 2 lines (Ctrl+T)" in canvas.plainText
+      check "Ctrl-O" notin canvas.plainText
+    finally:
+      removeDir(root)
+      removeFile(path)

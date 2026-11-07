@@ -717,6 +717,10 @@ proc buildScreen*(state: ptr TuiState): Widget =
     foreground: currentTheme.muted.foreground,
     attributes: currentTheme.muted.attributes + {attrItalic})
   state[].transcriptW.thinkingRailStyle = currentTheme.muted
+  # The folded reasoning prints its own key hint, and this application's key is
+  # not the widget's Ctrl+O (which folds thinking and tools together): the hint
+  # is the application's to name.
+  state[].transcriptW.thinkingHint = " (Ctrl+T)"
   seedTranscript(state)
   let screen = NeopiScreen(transcriptW: state[].transcriptW,
     inputW: state[].inputW, footerW: state[].footerW, menu: nil,
