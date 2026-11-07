@@ -2752,3 +2752,24 @@ suite "the thinking and the session":
     finally:
       removeDir(root)
       removeFile(path)
+
+suite "the reasoning's own colour":
+  # pi gives the model's reasoning its own token (`thinkingText`) instead of the
+  # answer's colour, and italic; neopi takes the relationship from the theme it
+  # already has, so the reasoning is visibly not the answer.
+  test "the thinking style is italic and distinct from the assistant's":
+    let root = freshWorkspace("neopi-tp-tui-thinking-style")
+    let path = freshSessionPath("thinking-style")
+    try:
+      let sess = newSession(path)
+      let st = initTuiState("p", "m", sess, root)
+      # buildScreen is what paints the transcript with the installed theme.
+      discard buildScreen(unsafeAddr st)
+      check attrItalic in st.transcriptW.thinkingStyle.attributes
+      check st.transcriptW.thinkingStyle.foreground ==
+        currentTheme.muted.foreground
+      check st.transcriptW.thinkingStyle.foreground !=
+        st.transcriptW.assistantStyle.foreground
+    finally:
+      removeDir(root)
+      removeFile(path)

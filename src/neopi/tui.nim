@@ -677,6 +677,16 @@ proc buildScreen*(state: ptr TuiState): Widget =
   ## left the state unwired would present an empty frame — the measurement
   ## harness's own self-check caught exactly that.
   state[].transcriptW = newTranscriptWidget()
+  # The model's reasoning paints in pi's `thinkingText`: the muted end of the
+  # theme — pi's token is okhsl(226 7% 65%) on dark and okhsl(234 8% 55%) on
+  # light, the same relationship to the text colour `muted` has here — plus
+  # italic, so the model's own words cannot be mistaken for its answer. The
+  # theme is installed before the screen is built; a theme SWITCH would have to
+  # re-apply this.
+  state[].transcriptW.thinkingStyle = Style(
+    foreground: currentTheme.muted.foreground,
+    attributes: currentTheme.muted.attributes + {attrItalic})
+  state[].transcriptW.thinkingRailStyle = currentTheme.muted
   seedTranscript(state)
   let screen = NeopiScreen(transcriptW: state[].transcriptW,
     inputW: state[].inputW, footerW: state[].footerW, menu: nil,
