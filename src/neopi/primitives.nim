@@ -54,6 +54,9 @@ type
     ## One generated answer with its usage metadata and the tool calls the
     ## model requested (empty when the model answered without tools).
     text*: string
+    thinking*: string
+      ## The model's reasoning for this turn, when the provider streams it:
+      ## the session persists it beside the message, never inside it.
     finishReason*: FinishReason
     inputTokens*: int
     outputTokens*: int
@@ -103,5 +106,8 @@ type
     ## default zero), so the agent loop's compaction trigger sees a real
     ## token estimate in tests.
     text*: string
+    thinking*: string
+      ## The reasoning the step streams before its text (empty for none), so
+      ## a test can drive the whole path the session persists.
     usageInput*: int
     toolCalls*: seq[ToolCall]

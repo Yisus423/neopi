@@ -59,6 +59,9 @@ type
       model*, provider*: string
       usageInput*, usageOutput*: int
       stopReason*: string
+      thinking*: string
+        ## The model's reasoning for this turn. OPTIONAL in the file: a
+        ## session written before this field existed reads it as empty.
     of ekToolResult:
       toolCallId*, toolName*, output*: string
       isError*: bool
@@ -101,6 +104,13 @@ proc reqBool(node: JsonNode, key: string, line: int): bool =
     return node[key].getBool
   missingField(line, key)
 
+proc optString(node: JsonNode, key: string): string =
+  ## An OPTIONAL string field: missing (or not a string) reads as empty, which
+  ## is what keeps a session written before the field existed loading.
+  if node.hasKey(key) and node[key].kind == JString:
+    return node[key].getStr
+  ""
+
 proc reqParent(node: JsonNode, key: string, line: int): Option[int] =
   ## The required `parentId` field: a JSON integer or `null` for the root.
   if node.hasKey(key) and node[key].kind in {JInt, JNull}:
@@ -130,6 +140,7 @@ proc entryToJson*(entry: SessionEntry): JsonNode =
     result["usageInput"] = newJInt(entry.usageInput)
     result["usageOutput"] = newJInt(entry.usageOutput)
     result["stopReason"] = newJString(entry.stopReason)
+    result["thinking"] = newJString(entry.thinking)
   of ekToolResult:
     result["toolCallId"] = newJString(entry.toolCallId)
     result["toolName"] = newJString(entry.toolName)
@@ -159,7 +170,8 @@ proc entryFromJson(node: JsonNode, line: int): SessionEntry =
       provider: reqString(node, "provider", line),
       usageInput: reqInt(node, "usageInput", line),
       usageOutput: reqInt(node, "usageOutput", line),
-      stopReason: reqString(node, "stopReason", line))
+      stopReason: reqString(node, "stopReason", line),
+      thinking: optString(node, "thinking"))
   of "toolResult":
     result = SessionEntry(kind: ekToolResult, id: id, parentId: parentId,
       timestamp: timestamp, toolCallId: reqString(node, "toolCallId", line),

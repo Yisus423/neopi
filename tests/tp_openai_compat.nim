@@ -41,8 +41,10 @@ suite "the openai wire mapping":
     check events.len == 1
     check events[0].kind == seThinkingDelta
     check events[0].text == "pensando"
-    # Thinking is not the message: it does not accumulate into the text.
+    # Thinking is not the message: it does not accumulate into the text — it
+    # accumulates into its own field, which is what the session persists.
     check acc.text == ""
+    check acc.thinking == "pensando"
 
   test "the empty content deltas emit nothing":
     var acc: OaiAccum
@@ -335,6 +337,22 @@ suite "the openai provider on the wire":
         proc (e: StreamEvent): bool = true, readTimeoutMs = 10)
 
 suite "the scripted provider transport (L2)":
+  test "a scripted step streams its reasoning before its text":
+    let t = newScriptedTransport(@[ScriptStep(thinking: "first thought",
+      text: "the answer")])
+    var got: seq[StreamEvent] = @[]
+    let r = streamChat(t, "https://x/v1", "k", "m", @[],
+      proc (e: StreamEvent): bool =
+        got.add e
+        true)
+    check r.text == "the answer"
+    check r.thinking == "first thought"
+    var sawThinking = false
+    for e in got:
+      if e.kind == seThinkingDelta and e.text == "first thought":
+        sawThinking = true
+    check sawThinking
+
   test "the scripted steps stream as the real wire":
     let t = newScriptedTransport(@[ScriptStep(text: "hello")])
     var got: seq[StreamEvent] = @[]

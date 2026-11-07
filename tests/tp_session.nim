@@ -17,6 +17,33 @@ proc sampleAssistant(text, model: string): SessionEntry =
     usageInput: 12, usageOutput: 34, stopReason: "end_turn")
 
 suite "session tree":
+  test "the assistant's reasoning round-trips, and an older file still loads":
+    let path = freshPath("thinking")
+    let oldPath = freshPath("thinking-old")
+    try:
+      let s = newSession(path)
+      s.append(SessionEntry(kind: ekUser, text: "hello"))
+      s.append(SessionEntry(kind: ekAssistant, text: "hi", model: "m1",
+        provider: "openai", usageInput: 1, usageOutput: 2,
+        stopReason: "end_turn", thinking: "let me think"))
+      let reopened = newSession(path)
+      check reopened.entries[1].thinking == "let me think"
+
+      # A file written before the field existed keeps loading: the key is
+      # OPTIONAL and reads as empty. That is the whole backward-compatibility
+      # promise of the format change.
+      writeFile(oldPath,
+        "{\"type\":\"assistant\",\"id\":1,\"parentId\":null," &
+        "\"timestamp\":\"2026-01-01T00:00:00Z\",\"text\":\"hi\"," &
+        "\"model\":\"m1\",\"provider\":\"openai\",\"usageInput\":1," &
+        "\"usageOutput\":2,\"stopReason\":\"end_turn\"}\n")
+      let old = newSession(oldPath)
+      check old.entries.len == 1
+      check old.entries[0].thinking == ""
+    finally:
+      removeFile(path)
+      removeFile(oldPath)
+
   test "append and load round-trip":
     let path = freshPath("roundtrip")
     try:

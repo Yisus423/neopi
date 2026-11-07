@@ -29,6 +29,9 @@ type
     ## The accumulator the mapping updates per chunk; it becomes the
     ## Response when the stream ends.
     text*: string
+    thinking*: string
+      ## The model's reasoning, accumulated apart from the message text: the
+      ## session persists it in its own field.
     finishReason*: FinishReason
     inputTokens*: int
     outputTokens*: int
@@ -82,7 +85,9 @@ proc mapOaiChunk*(data: string, acc: var OaiAccum): seq[StreamEvent] =
     let reasoning = delta.field("reasoning")
     if reasoning.kind == JString and reasoning.getStr("").len > 0:
       # The model's own words, kept out of acc.text: thinking is not the
-      # message, and the transcript renders it as its own collapsed item.
+      # message, and the transcript renders it as its own collapsed item. It
+      # accumulates in its own field so the session can persist it.
+      acc.thinking.add reasoning.getStr()
       result.add StreamEvent(kind: seThinkingDelta, text: reasoning.getStr())
     let toolCalls = delta.field("tool_calls")
     if toolCalls.kind == JArray:
@@ -303,7 +308,8 @@ proc streamChatAsync*(transport: Transport, baseUrl: string, apiKey: string,
     discard onEvent(StreamEvent(kind: seFinished))
   finally:
     resp.close()
-  return Response(text: acc.text, finishReason: acc.finishReason,
+  return Response(text: acc.text, thinking: acc.thinking,
+    finishReason: acc.finishReason,
     inputTokens: acc.inputTokens, outputTokens: acc.outputTokens,
     requestId: acc.requestId, toolCalls: acc.toToolCalls())
 
@@ -368,9 +374,12 @@ type ScriptedTransport* = ref object of Transport
 
 proc scriptChunks*(step: ScriptStep): seq[string] =
   ## One scripted step → the SSE wire chunks (the inverse of the mapping:
-  ## the text becomes a content delta, the tool calls the fragments at their
-  ## own index, the finish reason follows the shape, the usage rides its
-  ## chunk).
+  ## the reasoning becomes a `reasoning` delta, the text a content delta, the
+  ## tool calls the fragments at their own index, the finish reason follows the
+  ## shape, the usage rides its chunk).
+  if step.thinking.len > 0:
+    result.add "data: " & ($(%*{"choices": [{"delta": {"reasoning":
+      step.thinking}}]})) & "\n\n"
   var finish = "stop"
   if step.toolCalls.len > 0:
     finish = "tool_calls"

@@ -336,6 +336,8 @@ proc luaProviderGenerate(L: LuaState): cint {.cdecl.} =
     lua_setfield(L, -2, "args")
     lua_rawseti(L, -2, cint(i + 1))
   lua_setfield(L, -2, "toolCalls")
+  pushString(L, r.thinking)
+  lua_setfield(L, -2, "thinking")
   pushString(L, context.provider.get.name)
   lua_setfield(L, -2, "provider")
   # The generate completed: release every execute function ref (the config's
@@ -366,6 +368,10 @@ proc luaProviderSetScripted(L: LuaState): cint {.cdecl.} =
     var parsed = ScriptStep()
     if step.hasKey("text") and step["text"].kind == JString:
       parsed.text = step["text"].getStr
+    # The reasoning the step streams before its text: a scripted turn can carry
+    # it, which is what lets a test drive the whole path the session persists.
+    if step.hasKey("thinking") and step["thinking"].kind == JString:
+      parsed.thinking = step["thinking"].getStr
     parsed.usageInput = payloadInt(step, "usageInput")
     if step.hasKey("toolCalls") and step["toolCalls"].kind == JArray:
       for call in step["toolCalls"]:
@@ -469,6 +475,8 @@ proc luaProviderStream(L: LuaState): cint {.cdecl.} =
     lua_setfield(L, -2, "args")
     lua_rawseti(L, -2, cint(i + 1))
   lua_setfield(L, -2, "toolCalls")
+  pushString(L, r.thinking)
+  lua_setfield(L, -2, "thinking")
   pushString(L, context.provider.get.name)
   lua_setfield(L, -2, "provider")
   for refIndex in fnRefs:
@@ -613,7 +621,10 @@ proc luaSessionAppend(L: LuaState): cint {.cdecl.} =
       model: payload["model"].getStr, provider: payload["provider"].getStr,
       usageInput: payloadInt(payload, "usageInput"),
       usageOutput: payloadInt(payload, "usageOutput"),
-      stopReason: payloadString(payload, "stopReason"))
+      stopReason: payloadString(payload, "stopReason"),
+      # Optional like the file's own key: a loop that does not send it (an
+      # older runtime, a provider with no reasoning) appends an empty one.
+      thinking: payloadString(payload, "thinking"))
   of "toolResult":
     if not payload.hasKey("toolCallId") or not payload.hasKey("toolName") or
         not payload.hasKey("output"):

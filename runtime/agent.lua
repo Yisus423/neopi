@@ -342,6 +342,10 @@ function agent.runTurn(session, config)
   end
   session:append("assistant", {
     text = response.text or "",
+    -- The model's reasoning, persisted beside the message and never inside it:
+    -- an entry without it (an older file, a provider that streams none) reads
+    -- back as empty.
+    thinking = response.thinking or "",
     model = config.model,
     provider = response.provider or "",
     usageInput = (response.usage and response.usage.input) or 0,

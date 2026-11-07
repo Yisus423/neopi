@@ -205,3 +205,10 @@ suite "the provider table":
     check openAI("k").baseUrl == "https://api.openai.com/v1"
     check openRouter("k").name == "openrouter"
     check openRouter("k").baseUrl == "https://openrouter.ai/api/v1"
+
+suite "the provider's reasoning":
+  test "the provider's turn carries the model's reasoning":
+    let p = scriptedProvider(@[ScriptStep(thinking: "why", text: "yes")])
+    let r = stream(p.model("m"), "go", proc (e: StreamEvent): bool = true)
+    check r.text == "yes"
+    check r.thinking == "why"

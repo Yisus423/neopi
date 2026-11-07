@@ -531,3 +531,22 @@ suite "user config":
         loadUserConfig(root, ext.bus.state)
     finally:
       removeDir(root)
+  test "the streamed response table carries the reasoning":
+    let root = freshWorkspace("neopi-tp-expose-thinking")
+    let path = freshSessionPath("thinking")
+    try:
+      let ext = newExtensibility(root, none(Provider), newSession(path))
+      let L = ext.bus.state
+      runScript(L, """
+        neopi.provider.setScripted({{thinking = "why", text = "yes"}})
+      """)
+      let answer = evalString(L, """
+        local r = neopi.provider.stream({model = "m",
+          messages = {{role = "user", text = "go"}}},
+          function() return true end)
+        return tostring(r.text) .. "|" .. tostring(r.thinking)
+      """)
+      check answer == "yes|why"
+    finally:
+      removeDir(root)
+      removeFile(path)
