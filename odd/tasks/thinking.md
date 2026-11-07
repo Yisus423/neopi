@@ -155,6 +155,27 @@ text is ever lost in memory.
   reasoning again, FIRST and expanded (pi's order, the visible default), and the
   run's previews retire so each text appears exactly once (the reasoning
   included). Gate: 243 OK + 22 busted, exit 0.
+- **T5** — the independent verification, in two rounds. **Round 1** reproduced
+  every claim on the real binary, with fine evidence: the JSONL's ONLY new key is
+  `thinking` (a real turn's whole multiline reasoning lands in one assistant
+  entry, and a tool round-trip writes one per model turn); a file with that key
+  stripped resumes with its SHA unchanged before and after; the resumed session
+  renders the reasoning FIRST; Ctrl+T folds it with the label naming `Ctrl+T`; the
+  preference survives a restart; and the style is observable in the bytes (SGR
+  `3` for italic, `242` on dark and `245` on light, against the answer's reset).
+  **It also found one blocker**: a preference of the wrong TYPE (`"yes"`) was
+  reported at startup and then silently rewritten by Ctrl+T — the fix is
+  `6df6175`, one `preference` proc deciding the type for both the read and the
+  write.
+  **Round 2** (bounded, on the fixed tree): the file stays byte-identical
+  (`064ec310…` before and after), the startup warning AND the Ctrl+T failure are
+  both reported, the valid round-trip and the restart still work, invalid JSON
+  and a non-object stay byte-identical, an unrelated key is preserved, and the
+  focused regression plus the busted half (22 successes) pass. The network was
+  down for both rounds, so `nimble test` was replaced by the direct commands
+  (`nim c -r tests/tp_all.nim` + `./build/busted_main tests/spec`); the Nim
+  suite's single failure there is ROADMAP #31's fresh-`TMPDIR` isolation defect,
+  pre-existing and reproduced at baseline.
 - **The hint** — nimterm's `0399fa1` ("Let an application name the folded
   reasoning's key hint") makes the folded label's key configurable with this
   widget's own key as the default; its suite: 82 OK, 0 FAILED, exit 0. neopi's
