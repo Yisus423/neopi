@@ -122,6 +122,24 @@ wired by virtue of `toolInput` landing, but its content is a later slice's.
   met again in this codebase). The writer now normalizes what it STORES — an
   empty object for a tool result — and both readers tolerate nil, so no path can
   hand a nil node to a widget that dereferences it.
+- **T3** — the independent verification, in two rounds. **Round 1 (verdict:
+  blocker)** proved the visible half: the bash frame leads with
+  `$ printf 'TOOL33_OUTPUT\n'`, a `read` row shows its path, a hand-written OLD
+  row shows the bare name and does NOT crash (the nil-node path), the resumed
+  frame keeps the command, a stripped file resumes with its SHA unchanged, and
+  the baseline rendering differs by exactly one title line. It also found the
+  frozen contract UNMET: the arguments travelled back through Lua, so
+  `{"payload":{"nullable":null,"empty":{},"nested":{"z":2,"a":1}}}` was
+  persisted as `{"payload":{"empty":[],"nested":{"a":1,"z":2}}}` — the null
+  key vanished, `{}` became `[]`, and the order changed.
+  **The fix** (`50f3e54`): the arguments travel as TEXT, parsed once into the
+  entry's object.
+  **Round 2 (verdict: PASS)**: both probes come back BYTE-IDENTICAL — the `zKey`
+  object (raw bytes equal, top-level and nested order preserved, `{}` preserved)
+  and the registered custom tool (the `nullable` key present, `{}` preserved) —
+  and the same through a real scripted turn under a pty, with the JSONL lines
+  quoted. The neighbours' SHAs are identical and the frames are byte-identical to
+  round 1's. Suite: 247 OK plus 22 busted, both exit 0.
 
 ## Known limits
 
@@ -146,6 +164,12 @@ wired by virtue of `toolInput` landing, but its content is a later slice's.
 - **The output's collapse is the widget's** (two lines with `(Ctrl-O)` for the
   rest), so a long output and the command compete for the same few rows: the
   command always wins because it leads the title.
+- **A Lua-authored scripted turn cannot originate these shapes**: the stock CLI's
+  `neopi.provider.setScripted` turns `{}` into `[]` and carries neither a `null`
+  nor a table order, because a Lua table cannot. The verification said so plainly
+  — those values were ALREADY that shape in the provider's `argsJson` — so a test
+  that needs the exact shapes uses the Nim-side scripted provider, which is what
+  the regression test does.
 
 ## Log
 
