@@ -334,6 +334,11 @@ proc luaProviderGenerate(L: LuaState): cint {.cdecl.} =
     lua_setfield(L, -2, "name")
     pushJson(L, call.args)
     lua_setfield(L, -2, "args")
+    # The same arguments as TEXT, for the record: the model's key order, its
+    # nulls and its empty objects must survive, and a Lua table cannot carry any
+    # of the three (a null becomes nil and the key vanishes; `{}` reads as `[]`).
+    pushString(L, $call.args)
+    lua_setfield(L, -2, "argsJson")
     lua_rawseti(L, -2, cint(i + 1))
   lua_setfield(L, -2, "toolCalls")
   pushString(L, r.thinking)
@@ -473,6 +478,11 @@ proc luaProviderStream(L: LuaState): cint {.cdecl.} =
     lua_setfield(L, -2, "name")
     pushJson(L, call.args)
     lua_setfield(L, -2, "args")
+    # The same arguments as TEXT, for the record: the model's key order, its
+    # nulls and its empty objects must survive, and a Lua table cannot carry any
+    # of the three (a null becomes nil and the key vanishes; `{}` reads as `[]`).
+    pushString(L, $call.args)
+    lua_setfield(L, -2, "argsJson")
     lua_rawseti(L, -2, cint(i + 1))
   lua_setfield(L, -2, "toolCalls")
   pushString(L, r.thinking)
@@ -634,7 +644,19 @@ proc luaSessionAppend(L: LuaState): cint {.cdecl.} =
     # object when absent (an entry from an older runtime, or a tool the loop
     # calls without recording the arguments).
     var toolArgs = newJObject()
-    if payload.hasKey("toolArgs") and payload["toolArgs"].kind == JObject:
+    if payload.hasKey("toolArgsJson") and
+        payload["toolArgsJson"].kind == JString:
+      # The text form is the one the loop sends; parsing it HERE (rather than
+      # receiving a table) is what keeps the model's order, its nulls and its
+      # empty objects. Malformed, or not an object: an empty one, like a
+      # missing key reads.
+      try:
+        let parsed = parseJson(payload["toolArgsJson"].getStr)
+        if parsed.kind == JObject:
+          toolArgs = parsed
+      except JsonParsingError:
+        discard
+    elif payload.hasKey("toolArgs") and payload["toolArgs"].kind == JObject:
       toolArgs = payload["toolArgs"]
     entry = SessionEntry(kind: ekToolResult,
       toolCallId: payload["toolCallId"].getStr,

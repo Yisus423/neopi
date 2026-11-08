@@ -78,10 +78,14 @@ arguments — the same YAGNI the reasoning had (#32), on the `ekToolResult` side
    vocabulary. The command must not push it out of the row.
 
 **Frozen contracts**: the session's JSONL only GAINS an optional key (an old file
-keeps loading, and an entry without it reads as an empty object); the argument
-JSON is stored VERBATIM (never reserialized from a parsed form, so nothing the
-model sent is reordered or dropped); the adapter is the only place that decides
-how a call LOOKS.
+keeps loading, and an entry without it reads as an empty object); the arguments are
+stored as THE MODEL'S OWN OBJECT — its key order, its `null`s and its empty objects
+intact — which is why they travel as TEXT and are parsed once on the way in: the
+Lua table the tools execute with cannot carry any of the three (a `null` becomes
+`nil` and the key vanishes, and `{}` reads as `[]`). That last sentence is the
+verification's blocker, written into the contract: the first implementation handed
+the Lua table back and lost exactly those three things; the adapter is the only
+place that decides how a call LOOKS.
 
 **Out of scope (recorded, not forgotten)**: the duration (`Elapsed/Took`, pi's
 `durationMs`) — the item field exists and nothing measures it yet; and the
@@ -121,7 +125,27 @@ wired by virtue of `toolInput` landing, but its content is a later slice's.
 
 ## Known limits
 
-_(filled at closure)_
+- **The duration is not measured**: pi's row shows `Took 4.2s` and the item has
+  the field (`durationMs`), but nothing here records how long a call took — the
+  session does not carry it.
+- **The expanded form is still the widget's**: the item now carries the parsed
+  arguments (`toolInput`), which is exactly what the details hook reads, but
+  neopi sets no `toolDetails`, so a generic call shows its name and its path
+  rather than pi's full JSON arguments. Same field, later slice.
+- **The title is the adapter's decision**: the widget's OWN tool-event path
+  (`ueToolCalled`, unused by neopi today) still titles a row with the bare tool
+  name, so if a future slice posts those events the titles would differ until it
+  goes through the adapter.
+- **A call with no usable arguments shows the bare name**, deliberately: a row
+  that leads with a broken or empty command is worse than a row that shows no
+  command at all.
+- **The session grows by the arguments**, and for a `write` call they carry the
+  whole file content — the biggest line the file can gain per call. pi stores the
+  same thing (the tool call lives in its assistant message), and the alternative
+  — showing the command without storing it — cannot survive a resume.
+- **The output's collapse is the widget's** (two lines with `(Ctrl-O)` for the
+  rest), so a long output and the command compete for the same few rows: the
+  command always wins because it leads the title.
 
 ## Log
 

@@ -2998,3 +2998,36 @@ suite "the tool rows":
     finally:
       removeDir(root)
       removeFile(path)
+  test "the tool call's arguments persist verbatim":
+    let root = freshWorkspace("neopi-tp-tui-tool-args-verbatim")
+    let path = freshSessionPath("tool-args-verbatim")
+    try:
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("p", "m", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      discard wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "scripted")
+      wireApp(addr st, L, st.app)
+
+      let expected = parseJson(
+        """{"payload":{"nullable":null,"empty":{},"nested":{"z":2,"a":1}}}""")
+      setProvider(L, some(scriptedProvider(@[
+        ScriptStep(toolCalls: @[(id: "c1", name: "probe", args: expected)]),
+        ScriptStep(text: "done")])))
+      runScript(L, """
+        neopi.registerTool("probe", "probe tool",
+          {type = "object", properties = {payload = {type = "object"}}},
+          function(args) return "probe output" end)
+      """)
+
+      st.inputW.setText("go")
+      sendTurn(addr st, L)
+      # Verbatim: the same keys, the same order, `null` intact and `{}` still an
+      # object — the round trip through a Lua table cannot promise any of that.
+      check $sess.history()[2].toolArgs == $expected
+    finally:
+      removeDir(root)
+      removeFile(path)

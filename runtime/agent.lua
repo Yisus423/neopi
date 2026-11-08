@@ -364,9 +364,12 @@ function agent.runTurn(session, config)
         toolName = call.name,
         output = output,
         isError = isError,
-        -- The call the model made, VERBATIM: without it the transcript can
-        -- only show what a command printed, never which command ran.
-        toolArgs = call.args,
+        -- The call the model made, as the model's own JSON TEXT: a Lua table
+        -- cannot carry a null or tell `{}` from `[]`, so the arguments that get
+        -- written down travel as text and are parsed on the way in. Without
+        -- them the transcript can only show what a command printed, never which
+        -- command ran.
+        toolArgsJson = call.argsJson,
       })
     end
     -- The compaction trigger (pi's prepareNextTurn point): the last
