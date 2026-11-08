@@ -103,7 +103,21 @@ wired by virtue of `toolInput` landing, but its content is a later slice's.
 
 ## Evidence
 
-_(filled as the tasks land: commit → task → the check that passed)_
+- **T1** — the arguments reach the session. RED: `undeclared field: 'toolArgs'`
+  in `tests/tp_session.nim`; GREEN: `tp_session` 12/12 — the round-trip and a
+  hand-written OLD line reading an empty object, never nil — and `tp_tui` 95/95,
+  where the end-to-end assertion reads the driven `write` call's arguments
+  (`history()[2].toolArgs["path"]`).
+- **T2** — the row leads with the call. GREEN: `tp_tui` 96/96 — the adapter's
+  decision for bash (`$ printf hi`), for a `read` (`read src/neopi.nim`) and for
+  a call whose entry has no arguments (the bare name, and an EMPTY object rather
+  than nil), plus the RENDERED row: the session seeds the transcript and the
+  canvas shows `$ printf hi` above the output.
+  **The test caught a crash before it shipped**: a hand-built entry carries a nil
+  `toolArgs`, and `hasKey` on nil is a SEGFAULT, not a false (`std/json`'s trap,
+  met again in this codebase). The writer now normalizes what it STORES — an
+  empty object for a tool result — and both readers tolerate nil, so no path can
+  hand a nil node to a widget that dereferences it.
 
 ## Known limits
 

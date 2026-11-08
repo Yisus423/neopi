@@ -60,6 +60,26 @@ proc entryKindToItemKind(kind: EntryKind): nttranscript.TranscriptItemKind =
   of ekToolResult: nttranscript.tikTool
   of ekCompaction: nttranscript.tikStatus
 
+proc toolRowTitle(entry: SessionEntry): string =
+  ## How a tool call leads its row. pi's bash row begins with `$ <command>` — the
+  ## command IS the identity and the tool's name adds nothing to it — while any
+  ## other call keeps its name and gains the argument a user recognises, the
+  ## path. A call with neither stays the bare name.
+  # A hand-built entry can carry a nil node (the writer normalizes what it
+  # STORES, but nothing forces a caller to build one through the writer): every
+  # read here tolerates nil, because `hasKey` on nil is a segfault, not a false.
+  if not entry.toolArgs.isNil:
+    if entry.toolArgs.hasKey("command") and
+        entry.toolArgs["command"].kind == JString:
+      let command = entry.toolArgs["command"].getStr
+      if command.len > 0:
+        return "$ " & command
+    if entry.toolArgs.hasKey("path") and entry.toolArgs["path"].kind == JString:
+      let path = entry.toolArgs["path"].getStr
+      if path.len > 0:
+        return entry.toolName & " " & path
+  entry.toolName
+
 proc adapterItem*(entry: SessionEntry): nttranscript.TranscriptItem =
   ## Map one session entry onto nimterm's transcript item: the kind mapping
   ## plus the kind-specific fields nimterm renders (the text, the tool name
@@ -71,9 +91,14 @@ proc adapterItem*(entry: SessionEntry): nttranscript.TranscriptItem =
     revision: 1)
   case entry.kind
   of ekToolResult:
-    result.title = entry.toolName
+    result.title = toolRowTitle(entry)
     result.text = entry.output
     result.isError = entry.isError
+    # The call's arguments travel WITH the item (verbatim, never nil): the
+    # widget's details hook reads them, and a later slice can grow the expanded
+    # form without touching the session again.
+    result.toolInput =
+      if entry.toolArgs.isNil: newJObject() else: entry.toolArgs
   of ekCompaction:
     result.title = "compaction"
     result.text = entry.summary

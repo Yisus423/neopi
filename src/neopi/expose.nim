@@ -630,10 +630,16 @@ proc luaSessionAppend(L: LuaState): cint {.cdecl.} =
         not payload.hasKey("output"):
       raiseLuaError(L,
         "the toolResult payload needs toolCallId, toolName, and output")
+    # The call's arguments, when the loop sends them: OPTIONAL, and an empty
+    # object when absent (an entry from an older runtime, or a tool the loop
+    # calls without recording the arguments).
+    var toolArgs = newJObject()
+    if payload.hasKey("toolArgs") and payload["toolArgs"].kind == JObject:
+      toolArgs = payload["toolArgs"]
     entry = SessionEntry(kind: ekToolResult,
       toolCallId: payload["toolCallId"].getStr,
       toolName: payload["toolName"].getStr, output: payload["output"].getStr,
-      isError: payloadBool(payload, "isError"))
+      isError: payloadBool(payload, "isError"), toolArgs: toolArgs)
   of "compaction":
     if not payload.hasKey("summary") or not payload.hasKey("firstKeptId") or
         not payload.hasKey("tokensBefore"):

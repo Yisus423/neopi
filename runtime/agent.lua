@@ -364,6 +364,9 @@ function agent.runTurn(session, config)
         toolName = call.name,
         output = output,
         isError = isError,
+        -- The call the model made, VERBATIM: without it the transcript can
+        -- only show what a command printed, never which command ran.
+        toolArgs = call.args,
       })
     end
     -- The compaction trigger (pi's prepareNextTurn point): the last

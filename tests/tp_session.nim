@@ -17,6 +17,30 @@ proc sampleAssistant(text, model: string): SessionEntry =
     usageInput: 12, usageOutput: 34, stopReason: "end_turn")
 
 suite "session tree":
+  test "the tool call's arguments round-trip, and an older file still loads":
+    let path = freshPath("toolargs")
+    let oldPath = freshPath("toolargs-old")
+    try:
+      let s = newSession(path)
+      s.append(SessionEntry(kind: ekToolResult, toolCallId: "c1",
+        toolName: "bash", output: "hi\n", isError: false,
+        toolArgs: %*{"command": "printf hi"}))
+      let reopened = newSession(path)
+      check reopened.entries[0].toolArgs["command"].getStr == "printf hi"
+
+      # An entry without the key reads as an EMPTY object, never nil: the
+      # adapter hands this node to the widget, and a nil node there is a crash
+      # waiting for the first frame.
+      writeFile(oldPath, "{\"type\":\"toolResult\",\"id\":1,\"parentId\":null," &
+        "\"timestamp\":\"2026-01-01T00:00:00Z\",\"toolCallId\":\"c1\"," &
+        "\"toolName\":\"bash\",\"output\":\"hi\\n\",\"isError\":false}\n")
+      let old = newSession(oldPath)
+      check old.entries[0].toolArgs.kind == JObject
+      check old.entries[0].toolArgs.len == 0
+    finally:
+      removeFile(path)
+      removeFile(oldPath)
+
   test "the assistant's reasoning round-trips, and an older file still loads":
     let path = freshPath("thinking")
     let oldPath = freshPath("thinking-old")

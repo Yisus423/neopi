@@ -65,6 +65,11 @@ type
     of ekToolResult:
       toolCallId*, toolName*, output*: string
       isError*: bool
+      toolArgs*: JsonNode
+        ## The arguments the model sent for this call, VERBATIM and OPTIONAL:
+        ## a session written before the field existed reads an empty object,
+        ## never nil (the transcript hands this node to a widget that
+        ## dereferences it).
     of ekCompaction:
       summary*: string
       firstKeptId*, tokensBefore*: int
@@ -103,6 +108,13 @@ proc reqBool(node: JsonNode, key: string, line: int): bool =
   if node.hasKey(key) and node[key].kind == JBool:
     return node[key].getBool
   missingField(line, key)
+
+proc optObject(node: JsonNode, key: string): JsonNode =
+  ## An OPTIONAL object field: missing, nil or of another kind reads as an EMPTY
+  ## object. Never nil, for the reason the field documents.
+  if node.hasKey(key) and node[key].kind == JObject:
+    return node[key]
+  newJObject()
 
 proc optString(node: JsonNode, key: string): string =
   ## An OPTIONAL string field: missing (or not a string) reads as empty, which
@@ -146,6 +158,8 @@ proc entryToJson*(entry: SessionEntry): JsonNode =
     result["toolName"] = newJString(entry.toolName)
     result["output"] = newJString(entry.output)
     result["isError"] = newJBool(entry.isError)
+    result["toolArgs"] =
+      if entry.toolArgs.isNil: newJObject() else: entry.toolArgs
   of ekCompaction:
     result["summary"] = newJString(entry.summary)
     result["firstKeptId"] = newJInt(entry.firstKeptId)
@@ -177,7 +191,8 @@ proc entryFromJson(node: JsonNode, line: int): SessionEntry =
       timestamp: timestamp, toolCallId: reqString(node, "toolCallId", line),
       toolName: reqString(node, "toolName", line),
       output: reqString(node, "output", line),
-      isError: reqBool(node, "isError", line))
+      isError: reqBool(node, "isError", line),
+      toolArgs: optObject(node, "toolArgs"))
   of "compaction":
     result = SessionEntry(kind: ekCompaction, id: id, parentId: parentId,
       timestamp: timestamp, summary: reqString(node, "summary", line),
@@ -253,6 +268,11 @@ proc append*(s: Session, entry: SessionEntry) =
     if s.currentId > 0: some(s.currentId)
     else: none(int)
   stored.timestamp = now().format("yyyy-MM-dd'T'HH:mm:sszzz")
+  # The writer's invariant, so no reader has to survive a nil node: a tool
+  # result always carries an OBJECT (an empty one when the caller set none),
+  # which is what the file also produces for an entry written before the field.
+  if stored.kind == ekToolResult and stored.toolArgs.isNil:
+    stored.toolArgs = newJObject()
   var line = ""
   toUgly(line, entryToJson(stored))
   line.add '\n'

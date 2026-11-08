@@ -1674,6 +1674,9 @@ suite "the turn drive":
       # primitives inside the first turn.
       check sess.history().len == 4
       check readFile(root / "drive.txt") == "one"
+      # The call's arguments landed WITH the result, verbatim: the transcript can
+      # now show which call ran, not only what it printed.
+      check sess.history()[2].toolArgs["path"].getStr == "drive.txt"
       # The transcript rebuilt from the session: every entry renders.
       check st.transcriptW.transcript.items.len == 4
     finally:
@@ -2954,6 +2957,44 @@ suite "the folded reasoning's hint":
       st.transcriptW.render(canvas, rect(0, 0, 40, 10))
       check "Thinking · 2 lines (Ctrl+T)" in canvas.plainText
       check "Ctrl-O" notin canvas.plainText
+    finally:
+      removeDir(root)
+      removeFile(path)
+
+suite "the tool rows":
+  # The user reads what a command printed without knowing which command ran: the
+  # call's arguments are persisted now, and the ADAPTER decides how the call
+  # leads the row — the same decision for a live turn and for a resume.
+  test "the row leads with the call: the command for bash, the name and path otherwise":
+    let root = freshWorkspace("neopi-tp-tui-tool-rows")
+    let path = freshSessionPath("tool-rows")
+    try:
+      let bash = SessionEntry(kind: ekToolResult, toolCallId: "c1",
+        toolName: "bash", output: "hi\n", isError: false,
+        toolArgs: %*{"command": "printf hi"})
+      let readCall = SessionEntry(kind: ekToolResult, toolCallId: "c2",
+        toolName: "read", output: "file body", isError: false,
+        toolArgs: %*{"path": "src/neopi.nim"})
+      let bare = SessionEntry(kind: ekToolResult, toolCallId: "c3",
+        toolName: "write", output: "written", isError: false)
+
+      check adapterItems(bash)[0].title == "$ printf hi"
+      check adapterItems(bash)[0].toolInput["command"].getStr == "printf hi"
+      check adapterItems(readCall)[0].title == "read src/neopi.nim"
+      check adapterItems(bare)[0].title == "write"
+      check adapterItems(bare)[0].toolInput.kind == JObject
+
+      # And what the user actually sees: the session seeds the transcript, so the
+      # rendered row is the adapter's decision.
+      let sess = newSession(path)
+      sess.append(SessionEntry(kind: ekUser, text: "go"))
+      sess.append(bash)
+      let st = initTuiState("p", "m", sess, root)
+      discard buildScreen(unsafeAddr st)
+      var canvas = newCanvas(size(60, 12))
+      st.transcriptW.render(canvas, rect(0, 0, 60, 12))
+      check "$ printf hi" in canvas.plainText
+      check "hi" in canvas.plainText
     finally:
       removeDir(root)
       removeFile(path)
