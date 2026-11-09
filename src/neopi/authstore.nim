@@ -65,12 +65,17 @@ proc writableNode(path: string): JsonNode =
       "the credential file is not a JSON object: " & path)
   node
 
-proc writeNode(path, dir: string, node: JsonNode) =
-  ## Write the credential file whole and owner-only: the new content lands in a
+proc writeNode*(path, dir: string, node: JsonNode) =
+  ## Write the JSON file whole and owner-only: the new content lands in a
   ## temporary file beside the target and is renamed over it, so a reader never
   ## sees a half-written file and a failure leaves the previous one intact. The
   ## mode is applied to the EMPTY temporary file first, so the secret is never
   ## written to a readable one.
+  ##
+  ## It is the credential store's write and the catalog cache's: the same file
+  ## discipline (atomic, owner-only, one implementation), even though a cache
+  ## holds no secret — the temporary file is never readable, which costs
+  ## nothing and keeps one path to audit.
   if not dirExists(dir):
     # `createDir` takes no mode in this Nim: create it, then narrow it. The
     # directory holds one file, and it is narrowed before the secret is written.

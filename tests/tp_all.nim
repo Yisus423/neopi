@@ -4,6 +4,7 @@ import unittest2
 import tp_provider
 import tp_wire
 import tp_authstore
+import tp_modelsstore
 import tp_settings
 import tp_openai_compat
 import tp_lua
