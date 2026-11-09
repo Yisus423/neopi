@@ -30,6 +30,13 @@ type
     ## One tool call the model requested: the call id, the tool name, and the
     ## parsed arguments.
 
+  ModelInfo* = object
+    ## One entry of a provider's model catalog: the id the wire addresses and
+    ## the display name the picker shows. `name` is empty when the endpoint
+    ## omits it — it is never invented from the id.
+    id*: string
+    name*: string
+
   Message* = object
     ## One role and its text. An assistant message may also carry the tool
     ## calls it requested (`toolCalls`), and a tool result message carries the

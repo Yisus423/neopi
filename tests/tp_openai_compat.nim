@@ -443,3 +443,16 @@ suite "the openai model catalog":
     let p = openAI("k", baseUrl = "https://example.test/v1", transport = fake)
     expect ProviderError:
       discard p.listModels()
+
+  test "the catalog keeps each model's display name":
+    # The `/model` picker shows `Model Name: <name>` (pi's line), so the
+    # parser has to carry the endpoint's `name` beside the id. An entry
+    # without one keeps an empty name instead of borrowing the id.
+    let models = parseModels("{\"data\": [" &
+      "{\"id\": \"z-ai/glm-5.3\", \"name\": \"GLM-5.3\"}, " &
+      "{\"id\": \"bare\"}]}")
+    check models.len == 2
+    check models[0].id == "z-ai/glm-5.3"
+    check models[0].name == "GLM-5.3"
+    check models[1].id == "bare"
+    check models[1].name == ""

@@ -182,12 +182,15 @@ proc buildModelsRequest*(baseUrl, apiKey: string): WireRequest =
   WireRequest(url: baseUrl & "/models", httpMethod: "GET",
     headers: modelsHeaders(apiKey), body: "")
 
-proc parseModels*(body: string): seq[string] =
-  ## The OpenAI-compatible catalog (`{"data": [{"id": "..."}]}`) → the
-  ## model ids, in the endpoint's order. A body that is not valid JSON, or
-  ## that has no `data` array, raises ProviderError: a failed catalog is
-  ## never an empty catalog. Entries without a non-empty string id are
-  ## skipped (the endpoint sometimes carries metadata-only rows).
+proc parseModels*(body: string): seq[ModelInfo] =
+  ## The OpenAI-compatible catalog (`{"data": [{"id": "...", "name": "..."}]}`)
+  ## → the models, in the endpoint's order: the id the wire addresses and the
+  ## display name the picker shows (`/model`'s `Model Name:` line is the
+  ## endpoint's `name`, not a prettified id; an entry without one keeps an
+  ## empty name). A body that is not valid JSON, or that has no `data` array,
+  ## raises ProviderError: a failed catalog is never an empty catalog. Entries
+  ## without a non-empty string id are skipped (the endpoint sometimes carries
+  ## metadata-only rows).
   var node: JsonNode
   try:
     node = parseJson(body)
@@ -199,7 +202,9 @@ proc parseModels*(body: string): seq[string] =
   for entry in node["data"]:
     let id = entry.field("id")
     if id.kind == JString and id.getStr("").len > 0:
-      result.add id.getStr()
+      let name = entry.field("name")
+      result.add ModelInfo(id: id.getStr(),
+        name: if name.kind == JString: name.getStr() else: "")
 
 proc nextChunk(resp: WireResponse, pump: Pump,
     readTimeoutMs: int): Future[string] {.async: (raises: [CatchableError]).} =
@@ -355,7 +360,8 @@ proc listModelsAsync*(transport: Transport, baseUrl: string, apiKey: string):
     err.status = resp.status
     err.retryable = resp.status == 429 or resp.status >= 500
     raise err
-  return parseModels(body)
+  for model in parseModels(body):
+    result.add model.id
 
 proc listModels*(transport: Transport, baseUrl: string, apiKey: string):
     seq[string] =
