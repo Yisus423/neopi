@@ -2,7 +2,7 @@
 ## the neopi StreamEvents and the accumulated Response. The hand-written
 ## chunks pin the wire shape; the two captured OpenRouter fixtures replay
 ## the real stream end-to-end (L1 — keyless, no network).
-import std/[json, strutils, times]
+import std/[json, sequtils, strutils, times]
 import chronos
 import chronos/timer
 import neopi/openai_compat
@@ -167,6 +167,19 @@ type FailingTransport = ref object of Transport
 method fetch*(t: FailingTransport, req: WireRequest): Future[WireResponse] {.
     async.} =
   raise newException(IOError, "boom")
+
+type SlowFetchTransport = ref object of Transport
+  ## The response HEAD that never arrives: the connect and headers wait, which
+  ## is a different wait from the body's silence.
+  delay: timer.Duration
+
+method fetch*(t: SlowFetchTransport, req: WireRequest): Future[WireResponse] {.
+    async.} =
+  await sleepAsync(t.delay)
+  return newFakeWireResponse(200, @["{\"data\": []}"])
+
+proc newSlowFetchTransport(delay: timer.Duration): SlowFetchTransport =
+  SlowFetchTransport(delay: delay)
 
 suite "the openai provider on the wire":
   test "the request builder shapes the chat completions payload":
@@ -401,7 +414,7 @@ suite "the openai model catalog":
     fake.canned(200, @["{\"data\": [{\"id\": \"gpt-4o\"}]}"])
     let p = openAI("test-key", baseUrl = "https://example.test/v1",
       transport = fake)
-    discard p.listModels()
+    discard p.fetchModels()
     check fake.calls.len == 1
     check fake.calls[0].httpMethod == "GET"
     check fake.calls[0].url == "https://example.test/v1/models"
@@ -415,14 +428,14 @@ suite "the openai model catalog":
     fake.canned(200, @["{\"data\": [{\"id\": \"gpt-4o\"},",
       " {\"id\": \"gpt-4o-mini\"}]}"])
     let p = openAI("k", baseUrl = "https://example.test/v1", transport = fake)
-    check p.listModels() == @["gpt-4o", "gpt-4o-mini"]
+    check p.fetchModels().models.mapIt(it.id) == @["gpt-4o", "gpt-4o-mini"]
 
   test "a non-200 status raises ProviderError with the body":
     let fake = newFakeTransport()
     fake.canned(500, @["{\"error\": \"boom\"}"])
     let p = openAI("k", baseUrl = "https://example.test/v1", transport = fake)
     try:
-      discard p.listModels()
+      discard p.fetchModels()
       fail()
     except ProviderError as e:
       check "500" in e.msg
@@ -435,14 +448,14 @@ suite "the openai model catalog":
     fake.canned(200, @["this is not json"])
     let p = openAI("k", baseUrl = "https://example.test/v1", transport = fake)
     expect ProviderError:
-      discard p.listModels()
+      discard p.fetchModels()
 
   test "a JSON body without a data array raises ProviderError":
     let fake = newFakeTransport()
     fake.canned(200, @["{\"object\": \"list\"}"])
     let p = openAI("k", baseUrl = "https://example.test/v1", transport = fake)
     expect ProviderError:
-      discard p.listModels()
+      discard p.fetchModels()
 
   test "the catalog keeps each model's display name":
     # The `/model` picker shows `Model Name: <name>` (pi's line), so the
@@ -456,3 +469,72 @@ suite "the openai model catalog":
     check models[0].name == "GLM-5.3"
     check models[1].id == "bare"
     check models[1].name == ""
+
+  test "a stored validator goes back as a conditional request header":
+    let fake = newFakeTransport()
+    fake.canned(200, @["{\"data\": [{\"id\": \"a\"}]}"])
+    let p = openAI("k", baseUrl = "https://example.test/v1", transport = fake)
+    discard p.fetchModels(etag = "W/\"abc\"",
+      lastModified = "Tue, 01 Jan 2030 00:00:00 GMT")
+    check ("If-None-Match", "W/\"abc\"") in fake.calls[0].headers
+    check ("If-Modified-Since", "Tue, 01 Jan 2030 00:00:00 GMT") in
+      fake.calls[0].headers
+
+  test "a 304 answers notModified and keeps a validator to revalidate with":
+    let fake = newFakeTransport()
+    # The endpoint echoes the ETag on its 304.
+    fake.canned(304, @[], @[("ETag", "W/\"def\"")])
+    let p = openAI("k", baseUrl = "https://example.test/v1", transport = fake)
+    let echoed = p.fetchModels(etag = "W/\"abc\"")
+    check echoed.notModified
+    check echoed.models.len == 0
+    check echoed.etag == "W/\"def\""
+    # A 304 without one keeps the request's own validator, so the NEXT
+    # refresh can still be conditional instead of a full download.
+    let plain = newFakeTransport()
+    plain.canned(304, @[])
+    let q = openAI("k", baseUrl = "https://example.test/v1", transport = plain)
+    let kept = q.fetchModels(etag = "W/\"abc\"",
+      lastModified = "Tue, 01 Jan 2030 00:00:00 GMT")
+    check kept.notModified
+    check kept.etag == "W/\"abc\""
+    check kept.lastModified == "Tue, 01 Jan 2030 00:00:00 GMT"
+
+  test "a 200 keeps the endpoint's validators":
+    let fake = newFakeTransport()
+    fake.canned(200, @["{\"data\": [{\"id\": \"a\"}]}"],
+      @[("etag", "W/\"def\""),
+        ("Last-Modified", "Tue, 01 Jan 2030 00:00:00 GMT")])
+    let p = openAI("k", baseUrl = "https://example.test/v1", transport = fake)
+    let fetched = p.fetchModels()
+    check fetched.models.len == 1
+    check not fetched.notModified
+    check fetched.etag == "W/\"def\""
+    check fetched.lastModified == "Tue, 01 Jan 2030 00:00:00 GMT"
+
+  test "an aborting pump cancels a catalog fetch whose body is silent":
+    let fake = newFakeTransport()
+    fake.cannedResponse(newSlowResponse(timer.seconds(30)))
+    var polls = 0
+    let pump: Pump = proc (): bool =
+      inc polls
+      polls >= 2
+
+    let started = epochTime()
+    expect provider.CancelledError:
+      discard fetchModels(fake, "https://x/v1", "k", pump = pump)
+    check polls >= 2
+    check epochTime() - started < 1.0
+
+  test "an aborting pump cancels a catalog fetch whose head is still coming":
+    let slow = newSlowFetchTransport(timer.seconds(30))
+    var polls = 0
+    let pump: Pump = proc (): bool =
+      inc polls
+      polls >= 2
+
+    let started = epochTime()
+    expect provider.CancelledError:
+      discard fetchModels(slow, "https://x/v1", "k", pump = pump)
+    check polls >= 2
+    check epochTime() - started < 1.0

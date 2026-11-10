@@ -1440,19 +1440,17 @@ proc openModel(state: ptr TuiState, L: LuaState) =
     appendStatusLine(state, "no provider: run /login or set " &
       providerEnvVar(state[].provider))
     return
-  # The fetch BLOCKS the loop for as long as the provider takes to answer —
-  # about a second against a real endpoint, more on a slow network, and during
-  # it the app processes no event at all (measured while F2 was verified). The
-  # wait gets a status and a FORCED frame, because the budget would otherwise
-  # defer the explanation until after the wait it explains. Making the fetch
-  # itself non-blocking belongs to an async event source (one that polls the
-  # chronos dispatcher, the shape nimlet's turn source uses) and is not this
-  # slice's: what ships here is that the freeze stops being silent.
+  # The fetch runs with the provider's own pump, so its two waits — the
+  # response head and the body — hand control back between ticks while a slow
+  # endpoint answers: the app keeps painting and Esc/Ctrl+C still reach it.
+  # The status and its FORCED frame stay, because nimterm's budget would
+  # otherwise defer the explanation until after the wait it explains.
   setCoreStatus(state, "fetching the models…")
   presentApp(state, force = true)
   var ids: seq[string]
   try:
-    ids = listModels(backing.get)
+    for model in fetchModels(backing.get).models:
+      ids.add model.id
   except CatchableError as e:
     setCoreStatus(state, "")
     appendStatusLine(state, "cannot list the models: " & e.msg)

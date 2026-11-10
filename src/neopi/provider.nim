@@ -194,12 +194,14 @@ proc model*(p: Provider, id: string): Model =
   ## Create a model reference for a provider and model ID.
   Model(provider: p, id: id)
 
-proc listModels*(p: Provider): seq[string] =
+proc fetchModels*(p: Provider, etag = "", lastModified = ""): CatalogFetch =
   ## The provider's real model catalog: `GET <baseUrl>/models` over the
-  ## provider's own transport, parsed into model ids. A transport failure,
-  ## a non-200 status, or a malformed body raises ProviderError. The
-  ## transport stays private: the caller holds a Provider and receives ids.
-  listModels(p.transport, p.baseUrl, p.apiKey)
+  ## provider's own transport, parsed into the models. A stored validator
+  ## makes it a conditional request (a `304` answers `notModified`), and the
+  ## provider's own pump rides along, so a refresh does not freeze the owner's
+  ## frame. A transport failure, a non-200 status, or a malformed body raises
+  ## ProviderError. The transport stays private: the caller holds a Provider.
+  fetchModels(p.transport, p.baseUrl, p.apiKey, etag, lastModified, p.pump)
 
 proc splitSystem(messages: seq[Message]): tuple[system: string, rest: seq[Message]] =
   ## Split system-role texts out of the message list. The wire carries one

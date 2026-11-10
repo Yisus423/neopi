@@ -123,10 +123,16 @@ method fetch*(t: ChronosTransport, req: WireRequest): Future[WireResponse] {.
         headers = req.headers,
         body = req.body.toOpenArrayByte(0, req.body.high)).get()
   let resp = await send(request)
+  # The response headers travel with the response: the catalog's conditional
+  # refresh reads `ETag`/`Last-Modified` off them to revalidate with, and a
+  # consumer that cannot see them can only ever download the whole body.
+  var headers: seq[(string, string)]
+  for key, value in resp.headers.stringItems():
+    headers.add (key, value)
   # The body reader is created here, not lazily: chronos's response carries no
   # reader until `getBodyReader` builds the chunked/sized/bounded chain, and
   # reading the nil field crashes (the live path never ran before).
-  return ChronosWireResponse(status: resp.status, resp: resp,
+  return ChronosWireResponse(status: resp.status, headers: headers, resp: resp,
     request: request, reader: resp.getBodyReader())
 
 method next*(r: ChronosWireResponse): Future[string] {.async.} =

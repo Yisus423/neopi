@@ -4,7 +4,7 @@
 ## events: they are the model's own words, not the message text, so they
 ## never accumulate into it. The stream loop owns the end semantics: one
 ## seFinished after the done.
-import std/json
+import std/[json, strutils]
 import chronos
 import neopi/pump
 import neopi/wire
@@ -169,18 +169,26 @@ proc chatHeaders*(apiKey: string): seq[(string, string)] =
   @[("Authorization", "Bearer " & apiKey),
     ("Content-Type", "application/json")]
 
-proc modelsHeaders(apiKey: string): seq[(string, string)] =
-  ## The catalog request headers: the bearer key only (a GET carries no
-  ## body, so no content type). A keyless provider sends no header at all.
-  if apiKey.len == 0:
-    return @[]
-  @[("Authorization", "Bearer " & apiKey)]
+proc modelsHeaders(apiKey, etag, lastModified: string): seq[(string, string)] =
+  ## The catalog request headers: the bearer key (a GET carries no body, so no
+  ## content type; a keyless provider sends none at all), plus each stored
+  ## validator as `If-None-Match` / `If-Modified-Since`. That is what turns a
+  ## refresh into a conditional request the endpoint can answer with a 304
+  ## instead of the whole catalog again.
+  if apiKey.len > 0:
+    result.add ("Authorization", "Bearer " & apiKey)
+  if etag.len > 0:
+    result.add ("If-None-Match", etag)
+  if lastModified.len > 0:
+    result.add ("If-Modified-Since", lastModified)
 
-proc buildModelsRequest*(baseUrl, apiKey: string): WireRequest =
-  ## The model-catalog request: `GET <baseUrl>/models` with the bearer key.
-  ## The base is the provider's (the same one `/chat/completions` uses).
+proc buildModelsRequest*(baseUrl, apiKey: string, etag = "",
+    lastModified = ""): WireRequest =
+  ## The model-catalog request: `GET <baseUrl>/models` with the bearer key and
+  ## the validators a previous response offered (both optional). The base is
+  ## the provider's (the same one `/chat/completions` uses).
   WireRequest(url: baseUrl & "/models", httpMethod: "GET",
-    headers: modelsHeaders(apiKey), body: "")
+    headers: modelsHeaders(apiKey, etag, lastModified), body: "")
 
 proc parseModels*(body: string): seq[ModelInfo] =
   ## The OpenAI-compatible catalog (`{"data": [{"id": "...", "name": "..."}]}`)
@@ -327,16 +335,56 @@ proc streamChat*(transport: Transport, baseUrl: string, apiKey: string,
   waitFor streamChatAsync(transport, baseUrl, apiKey, model, messages,
     onEvent, system, tools, readTimeoutMs, pump)
 
-proc listModelsAsync*(transport: Transport, baseUrl: string, apiKey: string):
-    Future[seq[string]] {.async: (raises: [CatchableError]).} =
-  ## One model-catalog fetch over the wire: `GET <baseUrl>/models` through
-  ## the transport, the whole body accumulated and parsed into ids. A
-  ## transport failure, a non-200 status, or a malformed body raises
+proc headerValue(headers: seq[(string, string)], name: string): string =
+  ## The first header whose name matches `name` case-insensitively, or "".
+  ## HTTP header names are not case-sensitive and endpoints spell them both
+  ## ways (`ETag` and `etag`), so a case-sensitive read would silently lose
+  ## the validator and turn every refresh back into a full download.
+  for (key, value) in headers:
+    if cmpIgnoreCase(key, name) == 0:
+      return value
+  ""
+
+proc fetchPumped(transport: Transport, req: WireRequest,
+    pump: Pump): Future[WireResponse] {.async: (raises: [CatchableError]).} =
+  ## `transport.fetch` with the pump's tick. The wait for the response head —
+  ## the connect and the headers — is a wait like the body's: an endpoint that
+  ## parks on it must still let its owner repaint and abort. With no pump this
+  ## is the plain fetch, byte for byte.
+  if pump.isNil:
+    return await transport.fetch(req)
+  let pending = transport.fetch(req)
+  while true:
+    let tick = sleepAsync(pumpTickMs.milliseconds)
+    let winner = await race(FutureBase(pending), FutureBase(tick))
+    if winner != FutureBase(tick):
+      await tick.cancelAndWait()
+      return await pending
+    if pumpAbort(pump):
+      await pending.cancelAndWait()
+      raise newException(primitives.CancelledError,
+        "the catalog fetch was cancelled")
+
+proc fetchModelsAsync*(transport: Transport, baseUrl: string, apiKey: string,
+    etag = "", lastModified = "", pump: Pump = nil):
+    Future[CatalogFetch] {.async: (raises: [CatchableError]).} =
+  ## One model-catalog fetch over the wire: `GET <baseUrl>/models` through the
+  ## transport, the whole body accumulated and parsed. A stored validator goes
+  ## back as a conditional header, and a `304` answers `notModified` with NO
+  ## models — the caller keeps its cached list — plus the validators to
+  ## revalidate with (the endpoint's when it echoes one, else the request's, so
+  ## the next refresh can still be conditional). A 200 answers the parsed
+  ## models and the endpoint's validators.
+  ##
+  ## With a pump, BOTH waits — the response head and the body — hand control
+  ## back between 50 ms ticks, so a slow endpoint no longer freezes the frame
+  ## and an abort raises the same CancelledError a cancelled stream raises.
+  ## A transport failure, a non-200 status, or a malformed body raises
   ## ProviderError (the body rides the non-200 message).
-  let wireReq = buildModelsRequest(baseUrl, apiKey)
+  let wireReq = buildModelsRequest(baseUrl, apiKey, etag, lastModified)
   var resp: WireResponse
   try:
-    resp = await transport.fetch(wireReq)
+    resp = await fetchPumped(transport, wireReq, pump)
   except CancelledError:
     raise
   except ProviderError:
@@ -345,10 +393,20 @@ proc listModelsAsync*(transport: Transport, baseUrl: string, apiKey: string):
     var err = newException(ProviderError, "the transport failed: " & e.msg)
     err.retryable = true
     raise err
+  # Read the validators BEFORE the response is closed: they are what the next
+  # refresh revalidates with, and a 304 carries no body to read them from.
+  let responseEtag = headerValue(resp.headers, "etag")
+  let responseLastModified = headerValue(resp.headers, "last-modified")
+  if resp.status == 304:
+    resp.close()
+    return CatalogFetch(notModified: true,
+      etag: if responseEtag.len > 0: responseEtag else: etag,
+      lastModified: if responseLastModified.len > 0: responseLastModified
+                    else: lastModified)
   var body = ""
   try:
     while true:
-      let chunk = await resp.next()
+      let chunk = await nextChunk(resp, pump, 0)
       if chunk.len == 0:
         break
       body.add chunk
@@ -360,14 +418,14 @@ proc listModelsAsync*(transport: Transport, baseUrl: string, apiKey: string):
     err.status = resp.status
     err.retryable = resp.status == 429 or resp.status >= 500
     raise err
-  for model in parseModels(body):
-    result.add model.id
+  return CatalogFetch(models: parseModels(body), etag: responseEtag,
+    lastModified: responseLastModified)
 
-proc listModels*(transport: Transport, baseUrl: string, apiKey: string):
-    seq[string] =
+proc fetchModels*(transport: Transport, baseUrl: string, apiKey: string,
+    etag = "", lastModified = "", pump: Pump = nil): CatalogFetch =
   ## The blocking boundary (the shape the policy layer calls): chronos's
   ## waitFor pumps the loop while the catalog is fetched.
-  waitFor listModelsAsync(transport, baseUrl, apiKey)
+  waitFor fetchModelsAsync(transport, baseUrl, apiKey, etag, lastModified, pump)
 
 type ScriptedTransport* = ref object of Transport
   ## The L2 test transport: one scripted reply per fetch, encoded as the

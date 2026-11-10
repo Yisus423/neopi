@@ -125,9 +125,9 @@ mechanism, and #16 has landed.
 
 | ID | What | Specs | Route | Commit |
 |---|---|---|---|---|
-| T1 | `ModelInfo{id, name}` + `parseModels` keeps the name; `listModels` intact | S1, S5 | inline, RED→GREEN | |
-| T2 | `src/neopi/modelsstore.nim`: `models-store.json` per provider + the restore/persist shape over the exported atomic write | S1, S2, S3 | inline, RED→GREEN — **item 2 adjacency** (the credential write helper is exported): its own commit + independent verification | |
-| T3 | The wire's validators: the production transport keeps response headers; the conditional GET + `304` keeps the cache | S3 | inline, RED→GREEN — differential check on the streaming path (shared `nextChunk`) | |
+| T1 | `ModelInfo{id, name}` + `parseModels` keeps the name; `listModels` intact | S1, S5 | inline, RED→GREEN | `feat(provider): the model catalog carries the display name` — `dcd7678` |
+| T2 | `src/neopi/modelsstore.nim`: `models-store.json` per provider + the restore/persist shape over the exported atomic write | S1, S2, S3 | inline, RED→GREEN — **item 2 adjacency** (the credential write helper is exported): its own commit + independent verification | `feat(config): the model-catalog cache in models-store.json` — `7b70d18` |
+| T3 | The wire's validators: the production transport keeps response headers; the conditional GET + `304` keeps the cache; the #16 pump on BOTH catalog waits | S3, S4 | inline, RED→GREEN — differential check on the streaming path (shared `wire.nim` producer + `nextChunk`), `Risk: none` | `feat(provider): the catalog refresh revalidates and stops freezing the frame` |
 | T4 | The catalog loop with the pump: every configured provider, non-blocking through the #16 seam, restore-before-fetch, persist per provider | S1, S3, S4 | inline, RED→GREEN | |
 | T5 | The picker: rows `<id> [<provider>]` across providers, the header, the counter, the display name, the refresh notice, the footer keys (neopi's own chrome — no nimterm patch); a cross-provider pick moves the live provider | S1, S4, S5 | inline, RED→GREEN | |
 | T6 | README + the ROADMAP row + this record's Evidence and close | S1-S6 | inline | |

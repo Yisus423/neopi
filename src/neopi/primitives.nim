@@ -37,6 +37,17 @@ type
     id*: string
     name*: string
 
+  CatalogFetch* = object
+    ## One catalog fetch's outcome: the models the endpoint sent, whether it
+    ## answered "not modified" instead, and the validators to send back on the
+    ## NEXT refresh. A `304` carries no models by definition, so `notModified`
+    ## — not an empty list — is what tells a cached answer from an empty
+    ## catalog.
+    models*: seq[ModelInfo]
+    notModified*: bool
+    etag*: string
+    lastModified*: string
+
   Message* = object
     ## One role and its text. An assistant message may also carry the tool
     ## calls it requested (`toolCalls`), and a tool result message carries the
