@@ -57,8 +57,11 @@ config file you own, the `require` mechanism loads what it references.
    scroll the transcript; **Ctrl+O** expands or collapses the thinking and the
    tool output; **/resume** opens the sessions picker (Enter loads, Esc
    cancels), **/new** starts a fresh session, **/compact** summarizes the
-   conversation now (it waits for the model), **/model** lists the provider's
-   real catalog and switches the model, **/login** and **/logout** open the
+   conversation now (it waits for the model), **/model** lists every configured
+   provider's models as `<id> [<provider>]` — the CACHED list paints first and
+   the refresh revalidates each provider behind it, so the rows grow as the
+   answers arrive — and picking a model of another provider moves the active
+   provider with it, **/login** and **/logout** open the
    provider picker — every entry of the table with its label and its state
    (`stored`, `env: VAR`, `keyless`, `not configured`), the composer as its
    search field, and pi's two titles: "Select provider to configure:" and
@@ -97,7 +100,9 @@ The built-in table holds the OpenAI-compatible endpoints this build knows:
 A provider the table does not carry is one flag away (`--base-url=`).
 **Keyless means a key is not REQUIRED, not that it is ignored**: an entry keeps
 its variable, so a local server started with a key still receives it. `/model`
-lists whatever the endpoint reports; `/login` opens the picker over this table
+lists every **configured** entry's catalog as `<id> [<provider>]` and
+revalidates it against the endpoint's own validators; `/login` opens the picker
+over this table
 — each entry with its label and its state — and `/logout` opens the same picker
 to drop a credential.
 
@@ -115,6 +120,18 @@ key in this order: **the stored credential first** (a saved key owns its
 provider), then `<ID>_API_KEY` in the environment, then the project's `.env`. A
 file that is not valid JSON is never rewritten — `/login` reports it instead —
 so the other providers' keys survive a broken one.
+
+**Where the catalog lives.** `/model` keeps the last catalog of every provider
+in `~/.neopi/models-store.json` (pi's file name; the same `NEOPI_CONFIG_DIR`
+override and the same atomic owner-only write as the credentials), so the list
+paints before the network answers and the refresh behind it is CONDITIONAL: the
+stored `ETag` and `Last-Modified` go back as `If-None-Match` and
+`If-Modified-Since`, and a `304` keeps the cached list. There is no TTL —
+freshness is the endpoint's validator, not a clock. The file is a cache, so one
+it cannot parse is discarded and rebuilt instead of reported, and a provider
+whose refresh fails keeps its cached rows. The refresh does not freeze the
+interface: it runs through the same pump the tool calls use, so a slow endpoint
+can still be painted and aborted.
 
 ## What it is
 

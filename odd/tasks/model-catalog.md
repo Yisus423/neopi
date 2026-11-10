@@ -127,10 +127,95 @@ mechanism, and #16 has landed.
 |---|---|---|---|---|
 | T1 | `ModelInfo{id, name}` + `parseModels` keeps the name; `listModels` intact | S1, S5 | inline, RED→GREEN | `feat(provider): the model catalog carries the display name` — `dcd7678` |
 | T2 | `src/neopi/modelsstore.nim`: `models-store.json` per provider + the restore/persist shape over the exported atomic write | S1, S2, S3 | inline, RED→GREEN — **item 2 adjacency** (the credential write helper is exported): its own commit + independent verification | `feat(config): the model-catalog cache in models-store.json` — `7b70d18` |
-| T3 | The wire's validators: the production transport keeps response headers; the conditional GET + `304` keeps the cache; the #16 pump on BOTH catalog waits | S3, S4 | inline, RED→GREEN — differential check on the streaming path (shared `wire.nim` producer + `nextChunk`), `Risk: none` | `feat(provider): the catalog refresh revalidates and stops freezing the frame` |
-| T4 | The catalog loop with the pump: every configured provider, non-blocking through the #16 seam, restore-before-fetch, persist per provider | S1, S3, S4 | inline, RED→GREEN | |
-| T5 | The picker: rows `<id> [<provider>]` across providers, the header, the counter, the display name, the refresh notice, the footer keys (neopi's own chrome — no nimterm patch); a cross-provider pick moves the live provider | S1, S4, S5 | inline, RED→GREEN | |
-| T6 | README + the ROADMAP row + this record's Evidence and close | S1-S6 | inline | |
+| T3 | The fetch: the conditional headers, the `304`, the response headers the production transport was DROPPING, and the #16 pump on BOTH waits (`listModels` → `fetchModels`) | S3, S4 | inline, RED→GREEN — differential check on the streaming path (the shared `wire.nim` producer + `nextChunk`), `Risk: none` | `feat(provider): the catalog refresh revalidates and stops freezing the frame` — `3a39c1a` |
+| T4 | `src/neopi/catalog.nim`: `configuredProviders`, `restoreCatalog`, `namesAmong`, `refreshProvider`, plus `credentialFor` extracted out of the TUI | S1, S2, S3 | worker, RED→GREEN | `feat(provider): the catalog policy — configured providers, cached restore, revalidated refresh` — `ab9a321` |
+| T5 | The picker: the cache painted first, the live per-provider revalidation, the rows `<id> [<provider>]`, the data-carrying pick, neopi's own chrome, the cross-provider move | S1, S4, S5 | worker, RED→GREEN — differential on the shared picker slot | `feat(tui): /model lists every configured provider, from the cache first` — `6fa734b` |
+| T6 | README + the ROADMAP row + this record's Evidence, limits and close | S1-S6 | inline | the commit that carries this section |
+
+## Evidence
+
+Every gate ran with `PATH="$HOME/.local/share/grabnim/current/bin:$PATH"` and
+`TMPDIR="$HOME/tmp-nim"`, and each task observed its RED before the fix.
+
+- **T1** — RED: `Error: undeclared field: 'id' for type system.string`, exit 1.
+  GREEN: the focused file **1/1 OK** and the whole suite **248/248 OK**, exit 0.
+- **T2** — RED: `Error: cannot open file: neopi/modelsstore`, exit 1. GREEN: the
+  cache's suite **7/7 OK** and the whole suite **255/255 OK**, exit 0 — and the
+  INDEPENDENT verification (risk item 2, the credential write path) returned
+  **PASS**: `writeNode`'s body is byte-identical to its parent (only `*` and the
+  docs changed), the credential suite stayed **10/10 OK**, a fresh config
+  directory came back `700` with both files `600`, a malformed
+  `models-store.json` is DISCARDED while a malformed `auth.json` still raises
+  `AuthStoreError` and stays byte-identical (`md5sum` equal before and after).
+  Its gap is recorded rather than hidden: nothing asserts the atomic rename, the
+  `.tmp` sibling, or failure-preserves-target directly.
+- **T3** — RED: `Error: attempting to call undeclared routine: 'fetchModels'`,
+  exit 1. GREEN: the focused file **39/39 OK**, the whole suite **260/260 OK**,
+  the busted specs **22 successes / 0 failures**, exit 0 in all three. The
+  DIFFERENTIAL against `7b70d18` over the three streaming suites — the code the
+  request did not name but which shares the wire producer — is identical in
+  stdout and exit code once the elapsed time of the summary lines is
+  normalized.
+- **T4** — RED: `Error: cannot open file: neopi/catalog`, exit 1 (the worker).
+  GREEN: the policy's suite **6/6 OK**, the whole suite **267/267 OK**, the
+  `/login` suite **13/13 OK**, exit 0. The orchestrator's review then closed a
+  gap the plan had not asked for: `credentialFor` is the KEY the live provider is
+  built with, while `providerState` only names the STATE, and nothing pinned
+  their agreement — a new `tp_provider` test pins the stored-first order
+  (**21/21 OK**). One orchestrator style nit broke the build first (`let
+  provider` against `setPump(p: var Provider)`), which is why that is the retry.
+- **T5** — RED: `Error: undeclared field: 'catalogTransport' for type
+  tui.TuiState`, exit 1 (the worker). GREEN: the TUI file **99/99 OK**, the whole
+  suite **269/269 OK**, the busted specs **22 successes / 0 failures**, exit 0 in
+  all three. The DIFFERENTIAL against `ab9a321` over the NINE suites that share
+  the picker slot (`/resume`, `resumeSession`, the sessions list,
+  `/login`+`/logout`, the command completion, the completion in the composer, the
+  composer's keys, the fuzzy matcher, the `/` dispatch) is identical in stdout
+  and exit code.
+
+### What the slice settled
+
+- **A cache without validators is a clock.** The user asked for pi's shape, and
+  pi's cache stores how to REVALIDATE (`{models, checkedAt, etag?,
+  lastModified?}`) instead of a TTL. That is what made the conditional GET — and
+  therefore the response headers the production transport was DROPPING — part of
+  the slice, instead of an optimization to add later.
+- **The pick carries data, never a display string.** The rows live beside the
+  menu, and the source, the search texts and the rows are filtered in ONE loop,
+  so the menu's index addresses the row it shows. It is `/model`'s own NUL lesson
+  (a string read out of a released widget) turned into structure: a value
+  recovered from a label is the same mistake one step later.
+- **The chrome is neopi's because nimterm's `Menu` cannot carry it** — and its
+  `title` only paints inside a border, which is why every picker's title had been
+  invisible. The picker's lines go BELOW the editor, where the floating menu
+  cannot blank them.
+- **#16 was the missing piece, not a prerequisite that expired.** The pump it
+  built now covers the catalog's two waits, so the deferral ("Dejalo para #16")
+  came back into the slice it belonged to.
+
+## Known limits
+
+- **One request per provider, in series.** The pump keeps the frame alive and
+  abortable, so nothing freezes, but every row is fresh only when the walk ends.
+  Parallel fetches (or an event source that polls the dispatcher) are #29's
+  shape, not this slice's.
+- **Esc stops the WALK, not the request in flight**: `tuiPump` answers an abort
+  only for `quit` and `abortRequested` (the run's abort), so the current fetch
+  finishes before the walk notices. Ctrl+C does abort it.
+- **No lockfile**, the same limit the credential store already carries: two neopi
+  processes refreshing at once can lose one write.
+- **`/model` no longer requires a live provider.** The old "no provider: run
+  /login or set `<VAR>`" message is gone; the picker decides from the table and
+  the cache, and when nothing is available it says "No model catalogs are
+  available. Use /login to add providers." — the same actionable half, one step
+  later.
+- **The search text is now `<provider>/<id> <id> <name>`** (the endpoint's
+  display name included, pi's rule), where it used to be `<provider> <id>`.
+- **The counter and the name are painted under the EDITOR**, while pi paints its
+  counter, name and keys under its LIST: the lines are pi's, the order is neopi's
+  (its search input sits below the list).
+- **Ctrl+S "set as default" is out** by the user's call: a default model is a new
+  feature and it goes to a later slice.
 
 ## Log
 
@@ -153,3 +238,13 @@ mechanism, and #16 has landed.
 - **L6** (the two decisions, verbatim): the fetch — "Hacerlo no bloqueante con el
   seam de #16"; the keys — "solo enter para seleccionar, ctrl s puede ser el
   siguiente slice".
+- **L7** (2026-11-09, the landing): T1-T5 on `main` as the work units `dcd7678`,
+  `7b70d18`, `3a39c1a`, `ab9a321` and `6fa734b` — T2 independently verified (risk
+  item 2), T3 and T5 differential-checked against their base over the shared
+  code the request did not name. Two failures are kept instead of smoothed over:
+  the first delegated worker (T3) STALLED and left no side effect at all, so the
+  task moved inline rather than being relaunched blindly; and an orchestrator
+  style nit (`let provider`) broke the build against `setPump(p: var Provider)`,
+  caught by the compiler and fixed before the gate passed. The `#28` row left
+  ROADMAP's Remaining for Done, and the note that "the refresh still freezes the
+  loop until #16 lands" retired with it.
