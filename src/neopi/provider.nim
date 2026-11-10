@@ -139,6 +139,15 @@ proc providerState*(spec: ProviderSpec): ProviderState =
     return psKeyless
   psUnconfigured
 
+proc credentialFor*(spec: ProviderSpec): string =
+  ## The credential a table entry resolves to: the STORED one first (a saved key
+  ## owns its provider, pi's rule), then the entry's variable — which `.env` has
+  ## already populated, so both arrive through the environment.
+  let stored = loadApiKey(spec.id)
+  if stored.isSome:
+    return stored.get
+  getEnv(spec.envVar)
+
 proc providerStateText*(spec: ProviderSpec): string =
   ## That state as the picker's status column: `stored`, `env: <VAR>`,
   ## `keyless` or `not configured`. The marker that decorates it (a tick, a

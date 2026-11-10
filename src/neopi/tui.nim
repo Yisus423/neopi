@@ -1509,8 +1509,7 @@ proc setActiveProvider*(state: ptr TuiState, L: LuaState, spec: ProviderSpec) =
   ## variable. An entry with no key yet is still installed — the question that
   ## follows a configure pick is what fills it, and a turn before that reports
   ## the failure instead of quietly talking to the previous provider.
-  let stored = loadApiKey(spec.id)
-  let key = if stored.isSome: stored.get else: getEnv(spec.envVar)
+  let key = credentialFor(spec)
   state[].provider = spec.id
   if not L.isNil:
     setProvider(L, some(newProvider(spec, key)))

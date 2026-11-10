@@ -147,6 +147,21 @@ suite "the provider state":
     delEnv("GROQ_API_KEY")
     check providerState(groq) == psStored
 
+  test "the resolved credential follows the same stored-first order":
+    # `providerState` names the state; `credentialFor` is the KEY the live
+    # provider is actually built with. The two must not drift — a stored
+    # credential owns its provider, and the variable only speaks without one.
+    discard freshConfig("neopi-tp-provider-credential")
+    let groq = findProvider("groq").get
+    putEnv("GROQ_API_KEY", "sk-env")
+    check credentialFor(groq) == "sk-env"
+    saveApiKey("groq", "sk-stored")
+    check credentialFor(groq) == "sk-stored"
+    deleteApiKey("groq")
+    check credentialFor(groq) == "sk-env"
+    delEnv("GROQ_API_KEY")
+    check credentialFor(groq) == ""
+
   test "the environment state names the variable":
     discard freshConfig("neopi-tp-provider-state-env")
     let spec = findProvider("cerebras").get
