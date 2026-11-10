@@ -3,10 +3,11 @@
 ## the footer's memoized totals. The terminal itself is not tested here — the
 ## render path is measured headlessly by bench/tui_bench.nim — so these tests
 ## run without a terminal.
-import std/[json, options, os, strutils, times]
+import std/[json, options, os, strutils, tables, times]
 import nimterm
 import nimterm/transcript
-import neopi/[authstore, expose, extensibility, lua, provider, session, wire]
+import neopi/[authstore, catalog, expose, extensibility, lua, modelsstore, provider,
+  session, wire]
 import neopi/settings
 import neopi/tui
 import unittest2
@@ -38,6 +39,40 @@ proc freshConfig(name: string): string =
   result = getTempDir() / name
   removeDir(result)
   putEnv("NEOPI_CONFIG_DIR", result)
+
+proc clearProviderEnv() =
+  ## The provider table's environment must not leak into the model-catalog
+  ## expectations: the configured set reads it, and these tests are keyless.
+  for name in [
+    "OPENAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY",
+    "GROQ_API_KEY", "TOGETHER_API_KEY", "CEREBRAS_API_KEY",
+    "OLLAMA_API_KEY", "LLAMACPP_API_KEY"]:
+    delEnv(name)
+
+proc seedCatalog(specs: seq[ProviderSpec], suffix: string) =
+  ## Seed one cached row for every configured provider. The cache is the
+  ## picker's first frame, so every provider needs an entry of its own.
+  var store = loadModelsStore()
+  for spec in specs:
+    store.entries[spec.id] = CatalogEntry(
+      models: @[ModelInfo(id: spec.id & "-" & suffix,
+        name: spec.id & " " & suffix)], checkedAt: 1)
+  saveModelsStore(store)
+
+proc queueCatalog(fake: FakeTransport, specs: seq[ProviderSpec], suffix: string,
+                   status = 200) =
+  ## Queue one canned catalog response per configured provider, in table order.
+  for spec in specs:
+    let modelId = spec.id & "-" & suffix
+    let modelName = spec.id & " " & suffix
+    var row = newJObject()
+    row["id"] = %modelId
+    row["name"] = %modelName
+    var data = newJArray()
+    data.add row
+    var body = newJObject()
+    body["data"] = data
+    fake.canned(status, @[$body])
 
 proc escapeLua(s: string): string =
   result = ""
@@ -1463,10 +1498,16 @@ suite "the /model builtin":
       removeDir(root)
       removeFile(path)
 
-  test "/model offers the provider's real catalog and switches the model":
-    let root = freshWorkspace("neopi-tp-tui-model")
-    let path = freshSessionPath("model")
+  test "the restored cache paints every configured provider before the refresh":
+    clearProviderEnv()
+    let configDir = freshConfig("neopi-tp-tui-model-cache")
+    let root = freshWorkspace("neopi-tp-tui-model-cache")
+    let path = freshSessionPath("model-cache")
     try:
+      let specs = configuredProviders()
+      seedCatalog(specs, "cached")
+      let fake = newFakeTransport()
+      queueCatalog(fake, specs, "fresh")
       let sess = newSession(path)
       let ext = newExtensibility(root, none(Provider), sess)
       let L = ext.bus.state
@@ -1476,44 +1517,56 @@ suite "the /model builtin":
       let backend = wireFakeApp(addr st)
       exposeTuiSink(L, addr st, "first")
       wireApp(addr st, L, st.app)
-      let fake = newFakeTransport()
-      fake.canned(200, @["""{"data":[{"id":"alpha"},{"id":"beta"}]}"""])
-      setProvider(L, some(openAI("k", "http://example.test/v1",
-        transport = fake)))
-      st.inputW.setText("/model")
-      sendTurn(addr st, L)
-      # The catalog came over the wire, and the menu carries it: the Menu and
-      # not a QuestionWidget, because the catalog can be long and only the
-      # Menu scrolls its selection into view.
+      st.catalogTransport = fake
+      typeText(backend, addr st, "/model")
+      pressKey(backend, addr st, keyEnter)
+
       check st.menuKind == mkModel
-      check fake.calls.len == 1
-      check fake.calls[0].httpMethod == "GET"
-      check fake.calls[0].url.endsWith("/models")
+      check fake.calls.len == specs.len
+      for i, spec in specs:
+        check fake.calls[i].httpMethod == "GET"
+        check fake.calls[i].url == spec.baseUrl & "/models"
       check not st.screen.menu.isNil
-      check st.screen.menu.items.len == 2
-      check st.screen.menu.items[0].label == "alpha"
-      check st.screen.menu.items[1].label == "beta"
-      # The command never enters the composer or the session.
+      check st.screen.menu.items.len == specs.len
+      check st.pickerModels.len == specs.len
+
+      # The cache frame comes first and carries EVERY provider's cached row.
+      # The fresh frame comes later, after that provider's refresh answered.
+      var cacheFrame = -1
+      var freshFrame = -1
+      for i, frame in backend.frames:
+        if cacheFrame < 0 and
+            (specs[0].id & "-cached [" & specs[0].id & "]") in frame:
+          cacheFrame = i
+        if freshFrame < 0 and
+            (specs[0].id & "-fresh [" & specs[0].id & "]") in frame:
+          freshFrame = i
+      check cacheFrame >= 0
+      check freshFrame > cacheFrame
+      if cacheFrame >= 0:
+        for spec in specs:
+          check (spec.id & "-cached [" & spec.id & "]") in
+            backend.frames[cacheFrame]
+      for i, spec in specs:
+        check (spec.id & "-fresh [" & spec.id & "]") in
+          st.screen.menu.items[i].label
       check st.inputW.text == ""
       check sess.history().len == 0
-      # Enter switches what the loop drives: the state's copy AND the Lua
-      # string the next turn passes, because the model is read per turn.
-      backend.events.add UiEvent(kind: uiKey, key: keyDown)
-      backend.events.add UiEvent(kind: uiKey, key: keyEnter)
-      discard pumpApp(addr st)
-      check st.model == "beta"
-      check evalJson(L, "return neopi._tuiModel").getStr == "beta"
-      check st.menuKind == mkNone
-      check st.transcriptW.transcript.items[^1].kind == tikStatus
-      check "beta" in st.transcriptW.transcript.items[^1].text
     finally:
+      removeDir(configDir)
       removeDir(root)
       removeFile(path)
 
-  test "/model narrows the catalog as the composer is typed into":
+  test "the rows narrow as the composer is typed into and the counter follows":
+    clearProviderEnv()
+    let configDir = freshConfig("neopi-tp-tui-model-search")
     let root = freshWorkspace("neopi-tp-tui-model-search")
     let path = freshSessionPath("model-search")
     try:
+      let specs = configuredProviders()
+      seedCatalog(specs, "cached")
+      let fake = newFakeTransport()
+      queueCatalog(fake, specs, "fresh")
       let sess = newSession(path)
       let ext = newExtensibility(root, none(Provider), sess)
       let L = ext.bus.state
@@ -1523,44 +1576,39 @@ suite "the /model builtin":
       let backend = wireFakeApp(addr st)
       exposeTuiSink(L, addr st, "first")
       wireApp(addr st, L, st.app)
-      let fake = newFakeTransport()
-      fake.canned(200, @["""{"data":[{"id":"openai/gpt-5"},
-        {"id":"openai/gpt-5-mini"},{"id":"anthropic/claude-4"}]}"""])
-      setProvider(L, some(openAI("k", "http://example.test/v1",
-        transport = fake)))
-      st.inputW.setText("/model")
-      sendTurn(addr st, L)
-      check st.screen.menu.items.len == 3
-      # The picker's own keys are the arrows, Enter and Esc, so the editor keeps
-      # the focus: typing narrows the list through the composer's change action,
-      # the same mechanism the command completion uses. "gpt5" has to reach
-      # "openai/gpt-5" with the dash never typed, and the provider in the search
-      # text is what lets a provider-prefixed query land on the right rows.
-      for c in "gpt5":
-        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
-      discard pumpApp(addr st)
-      check st.screen.menu.items.len == 2
-      check st.screen.menu.items[0].label == "openai/gpt-5"
-      check st.screen.menu.items[1].label == "openai/gpt-5-mini"
-      for c in "-mini":
-        backend.events.add UiEvent(kind: uiKey, key: keyChar, text: $c)
-      discard pumpApp(addr st)
+      st.catalogTransport = fake
+      typeText(backend, addr st, "/model")
+      pressKey(backend, addr st, keyEnter)
+      check st.screen.menu.items.len == specs.len
+
+      typeText(backend, addr st, specs[0].id)
       check st.screen.menu.items.len == 1
-      check st.screen.menu.items[0].label == "openai/gpt-5-mini"
-      # Deleting the query brings the whole catalog back: an empty query is not
-      # a filter.
-      for _ in 1 .. 9:
-        backend.events.add UiEvent(kind: uiKey, key: keyBackspace)
-      discard pumpApp(addr st)
-      check st.screen.menu.items.len == 3
+      check st.screen.menu.items[0].label ==
+        (specs[0].id & "-fresh [" & specs[0].id & "]")
+      # The menu's index and the data sequence are the same row: the pick never
+      # parses the display label back into an id.
+      check st.pickerModels.len == 1
+      check st.pickerModels[0].provider == specs[0].id
+      check st.pickerModels[0].id == specs[0].id & "-fresh"
+
+      var canvas = newCanvas(size(120, 18))
+      st.screen.render(canvas, rect(0, 0, 120, 18))
+      check "(1/" & $specs.len & ")" in canvas.plainText
+      check st.chrome.statusText(coreStatusKey) == "Model catalogs refreshed."
     finally:
+      removeDir(configDir)
       removeDir(root)
       removeFile(path)
 
-  test "/model shows why nothing answers while the catalog is fetched":
-    let root = freshWorkspace("neopi-tp-tui-model-fetch")
-    let path = freshSessionPath("model-fetch")
+  test "the model picker paints the header, counter, display name and keys":
+    clearProviderEnv()
+    let configDir = freshConfig("neopi-tp-tui-model-chrome")
+    let root = freshWorkspace("neopi-tp-tui-model-chrome")
+    let path = freshSessionPath("model-chrome")
     try:
+      let specs = configuredProviders()
+      let fake = newFakeTransport()
+      queueCatalog(fake, specs, "fresh")
       let sess = newSession(path)
       let ext = newExtensibility(root, none(Provider), sess)
       let L = ext.bus.state
@@ -1570,34 +1618,35 @@ suite "the /model builtin":
       let backend = wireFakeApp(addr st)
       exposeTuiSink(L, addr st, "first")
       wireApp(addr st, L, st.app)
-      let fake = newFakeTransport()
-      fake.canned(200, @["""{"data":[{"id":"alpha"}]}"""])
-      setProvider(L, some(openAI("k", "http://example.test/v1",
-        transport = fake)))
-      st.inputW.setText("/model")
-      sendTurn(addr st, L)
-      check st.menuKind == mkModel
-      # The fetch blocks the loop for as long as the provider takes to answer,
-      # so the frame the user is looking at when it starts has to say why
-      # nothing responds: a presented frame carries the status, and the picker's
-      # own frame no longer does.
-      var sawFetching = false
-      for frame in backend.frames:
-        if "fetching the models" in frame:
-          sawFetching = true
-      check sawFetching
-      # That status was the WAIT's, not the picker's: the next presented frame
-      # shows the list without it.
-      presentApp(addr st)
-      check "fetching the models" notin backend.frames[^1]
+      st.catalogTransport = fake
+      typeText(backend, addr st, "/model")
+      pressKey(backend, addr st, keyEnter)
+
+      var canvas = newCanvas(size(120, 20))
+      st.screen.render(canvas, rect(0, 0, 120, 20))
+      check "Only showing models from configured providers. " &
+        "Use /login to add providers." in canvas.plainText
+      check "(" & $st.screen.menu.items.len & "/" & $specs.len & ")" in
+        canvas.plainText
+      check "Model Name: " & specs[0].id & " fresh" in canvas.plainText
+      check "Enter to select · Escape/Ctrl+C to cancel" in canvas.plainText
+      check "Ctrl+S" notin canvas.plainText
+      check (specs[0].id & "-fresh [" & specs[0].id & "]") in canvas.plainText
     finally:
+      removeDir(configDir)
       removeDir(root)
       removeFile(path)
 
-  test "/model reports a failed catalog instead of crashing the TUI":
+  test "a failed refresh keeps the cached rows and reports the provider error":
+    clearProviderEnv()
+    let configDir = freshConfig("neopi-tp-tui-model-fail")
     let root = freshWorkspace("neopi-tp-tui-model-fail")
     let path = freshSessionPath("model-fail")
     try:
+      let specs = configuredProviders()
+      seedCatalog(specs, "cached")
+      let fake = newFakeTransport()
+      queueCatalog(fake, specs, "cached", 500)
       let sess = newSession(path)
       let ext = newExtensibility(root, none(Provider), sess)
       let L = ext.bus.state
@@ -1607,40 +1656,143 @@ suite "the /model builtin":
       let backend = wireFakeApp(addr st)
       exposeTuiSink(L, addr st, "first")
       wireApp(addr st, L, st.app)
-      let fake = newFakeTransport()
-      fake.canned(500, @["boom"])
-      setProvider(L, some(openAI("k", "http://example.test/v1",
-        transport = fake)))
-      st.inputW.setText("/model")
-      sendTurn(addr st, L)
-      # A failed catalog is feedback, not a crash and not an empty menu.
-      check st.menuKind == mkNone
-      check st.model == "first"
-      check st.transcriptW.transcript.items[^1].kind == tikStatus
-      check "cannot list the models" in st.transcriptW.transcript.items[^1].text
+      st.catalogTransport = fake
+      typeText(backend, addr st, "/model")
+      pressKey(backend, addr st, keyEnter)
+
+      check st.menuKind == mkModel
+      check st.screen.menu.items.len == specs.len
+      for i, spec in specs:
+        check (spec.id & "-cached [" & spec.id & "]") in
+          st.screen.menu.items[i].label
+        var found = false
+        for item in st.transcriptW.transcript.items:
+          if "cannot refresh the models for " & spec.id in item.text:
+            found = true
+        check found
+      check st.chrome.statusText(coreStatusKey) == "Model catalogs refreshed."
     finally:
+      removeDir(configDir)
       removeDir(root)
       removeFile(path)
 
-  test "/model with no provider says so and opens nothing":
-    let root = freshWorkspace("neopi-tp-tui-model-noprovider")
-    let path = freshSessionPath("model-noprovider")
+  test "picking another provider's model moves the live provider first":
+    clearProviderEnv()
+    let configDir = freshConfig("neopi-tp-tui-model-provider")
+    let root = freshWorkspace("neopi-tp-tui-model-provider")
+    let path = freshSessionPath("model-provider")
     try:
+      let specs = configuredProviders()
+      seedCatalog(specs, "cached")
+      let fake = newFakeTransport()
+      queueCatalog(fake, specs, "fresh")
       let sess = newSession(path)
       let ext = newExtensibility(root, none(Provider), sess)
       let L = ext.bus.state
-      var st = initTuiState("openrouter", "first", sess, root)
+      var st = initTuiState("openai", "first", sess, root)
       exposeUi(L)
       loadRuntimeEntry(L)
       let backend = wireFakeApp(addr st)
       exposeTuiSink(L, addr st, "first")
       wireApp(addr st, L, st.app)
-      st.inputW.setText("/model")
-      sendTurn(addr st, L)
+      st.catalogTransport = fake
+      typeText(backend, addr st, "/model")
+      pressKey(backend, addr st, keyEnter)
+      check st.screen.menu.items.len == specs.len
+
+      pressKey(backend, addr st, keyDown)
+      pressKey(backend, addr st, keyEnter)
+      let picked = specs[1]
+      check st.provider == picked.id
+      check st.model == picked.id & "-fresh"
+      check evalJson(L, "return neopi._tuiModel").getStr == picked.id & "-fresh"
+      let live = currentProvider(L)
+      check live.isSome
+      if live.isSome:
+        check live.get.name == picked.id
+        check live.get.baseUrl == picked.baseUrl
+        check live.get.apiKey.len == 0
       check st.menuKind == mkNone
-      check st.transcriptW.transcript.items[^1].kind == tikStatus
-      check "no provider" in st.transcriptW.transcript.items[^1].text
+      check st.pickerModels.len == 0
     finally:
+      removeDir(configDir)
+      removeDir(root)
+      removeFile(path)
+
+  test "closing the model picker leaves no stale model rows":
+    clearProviderEnv()
+    let configDir = freshConfig("neopi-tp-tui-model-close")
+    let root = freshWorkspace("neopi-tp-tui-model-close")
+    let path = freshSessionPath("model-close")
+    try:
+      let specs = configuredProviders()
+      seedCatalog(specs, "cached")
+      let fake = newFakeTransport()
+      queueCatalog(fake, specs, "fresh")
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openai", "first", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "first")
+      wireApp(addr st, L, st.app)
+      st.catalogTransport = fake
+      typeText(backend, addr st, "/model")
+      pressKey(backend, addr st, keyEnter)
+      check st.pickerModels.len == specs.len
+
+      pressKey(backend, addr st, keyEscape)
+      check st.menuKind == mkNone
+      check st.menu.isNil
+      check st.screen.menu.isNil
+      check st.pickerModels.len == 0
+      var chromeText = ""
+      for line in st.chrome.widgetLines(wpBelowEditor):
+        chromeText.add line & "\n"
+      check "Only showing models from configured providers." notin chromeText
+
+      # A provider picker has its own data and never inherits the model rows.
+      openProvider(addr st, ppmConfigure)
+      check st.menuKind == mkProvider
+      check st.pickerModels.len == 0
+    finally:
+      removeDir(configDir)
+      removeDir(root)
+      removeFile(path)
+
+  test "an empty cache whose refreshes all fail opens no empty menu":
+    clearProviderEnv()
+    let configDir = freshConfig("neopi-tp-tui-model-empty")
+    let root = freshWorkspace("neopi-tp-tui-model-empty")
+    let path = freshSessionPath("model-empty")
+    try:
+      let specs = configuredProviders()
+      let fake = newFakeTransport()
+      queueCatalog(fake, specs, "fresh", 500)
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openai", "first", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "first")
+      wireApp(addr st, L, st.app)
+      st.catalogTransport = fake
+      typeText(backend, addr st, "/model")
+      pressKey(backend, addr st, keyEnter)
+
+      check st.menuKind == mkNone
+      check st.menu.isNil
+      check st.screen.menu.isNil
+      check st.pickerModels.len == 0
+      check st.chrome.statusText(coreStatusKey) ==
+        "No model catalogs are available. Use /login to add providers."
+      check st.transcriptW.transcript.items.len == specs.len
+    finally:
+      removeDir(configDir)
       removeDir(root)
       removeFile(path)
 

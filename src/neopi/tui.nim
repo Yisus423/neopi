@@ -14,6 +14,7 @@ import std/[algorithm, json, options, os, strutils, syncio, tables, times]
 import nimterm
 import nimterm/[events as ntevents, term, transcript as nttranscript]
 import neopi/authstore
+import neopi/catalog
 import neopi/expose
 import neopi/lua
 import neopi/process
@@ -21,6 +22,7 @@ import neopi/provider
 import neopi/pump
 import neopi/session
 import neopi/settings
+import neopi/wire
 from neopi/hooks import lua_error
 
 # Same file-scope typedef as lua.nim and the bridge modules: no C headers
@@ -356,6 +358,23 @@ method paint*(screen: NeopiScreen, canvas: var Canvas) =
     screen.question.render(canvas,
       rect(0, max(0, inputTop - rows), w, rows))
 
+const
+  modelPickerChromeKey = "neopi.model-picker"
+    ## The below-editor widget slot that carries the model picker's own chrome.
+  modelPickerHeader = "Only showing models from configured providers. " &
+    "Use /login to add providers."
+    ## The header the model picker always shows.
+  modelPickerKeys = "Enter to select · Escape/Ctrl+C to cancel"
+    ## The model picker's key hint. Ctrl+S is deliberately absent.
+  modelPickerRefreshed = "Model catalogs refreshed."
+    ## The core status the model picker reports when its refresh walk ends.
+  modelPickerNoCatalogs =
+    "No model catalogs are available. Use /login to add providers."
+    ## The core status when neither the cache nor any refresh produced a row.
+    ## It keeps the actionable half the picker used to say when no provider was
+    ## live: the header carries the same hint, but by then the picker has just
+    ## CLOSED.
+
 type
   MenuKind* = enum
     ## Which menu the floating slot holds. They share the widget and the rows
@@ -425,6 +444,20 @@ type
       ## The search text of each `pickerSource` entry, in the same order. It is
       ## built where the picker opens (the model picker leads with the provider,
       ## pi's rule: a provider-prefixed query must not lose to a proxy id).
+    pickerModels*: seq[ListedModel]
+      ## The model rows currently shown by the model picker, in menu order.
+      ## The menu's selected index addresses this sequence directly.
+    pickerModelSource: seq[ListedModel]
+      ## Every model row before the composer's query narrows it.
+    pickerModelTotal: int
+      ## The number of model rows before the current query.
+    pickerVisibleText: seq[string]
+      ## The search text of each visible picker row, in menu order.
+    catalogTransport*: Transport
+      ## The transport every model-catalog refresh uses. Nil uses production;
+      ## tests inject the in-memory fake so no test reaches the network.
+    modelCatalogRefreshed: bool
+      ## Whether the current model-catalog refresh has finished.
     pickerMode*: ProviderPickerMode
       ## Which job the OPEN provider picker is doing. The other pickers do not
       ## need it: their kind already says what they are.
@@ -530,6 +563,8 @@ proc initTuiState*(provider, model: string, sess: Session,
     workingText: "", title: "", titleWriter: terminalTitleWriter,
     working: false, abortRequested: false, hideThinking: false,
     syncedId: 0, menuKind: mkNone, questionPurpose: qpNone,
+    pickerModels: @[], pickerModelSource: @[], pickerModelTotal: 0,
+    pickerVisibleText: @[], catalogTransport: nil, modelCatalogRefreshed: false,
     chrome: newChrome())
 
 const confirmYes* = "Yes"
@@ -893,11 +928,9 @@ proc presentApp*(state: ptr TuiState, force = false) =
   ## and the frame budget. The stream sink used to clear, render and present by
   ## hand, which is how it could present a frame nothing had invalidated.
   ##
-  ## `force` skips the frame budget, and one caller needs that: an action about
-  ## to BLOCK the loop (`/model`'s catalog fetch) has to get its explanation on
-  ## screen BEFORE the block, and the budget would defer exactly that frame —
-  ## the outer flush only runs once the action returns, which is after the wait
-  ## it was meant to explain.
+  ## `force` skips the frame budget, and the model catalog needs that: the
+  ## restored cache and every provider answer have to reach the screen at once,
+  ## rather than waiting for the budget or for the refresh walk to end.
   refreshFooter(state)
   if not state[].appReady:
     return
@@ -1120,6 +1153,18 @@ proc closeCompletion(state: ptr TuiState) =
   if not state[].screen.isNil:
     state[].screen.menu = nil
 
+proc clearModelPickerData(state: ptr TuiState) =
+  ## Drop the model picker's data and its chrome. The rows live beside the menu
+  ## so the pick can carry data, and a stale row must never outlive the picker
+  ## that owned it.
+  state[].pickerModels = @[]
+  state[].pickerModelSource = @[]
+  state[].pickerModelTotal = 0
+  state[].pickerVisibleText = @[]
+  state[].modelCatalogRefreshed = false
+  if not state[].chrome.isNil:
+    state[].chrome.clearWidget(modelPickerChromeKey)
+
 proc closeMenu(state: ptr TuiState) =
   ## Close the menus that share the slot above the composer, releasing the slot
   ## AND the kind together: the resume picker and the model picker. A state that
@@ -1134,6 +1179,7 @@ proc closeMenu(state: ptr TuiState) =
   state[].menu = nil
   state[].pickerSource = @[]
   state[].pickerText = @[]
+  clearModelPickerData(state)
   if not state[].inputW.isNil:
     # The composer held the picker's QUERY, not a draft for the editor: it
     # leaves with the picker.
@@ -1150,6 +1196,26 @@ proc applyCompletion(state: ptr TuiState, item: MenuItem) =
   state[].inputW.setText("/" & item.label & " ")
   closeCompletion(state)
 
+proc updateModelPickerChrome(state: ptr TuiState) =
+  ## Repaint the model picker's chrome in the below-editor widget slot. The
+  ## menu floats above the composer and blanks its rectangle, so chrome placed
+  ## above the editor would be covered while the picker is open. These rows sit
+  ## below the editor, where the menu cannot reach them.
+  if state[].chrome.isNil or state[].menuKind != mkModel:
+    return
+  let filtered = if state[].menu.isNil: 0 else: state[].menu.items.len
+  var lines = @[
+    modelPickerHeader,
+    "(" & $filtered & "/" & $state[].pickerModelTotal & ")"]
+  if not state[].menu.isNil and state[].menu.selected >= 0 and
+      state[].menu.selected < state[].pickerModels.len:
+    let row = state[].pickerModels[state[].menu.selected]
+    let name = namesAmong(state[].pickerModels, row.provider, row.id)
+    if name.len > 0:
+      lines.add "Model Name: " & name
+  lines.add modelPickerKeys
+  state[].chrome.setWidget(modelPickerChromeKey, lines, wpBelowEditor)
+
 proc updatePickerSearch(state: ptr TuiState) =
   ## Narrow the open picker from the composer's text. A picker keeps only its
   ## own keys — the arrows, Enter and Esc — so the editor holds the focus and
@@ -1158,15 +1224,27 @@ proc updatePickerSearch(state: ptr TuiState) =
   ## the source whole (and puts the row back where it was, pi's rule); no match
   ## leaves the picker empty but OPEN, so backspacing brings the list back and
   ## Esc still closes it.
+  ##
+  ## The source items, their search texts and the model rows are read at one
+  ## source index in one loop. The visible items and rows therefore keep the
+  ## same index, and the pick never has to recover data from a display label.
   if state[].menuKind notin {mkResume, mkModel, mkProvider}:
     return
-  if state[].menu.isNil or state[].pickerSource.len == 0:
+  if state[].menu.isNil:
     return
   let query = state[].inputW.text
   var items: seq[MenuItem] = @[]
+  var texts: seq[string] = @[]
+  var models: seq[ListedModel] = @[]
   for i, item in state[].pickerSource:
     if i < state[].pickerText.len and fuzzyMatch(query, state[].pickerText[i]):
       items.add item
+      texts.add state[].pickerText[i]
+      if state[].menuKind == mkModel and i < state[].pickerModelSource.len:
+        models.add state[].pickerModelSource[i]
+  state[].pickerVisibleText = texts
+  if state[].menuKind == mkModel:
+    state[].pickerModels = models
   let kept = state[].menu.selected
   state[].menu = newMenu(items, title = state[].menu.title)
   if query.len == 0 and items.len > 0:
@@ -1175,8 +1253,35 @@ proc updatePickerSearch(state: ptr TuiState) =
     state[].screen.menu = state[].menu
   if query.len > 0 and items.len == 0:
     setCoreStatus(state, "no matches: backspace to widen the search")
+  elif state[].menuKind == mkModel and state[].modelCatalogRefreshed:
+    setCoreStatus(state, modelPickerRefreshed)
   else:
     setCoreStatus(state, "")
+  updateModelPickerChrome(state)
+
+proc setModelPickerRows(state: ptr TuiState, models: seq[ListedModel]) =
+  ## Replace the model picker's rows and narrow them through the current query.
+  ## The source sequences stay whole; the visible menu and `pickerModels` are
+  ## their filtered projections and therefore share one index.
+  state[].pickerModelSource = models
+  state[].pickerModelTotal = models.len
+  var items: seq[MenuItem] = @[]
+  var texts: seq[string] = @[]
+  for model in models:
+    items.add MenuItem(label: model.id & " [" & model.provider & "]",
+      description: "")
+    # The provider leads the search text, pi's rule: a provider-prefixed query
+    # lands on this provider's rows instead of losing to a proxy id.
+    texts.add model.provider & "/" & model.id & " " & model.id & " " & model.name
+  state[].pickerSource = items
+  state[].pickerText = texts
+  state[].pickerModels = @[]
+  state[].menuKind = mkModel
+  state[].menu = newMenu(items, title = "pick a model:")
+  if not state[].screen.isNil:
+    state[].screen.menu = state[].menu
+  updatePickerSearch(state)
+  updateModelPickerChrome(state)
 
 proc updateCompletion(state: ptr TuiState, L: LuaState) =
   ## Recompute the completion from the composer: the menu opens while the
@@ -1207,6 +1312,7 @@ proc updateCompletion(state: ptr TuiState, L: LuaState) =
 proc openResume*(state: ptr TuiState) =
   ## Open the resume menu with the workspace's sessions (the /resume
   ## builtin). An empty sessions dir reports on the status line instead.
+  clearModelPickerData(state)
   var items: seq[MenuItem] = @[]
   var texts: seq[string] = @[]
   for (value, label) in listSessions(state[].root):
@@ -1415,12 +1521,9 @@ proc setModel*(state: ptr TuiState, L: LuaState, id: string) =
   ## switch.
   ##
   ## The name is materialized BEFORE `closeMenu` releases the picker that owns
-  ## the buffer it came from. The picker's label reaches this proc borrowed, and
-  ## reading it after the menu was freed wrote a status line with a NUL where
-  ## the name had been — while the state's copy and the Lua push, both taken
-  ## while the menu was alive, still read correctly, which is what made the
-  ## corruption look impossible. Lesson: a string taken from a widget is only
-  ## good for as long as that widget lives.
+  ## the buffer it came from. The picker's id reaches this proc as data and is
+  ## copied while the menu is alive; reading a widget's storage after it was
+  ## freed writes a status line with a NUL where the name had been.
   let model = id & ""
   let line = "model: " & model
   state[].model = model
@@ -1429,50 +1532,61 @@ proc setModel*(state: ptr TuiState, L: LuaState, id: string) =
   refreshFooter(state)
   appendStatusLine(state, line)
 
-proc openModel(state: ptr TuiState, L: LuaState) =
-  ## Open `/model`: the provider's real catalog in the menu. The catalog comes
-  ## over the wire in one blocking GET, so a failure is feedback rather than a
-  ## crash and never an empty menu; the Menu (and not a QuestionWidget) carries
-  ## it because the catalog can be long and only the Menu scrolls the selection
-  ## into view.
-  let backing = if L.isNil: none(Provider) else: currentProvider(L)
-  if backing.isNone:
-    appendStatusLine(state, "no provider: run /login or set " &
-      providerEnvVar(state[].provider))
-    return
-  # The fetch runs with the provider's own pump, so its two waits — the
-  # response head and the body — hand control back between ticks while a slow
-  # endpoint answers: the app keeps painting and Esc/Ctrl+C still reach it.
-  # The status and its FORCED frame stay, because nimterm's budget would
-  # otherwise defer the explanation until after the wait it explains.
-  setCoreStatus(state, "fetching the models…")
-  presentApp(state, force = true)
-  var ids: seq[string]
-  try:
-    for model in fetchModels(backing.get).models:
-      ids.add model.id
-  except CatchableError as e:
-    setCoreStatus(state, "")
-    appendStatusLine(state, "cannot list the models: " & e.msg)
-    return
-  setCoreStatus(state, "")
-  if ids.len == 0:
-    appendStatusLine(state, "the provider returned no models")
-    return
-  var items: seq[MenuItem]
-  var texts: seq[string]
-  for id in ids:
-    items.add MenuItem(label: id, description: "")
-    # The provider leads the search text, pi's rule: a provider-prefixed query
-    # has to land on the ids this provider serves instead of losing to a
-    # proxy-provider id that merely contains the same string.
-    texts.add state[].provider & " " & id
-  state[].pickerSource = items
-  state[].pickerText = texts
+proc openModel(state: ptr TuiState) =
+  ## Open `/model`: the restored catalog first, then every configured
+  ## provider's refresh. The cache paints without waiting for the network, and
+  ## each provider answer replaces its cached rows and repaints the picker, so
+  ## the list grows while the walk runs. The refresh uses the TUI's live pump,
+  ## so the frame stays alive and Esc/Ctrl+C still reach it.
+  clearModelPickerData(state)
+  let cached = restoreCatalog()
   state[].menuKind = mkModel
-  state[].menu = newMenu(items, title = "pick a model:")
-  if not state[].screen.isNil:
-    state[].screen.menu = state[].menu
+  if cached.len > 0:
+    setModelPickerRows(state, cached)
+  else:
+    state[].pickerSource = @[]
+    state[].pickerText = @[]
+    state[].menu = newMenu(@[], title = "pick a model:")
+    if not state[].screen.isNil:
+      state[].screen.menu = state[].menu
+    updateModelPickerChrome(state)
+  presentApp(state, force = true)
+
+  let pump = tuiPump(state)
+  var anySucceeded = false
+  for spec in configuredProviders():
+    if state[].menuKind != mkModel or state[].quit:
+      return
+    let refresh = refreshProvider(spec, pump, state[].catalogTransport)
+    if state[].menuKind != mkModel or state[].quit:
+      return
+    if refresh.error.len > 0:
+      appendStatusLine(state,
+        "cannot refresh the models for " & spec.id & ": " & refresh.error)
+    else:
+      anySucceeded = true
+    # A failure leaves the store untouched, so the restore keeps the cached
+    # rows. A success persisted its answer, so the restore brings the fresh
+    # rows in. Both rebuild the same aligned projections.
+    setModelPickerRows(state, restoreCatalog())
+    presentApp(state, force = true)
+
+  if state[].pickerModelSource.len == 0:
+    if anySucceeded:
+      setCoreStatus(state, "The configured providers returned no models.")
+    else:
+      setCoreStatus(state, modelPickerNoCatalogs)
+    closeMenu(state)
+    presentApp(state, force = true)
+    return
+
+  state[].modelCatalogRefreshed = true
+  setCoreStatus(state, modelPickerRefreshed)
+  # Reapply the query so a no-match message keeps its place while the refresh
+  # notice returns when the query widens again.
+  updatePickerSearch(state)
+  updateModelPickerChrome(state)
+  presentApp(state, force = true)
 
 proc providerItems*(): seq[MenuItem] =
   ## The provider picker's rows: the entry's human label, and its configuration
@@ -1484,6 +1598,7 @@ proc openProvider*(state: ptr TuiState, mode: ProviderPickerMode) =
   ## Open the provider picker: every entry of the table with its label and its
   ## state, the composer as its search field (the shared picker plumbing), and
   ## the title of the job it was opened for — pi's two titles, one component.
+  clearModelPickerData(state)
   state[].pickerMode = mode
   state[].pickerSource = providerItems()
   state[].pickerText = @[]
@@ -1592,7 +1707,7 @@ proc runCommand(state: ptr TuiState, L: LuaState, text: string) =
     return
   if command == "/model":
     state[].inputW.clear()
-    openModel(state, L)
+    openModel(state)
     return
   state[].inputW.clear()
   lua_getfield(L, luaGlobalsIndex, "neopi")
@@ -2255,12 +2370,19 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
       case event.key
       of keyUp, keyDown, keyPageUp, keyPageDown:
         let response = state[].screen.menu.handle(event)
+        updateModelPickerChrome(state)
         app.invalidate()
         if response.handled: return response
       of keyEnter:
         let menu = state[].screen.menu
-        if menu.items.len > 0:
-          setModel(state, L, menu.items[menu.selected].label)
+        let selected = menu.selected
+        if selected >= 0 and selected < state[].pickerModels.len:
+          let pick = state[].pickerModels[selected]
+          if pick.provider != state[].provider:
+            let spec = findProvider(pick.provider)
+            if spec.isSome:
+              setActiveProvider(state, L, spec.get)
+          setModel(state, L, pick.id)
         return eventHandled
       of keyEscape:
         closeMenu(state)
