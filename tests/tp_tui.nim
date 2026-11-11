@@ -1796,6 +1796,55 @@ suite "the /model builtin":
       removeDir(root)
       removeFile(path)
 
+  test "clearing a query that matched nothing leaves a valid selection":
+    # The crash this pins: an EMPTY menu carries `selected = -1` (the widget's
+    # own constructor does that, `newMenu`), and the picker reused that value
+    # for the list that comes back — `min(kept, items.len - 1)` with kept = -1
+    # writes -1 into a Menu that HAS items. `keepSelectionVisible` then copies
+    # it into `scrollOffset`, and `Menu.paint` indexes
+    # `items[scrollOffset + row]`, so the frame AFTER the clear died with an
+    # IndexDefect on `items[-1]`. That is why it looked random: it needs a
+    # no-match query, then the clear.
+    clearProviderEnv()
+    let configDir = freshConfig("neopi-tp-tui-model-selection")
+    let root = freshWorkspace("neopi-tp-tui-model-selection")
+    let path = freshSessionPath("model-selection")
+    try:
+      let specs = configuredProviders()
+      seedCatalog(specs, "cached")
+      let fake = newFakeTransport()
+      queueCatalog(fake, specs, "fresh")
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openai", "first", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "first")
+      wireApp(addr st, L, st.app)
+      st.catalogTransport = fake
+      typeText(backend, addr st, "/model")
+      pressKey(backend, addr st, keyEnter)
+      check st.screen.menu.items.len == specs.len
+
+      # `9` is in no seeded id, provider or name: the menu narrows to nothing
+      # and its selection goes with it.
+      typeText(backend, addr st, "9")
+      check st.screen.menu.items.len == 0
+
+      # The clear brings every row back THROUGH THE APP'S OWN PAINT, which is
+      # where the IndexDefect used to happen.
+      pressKey(backend, addr st, keyBackspace)
+      check st.screen.menu.items.len == specs.len
+      check st.screen.menu.selected >= 0
+      check st.screen.menu.selected < st.screen.menu.items.len
+      check st.menu.selected >= 0
+    finally:
+      removeDir(configDir)
+      removeDir(root)
+      removeFile(path)
+
 suite "the turn drive":
   test "sendTurn drives one turn at a time: the tool result and the final text land":
     let root = freshWorkspace("neopi-tp-tui-drive")

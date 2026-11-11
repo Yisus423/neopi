@@ -10,7 +10,7 @@
 ## key polling, the per-line colors) is replaced by nimterm's event loop,
 ## widgets, unicodedb widths, and markdown renderer.
 
-import std/[algorithm, json, options, os, strutils, syncio, tables, times]
+import std/[algorithm, json, math, options, os, strutils, syncio, tables, times]
 import nimterm
 import nimterm/[events as ntevents, term, transcript as nttranscript]
 import neopi/authstore
@@ -1248,7 +1248,14 @@ proc updatePickerSearch(state: ptr TuiState) =
   let kept = state[].menu.selected
   state[].menu = newMenu(items, title = state[].menu.title)
   if query.len == 0 and items.len > 0:
-    state[].menu.selected = min(kept, items.len - 1)
+    # `clamp`, not `min`. An EMPTY menu carries `selected = -1` — the widget's
+    # own constructor sets it — and a `min` that keeps it hands -1 back to a
+    # Menu that HAS items. `keepSelectionVisible` copies that -1 into
+    # `scrollOffset` and `Menu.paint` indexes `items[scrollOffset + row]`, so
+    # the frame after a CLEAR of a no-match query died on `items[-1]` with an
+    # IndexDefect: a crash out of clearing the search, which is why it looked
+    # random.
+    state[].menu.selected = clamp(kept, 0, items.len - 1)
   if not state[].screen.isNil:
     state[].screen.menu = state[].menu
   if query.len > 0 and items.len == 0:

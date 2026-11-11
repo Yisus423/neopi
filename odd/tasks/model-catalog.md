@@ -31,6 +31,33 @@ mechanism, and #16 has landed.
 - **S6** (this session's request, verbatim): "arranquemos con el siguiente
   remaining en el roadmap, #28, primero contextualizate con engram, si vas a
   buscar en el codigo usa codegraph o nimlangserver"
+- **S7** (the crash the user hit, verbatim: "tuve ese error de repente mientras
+  habría /models pero solo paso una vez") — the screenshot's trace ends in
+  `nimterm/widgets/menu.nim(139) paint` → `index -1 not in 0 .. 436
+  [IndexDefect]`. The invariant: a Menu that HAS items must never carry a
+  negative `selected`, and the widget must not index outside its list for any
+  selection it is handed.
+- **S8** (the keyless rule, verbatim): "Un error que puede verse en la foto es
+  que ollama y llama.cpp intentan actualizarse aunque no esten logueados, creo
+  que tiene que ver con que sea keyless, en pi llama.cpp no pide api key pero sí
+  pide el server url". The user's call (verbatim): "Mientras tanto excluyamoslo
+  pero ponlo al final del roadmap, habría que revisar como lo hace pi cuando se
+  haga" — a keyless entry counts as configured only with a stored credential,
+  and the server-URL question moves to the END of the ROADMAP.
+- **S9** (the presentation, verbatim): "lo que implementamos no se parece en
+  nada a el de pi, solo compara a neopi en la izquierda con pi a la derecha" and
+  "Aparte capaz eso que hiciste pudo haber sido mejor un patch o nuevo widget en
+  nuestro fork de nimterm, así no bloateamos tanto". The user's call (verbatim):
+  "Widget nuevo en nuestro fork de nimterm".
+- **S10** (the dependencies, verbatim): "Para lo de las copias de chronos
+  deberíamos crear un nimble lock" and the question "¿y si cambiaramos los
+  commits pinneados por el lock?, así dejaríamos de pinnear cada cambio y solo
+  sería regenerar el lock. Esto es un poco discutible".
+- **S11** (the tooling correction, verbatim): "ni siquieras has usado
+  nimlangserver con su skill nim mcp tools" — the project's MCP tools are
+  available through codemode and own Nim symbol and diagnostic work
+  (`nimFindSymbols`, `nimFindReferences`, `nimListSymbols`, `nimCheckFile`,
+  `nimCheckProject`), per `.pi/skills/nim-mcp-tools/SKILL.md`.
 
 ## Verified basis — the code as it stands (2026-11-09, mapped read-only)
 
@@ -130,7 +157,17 @@ mechanism, and #16 has landed.
 | T3 | The fetch: the conditional headers, the `304`, the response headers the production transport was DROPPING, and the #16 pump on BOTH waits (`listModels` → `fetchModels`) | S3, S4 | inline, RED→GREEN — differential check on the streaming path (the shared `wire.nim` producer + `nextChunk`), `Risk: none` | `feat(provider): the catalog refresh revalidates and stops freezing the frame` — `3a39c1a` |
 | T4 | `src/neopi/catalog.nim`: `configuredProviders`, `restoreCatalog`, `namesAmong`, `refreshProvider`, plus `credentialFor` extracted out of the TUI | S1, S2, S3 | worker, RED→GREEN | `feat(provider): the catalog policy — configured providers, cached restore, revalidated refresh` — `ab9a321` |
 | T5 | The picker: the cache painted first, the live per-provider revalidation, the rows `<id> [<provider>]`, the data-carrying pick, neopi's own chrome, the cross-provider move | S1, S4, S5 | worker, RED→GREEN — differential on the shared picker slot | `feat(tui): /model lists every configured provider, from the cache first` — `6fa734b` |
-| T6 | README + the ROADMAP row + this record's Evidence, limits and close | S1-S6 | inline | the commit that carries this section |
+| T6 | README + the ROADMAP row + this record's Evidence, limits and close | S1-S6 | inline | `docs(model-catalog): #28 leaves Remaining — the slice, the evidence and the limits` — `beffe33` |
+
+### Round 2 — what the user found living with it
+
+| ID | What | Specs | Route | Commit |
+|---|---|---|---|---|
+| R1 | The crash: the picker must never hand a negative `selected` back to a non-empty Menu (the `min` that kept `-1`), plus the `Menu` hardening itself with the pin bump | S7 | inline, RED→GREEN | |
+| R2 | The keyless rule: `configuredProviders` requires a real configuration, not `requiresKey: false`; the server-URL question goes to the END of the ROADMAP | S8 | inline, RED→GREEN | |
+| R3 | The picker as a WIDGET in our nimterm fork — header, input, list, counter, name — with the pin bump, so neopi hands it data instead of painting the chrome | S9 | | |
+| R4 | The lock: `nimble lock`, and VERIFY whether it removes the two-chronos-copies hazard at all (the acceptance test is a fresh clone OUTSIDE the project) | S10 | | |
+| R5 | README + ROADMAP + this round's evidence and close | S7-S10 | | |
 
 ## Evidence
 
