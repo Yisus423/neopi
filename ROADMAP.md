@@ -105,3 +105,8 @@ list — see Done).
   global one (the user's personal extensions across projects) waits.
 - **A manifest** (package.json-style declared paths) — redundant with the
   entrypoint's `require` for now.
+- **The local server's URL for a keyless provider** — `/model` lists `ollama`
+  and `llamacpp` only once they have a credential of their own, because neopi
+  has nowhere to store the SERVER URL pi's llama.cpp asks for instead of a key.
+  pi's shape for that question has to be read before it is built (the user's
+  call: "habría que revisar como lo hace pi cuando se haga").

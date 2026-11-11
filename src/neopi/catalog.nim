@@ -31,11 +31,18 @@ type
       ## The failure message, empty when the refresh succeeded.
 
 proc configuredProviders*(): seq[ProviderSpec] =
-  ## The providers whose catalogs the picker shows: every table entry that is
-  ## configured, in the table's order. Pi's rule is a configured provider, not
-  ## one that merely exists in the table.
+  ## The providers whose catalogs the picker shows: the table entries that are
+  ## CONFIGURED, in the table's order. The credential is what configures a
+  ## provider here — a stored one or the entry's variable.
+  ##
+  ## A keyless entry is NOT configured for merely existing. Pi's llama.cpp asks
+  ## for the SERVER URL rather than a key, and neopi has nowhere to store one yet
+  ## (ROADMAP, the end of the list); until it does, a keyless entry joins this
+  ## list only once it has a credential of its own. Without the rule `/model`
+  ## tried to refresh a local server nobody had pointed at and reported the
+  ## connection failure as if the provider had answered.
   for spec in knownProviders():
-    if providerState(spec) != psUnconfigured:
+    if providerState(spec) in {psStored, psEnv}:
       result.add spec
 
 proc restoreCatalog*(): seq[ListedModel] =

@@ -49,6 +49,15 @@ proc clearProviderEnv() =
     "OLLAMA_API_KEY", "LLAMACPP_API_KEY"]:
     delEnv(name)
 
+proc configuredForTests(): seq[ProviderSpec] =
+  ## The model picker's source for these tests. The policy excludes a keyless
+  ## entry nobody pointed at (S8: pi's llama.cpp asks for its server URL and
+  ## neopi cannot store one yet), so two KEYED providers are configured first —
+  ## which also keeps every test exercising MORE than one catalog.
+  saveApiKey("openai", "sk-openai-test")
+  saveApiKey("groq", "sk-groq-test")
+  catalog.configuredProviders()
+
 proc seedCatalog(specs: seq[ProviderSpec], suffix: string) =
   ## Seed one cached row for every configured provider. The cache is the
   ## picker's first frame, so every provider needs an entry of its own.
@@ -1504,7 +1513,7 @@ suite "the /model builtin":
     let root = freshWorkspace("neopi-tp-tui-model-cache")
     let path = freshSessionPath("model-cache")
     try:
-      let specs = configuredProviders()
+      let specs = configuredForTests()
       seedCatalog(specs, "cached")
       let fake = newFakeTransport()
       queueCatalog(fake, specs, "fresh")
@@ -1563,7 +1572,7 @@ suite "the /model builtin":
     let root = freshWorkspace("neopi-tp-tui-model-search")
     let path = freshSessionPath("model-search")
     try:
-      let specs = configuredProviders()
+      let specs = configuredForTests()
       seedCatalog(specs, "cached")
       let fake = newFakeTransport()
       queueCatalog(fake, specs, "fresh")
@@ -1606,7 +1615,7 @@ suite "the /model builtin":
     let root = freshWorkspace("neopi-tp-tui-model-chrome")
     let path = freshSessionPath("model-chrome")
     try:
-      let specs = configuredProviders()
+      let specs = configuredForTests()
       let fake = newFakeTransport()
       queueCatalog(fake, specs, "fresh")
       let sess = newSession(path)
@@ -1643,7 +1652,7 @@ suite "the /model builtin":
     let root = freshWorkspace("neopi-tp-tui-model-fail")
     let path = freshSessionPath("model-fail")
     try:
-      let specs = configuredProviders()
+      let specs = configuredForTests()
       seedCatalog(specs, "cached")
       let fake = newFakeTransport()
       queueCatalog(fake, specs, "cached", 500)
@@ -1682,7 +1691,7 @@ suite "the /model builtin":
     let root = freshWorkspace("neopi-tp-tui-model-provider")
     let path = freshSessionPath("model-provider")
     try:
-      let specs = configuredProviders()
+      let specs = configuredForTests()
       seedCatalog(specs, "cached")
       let fake = newFakeTransport()
       queueCatalog(fake, specs, "fresh")
@@ -1711,7 +1720,10 @@ suite "the /model builtin":
       if live.isSome:
         check live.get.name == picked.id
         check live.get.baseUrl == picked.baseUrl
-        check live.get.apiKey.len == 0
+        # The rebuilt provider carries the PICKED entry's credential: the store
+        # is what `credentialFor` reads, and the pick must not keep talking
+        # with the previous provider's key.
+        check live.get.apiKey == "sk-groq-test"
       check st.menuKind == mkNone
       check st.pickerModels.len == 0
     finally:
@@ -1725,7 +1737,7 @@ suite "the /model builtin":
     let root = freshWorkspace("neopi-tp-tui-model-close")
     let path = freshSessionPath("model-close")
     try:
-      let specs = configuredProviders()
+      let specs = configuredForTests()
       seedCatalog(specs, "cached")
       let fake = newFakeTransport()
       queueCatalog(fake, specs, "fresh")
@@ -1768,7 +1780,7 @@ suite "the /model builtin":
     let root = freshWorkspace("neopi-tp-tui-model-empty")
     let path = freshSessionPath("model-empty")
     try:
-      let specs = configuredProviders()
+      let specs = configuredForTests()
       let fake = newFakeTransport()
       queueCatalog(fake, specs, "fresh", 500)
       let sess = newSession(path)
@@ -1810,7 +1822,7 @@ suite "the /model builtin":
     let root = freshWorkspace("neopi-tp-tui-model-selection")
     let path = freshSessionPath("model-selection")
     try:
-      let specs = configuredProviders()
+      let specs = configuredForTests()
       seedCatalog(specs, "cached")
       let fake = newFakeTransport()
       queueCatalog(fake, specs, "fresh")

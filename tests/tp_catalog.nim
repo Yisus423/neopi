@@ -34,30 +34,57 @@ suite "the model catalog":
     clearKeyedProviderEnv()
     let configuredDir = freshConfig("neopi-tp-catalog-configured")
     defer: removeDir(configuredDir)
-    saveApiKey("openrouter", "sk-stored")
+    saveApiKey("groq", "sk-stored")
+    putEnv("OPENAI_API_KEY", "sk-env")
     var ids: seq[string]
     for spec in configuredProviders():
       ids.add spec.id
-    check ids == @["openrouter", "ollama", "llamacpp"]
+    # In table order, and only what a CREDENTIAL configures: `openai` from its
+    # variable, `groq` from the store.
+    check ids == @["openai", "groq"]
+    delEnv("OPENAI_API_KEY")
 
     let unconfiguredDir = freshConfig("neopi-tp-catalog-unconfigured")
     defer: removeDir(unconfiguredDir)
     ids = @[]
     for spec in configuredProviders():
       ids.add spec.id
-    check ids == @["ollama", "llamacpp"]
+    # `.len`, not `== @[]`: unittest2 wraps the checked expression in an
+    # iterator, and an untyped `@[]` loses its element type there.
+    check ids.len == 0
 
-  test "restoreCatalog restores each provider's cache in table order":
+  test "a keyless entry is not configured for merely existing":
+    # S8, the user's own report: `/model` refreshed ollama and llamacpp although
+    # nobody had pointed at them, because `requiresKey: false` read as
+    # "configured". pi's llama.cpp asks for its SERVER URL; until neopi can
+    # store one, a keyless entry needs a credential of its own.
+    clearKeyedProviderEnv()
+    let dir = freshConfig("neopi-tp-catalog-keyless")
+    defer: removeDir(dir)
+    check configuredProviders().len == 0
+    putEnv("OLLAMA_API_KEY", "sk-set")
+    var keyless: seq[string]
+    for spec in configuredProviders():
+      keyless.add spec.id
+    check keyless == @["ollama"]
+    delEnv("OLLAMA_API_KEY")
+
+  test "restoreCatalog restores each configured provider's cache in order":
     clearKeyedProviderEnv()
     let dir = freshConfig("neopi-tp-catalog-restore")
     defer: removeDir(dir)
     saveApiKey("openrouter", "sk-stored")
+    saveApiKey("groq", "sk-groq")
     var store = loadModelsStore()
     store.entries["openrouter"] = CatalogEntry(models: @[
       ModelInfo(id: "z-ai/glm-5.3", name: "GLM-5.3"),
       ModelInfo(id: "openai/gpt-5", name: "GPT-5")])
-    store.entries["ollama"] = CatalogEntry(models: @[
+    store.entries["groq"] = CatalogEntry(models: @[
       ModelInfo(id: "qwen3", name: "Qwen 3")])
+    # A cache entry for a provider nothing configures is NOT listed: the cache
+    # follows the same rule the refresh does.
+    store.entries["ollama"] = CatalogEntry(models: @[
+      ModelInfo(id: "ghost", name: "Ghost")])
     saveModelsStore(store)
 
     let models = restoreCatalog()
@@ -66,7 +93,7 @@ suite "the model catalog":
       name: "GLM-5.3")
     check models[1] == ListedModel(provider: "openrouter", id: "openai/gpt-5",
       name: "GPT-5")
-    check models[2] == ListedModel(provider: "ollama", id: "qwen3", name: "Qwen 3")
+    check models[2] == ListedModel(provider: "groq", id: "qwen3", name: "Qwen 3")
 
   test "namesAmong answers one row's display name":
     let models = @[
