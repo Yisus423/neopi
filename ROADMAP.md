@@ -105,6 +105,17 @@ list — see Done).
   global one (the user's personal extensions across projects) waits.
 - **A manifest** (package.json-style declared paths) — redundant with the
   entrypoint's `require` for now.
+- **The lock file** — MEASURED (2026-11-11, nimble 0.24.1): `nimble lock` does
+  fix the two-copies hazard for `nimble build`, because nimble hands the
+  compiler an explicit `--path` list built from the locked revisions, so the
+  compiler stops picking between two installs of the same version by hash. But
+  on this nimble it BREAKS the other two documented paths: a bare `nim c` stops
+  resolving the dependencies (`cannot open file: unittest2`) and `nimble test`
+  fails with it, since its task runs a bare `nim c`
+  (`nimble setup` does not exist yet either). The user's read: it is the old
+  nimble, and 0.26.2 is said to have fixed it. **Revisit after a nimble bump**,
+  re-verifying the bare-`nim c` and `nimble test` paths; chronos is pinned by
+  commit meanwhile.
 - **The local server's URL for a keyless provider** — `/model` lists `ollama`
   and `llamacpp` only once they have a credential of their own, because neopi
   has nowhere to store the SERVER URL pi's llama.cpp asks for instead of a key.
