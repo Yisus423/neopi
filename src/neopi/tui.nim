@@ -173,6 +173,11 @@ type
     footerW*: TextWidget
     menu*: Menu
     question*: QuestionWidget
+    picker*: Picker
+      ## The model picker's own block (the fork's `Picker`): while it is set,
+      ## IT owns the bottom of the screen in pi's order — header, the filter
+      ## input, the rows, the counter, the detail, the notice, the keys — and
+      ## neopi paints none of that chrome itself.
 
 const composerRows* = 2
   ## The rule and the input, the fixed pair the composer occupies.
@@ -303,15 +308,43 @@ method children*(screen: NeopiScreen): seq[Widget] =
   result.add Widget(screen.inputW)
   result.add Widget(screen.footerW)
 
+proc paintPickerBlock(screen: NeopiScreen, canvas: var Canvas, w, h: int) =
+  ## The model picker's own frame. pi's block owns the bottom while it is open
+  ## — the header, the filter input, the rows, the counter, the detail, the
+  ## notice and the keys — neopi's footer keeps the last row, and the
+  ## transcript keeps what is left, never less than one row: on a short screen
+  ## the block clips instead of the history.
+  var row = 0
+  if not screen.chrome.isNil:
+    for line in screen.chrome.header:
+      canvas.writeAnsiText(0, row, line, defaultStyle(), w)
+      inc row
+  let wanted = screen.picker.measure(Constraints(maxSize: size(w, h))).h
+  let blockRows = max(3, min(wanted, max(1, h - row - 2)))
+  let transcriptRows = max(1, h - row - blockRows - 1)
+  screen.transcriptW.render(canvas, rect(0, row, w, transcriptRows))
+  inc row, transcriptRows
+  screen.picker.render(canvas, rect(0, row, w, blockRows))
+  inc row, blockRows
+  canvas.writeAnsiText(0, row, screen.footerW.text, defaultStyle(), w)
+
 method paint*(screen: NeopiScreen, canvas: var Canvas) =
   ## The layout the core owns, top to bottom: the header rows, the transcript
   ## (which keeps whatever the fixed blocks leave), the widgets placed above
   ## the composer, the rule and the input, the widgets placed below, one row
   ## per live status key, and the footer's line. The resume menu floats above
   ## the input while it is open.
+  ##
+  ## One branch takes over that layout: while the MODEL picker is open its own
+  ## `Picker` block replaces the composer row and the menu's floating slot, so
+  ## the screen reads the way pi's does instead of the chrome neopi used to
+  ## paint around a floating menu.
   let h = screen.area.h
   let w = screen.area.w
   if h <= 0 or w <= 0: return
+  if not screen.picker.isNil:
+    screen.paintPickerBlock(canvas, w, h)
+    return
   let layout = tuiLayout(screen.chrome, h)
   let chrome = screen.chrome
   var row = 0
@@ -359,8 +392,6 @@ method paint*(screen: NeopiScreen, canvas: var Canvas) =
       rect(0, max(0, inputTop - rows), w, rows))
 
 const
-  modelPickerChromeKey = "neopi.model-picker"
-    ## The below-editor widget slot that carries the model picker's own chrome.
   modelPickerHeader = "Only showing models from configured providers. " &
     "Use /login to add providers."
     ## The header the model picker always shows.
@@ -524,6 +555,11 @@ type
     quit*: bool
     appReady*: bool
     screen*: NeopiScreen
+    picker*: Picker
+      ## The live model-picker block, or nil when no model picker is open. It
+      ## owns the composer as its `input` child, so the search field is still
+      ## the composer (there is no second input) and the block can paint it in
+      ## pi's position.
 
 proc terminalTitleWriter(text: string) =
   ## The default title sink: OSC 2, the sequence a terminal reads to name its
@@ -1162,8 +1198,9 @@ proc clearModelPickerData(state: ptr TuiState) =
   state[].pickerModelTotal = 0
   state[].pickerVisibleText = @[]
   state[].modelCatalogRefreshed = false
-  if not state[].chrome.isNil:
-    state[].chrome.clearWidget(modelPickerChromeKey)
+  state[].picker = nil
+  if not state[].screen.isNil:
+    state[].screen.picker = nil
 
 proc closeMenu(state: ptr TuiState) =
   ## Close the menus that share the slot above the composer, releasing the slot
@@ -1196,25 +1233,34 @@ proc applyCompletion(state: ptr TuiState, item: MenuItem) =
   state[].inputW.setText("/" & item.label & " ")
   closeCompletion(state)
 
-proc updateModelPickerChrome(state: ptr TuiState) =
-  ## Repaint the model picker's chrome in the below-editor widget slot. The
-  ## menu floats above the composer and blanks its rectangle, so chrome placed
-  ## above the editor would be covered while the picker is open. These rows sit
-  ## below the editor, where the menu cannot reach them.
-  if state[].chrome.isNil or state[].menuKind != mkModel:
+proc updatePickerFields(state: ptr TuiState) =
+  ## Fill the model-picker block's own lines from the state: the constant
+  ## header and keys, the counter over what the query leaves, and the SELECTED
+  ## row's display name. The block paints them in pi's order, so neopi no
+  ## longer paints this chrome itself — it only hands over the data.
+  ##
+  ## The menu is re-pointed here too, and that is the invariant worth naming:
+  ## the keys act on `state[].screen.menu`, the block paints `picker.menu`, and
+  ## a picker that painted the PREVIOUS list while the keys moved through the
+  ## new one would be a silent lie.
+  if state[].picker.isNil or state[].menuKind != mkModel:
     return
+  state[].picker.header = modelPickerHeader
+  state[].picker.keys = modelPickerKeys
   let filtered = if state[].menu.isNil: 0 else: state[].menu.items.len
-  var lines = @[
-    modelPickerHeader,
-    "(" & $filtered & "/" & $state[].pickerModelTotal & ")"]
+  state[].picker.counter =
+    "(" & $filtered & "/" & $state[].pickerModelTotal & ")"
+  var detail = ""
   if not state[].menu.isNil and state[].menu.selected >= 0 and
       state[].menu.selected < state[].pickerModels.len:
     let row = state[].pickerModels[state[].menu.selected]
     let name = namesAmong(state[].pickerModels, row.provider, row.id)
     if name.len > 0:
-      lines.add "Model Name: " & name
-  lines.add modelPickerKeys
-  state[].chrome.setWidget(modelPickerChromeKey, lines, wpBelowEditor)
+      detail = "Model Name: " & name
+  state[].picker.detail = detail
+  state[].picker.menu = state[].menu
+  if not state[].screen.isNil:
+    state[].screen.picker = state[].picker
 
 proc updatePickerSearch(state: ptr TuiState) =
   ## Narrow the open picker from the composer's text. A picker keeps only its
@@ -1260,11 +1306,17 @@ proc updatePickerSearch(state: ptr TuiState) =
     state[].screen.menu = state[].menu
   if query.len > 0 and items.len == 0:
     setCoreStatus(state, "no matches: backspace to widen the search")
+    if not state[].picker.isNil:
+      state[].picker.notice = "no matches: backspace to widen the search"
   elif state[].menuKind == mkModel and state[].modelCatalogRefreshed:
     setCoreStatus(state, modelPickerRefreshed)
+    if not state[].picker.isNil:
+      state[].picker.notice = modelPickerRefreshed
   else:
     setCoreStatus(state, "")
-  updateModelPickerChrome(state)
+    if not state[].picker.isNil:
+      state[].picker.notice = ""
+  updatePickerFields(state)
 
 proc setModelPickerRows(state: ptr TuiState, models: seq[ListedModel]) =
   ## Replace the model picker's rows and narrow them through the current query.
@@ -1287,8 +1339,10 @@ proc setModelPickerRows(state: ptr TuiState, models: seq[ListedModel]) =
   state[].menu = newMenu(items, title = "pick a model:")
   if not state[].screen.isNil:
     state[].screen.menu = state[].menu
+  if not state[].picker.isNil:
+    state[].picker.menu = state[].menu
   updatePickerSearch(state)
-  updateModelPickerChrome(state)
+  updatePickerFields(state)
 
 proc updateCompletion(state: ptr TuiState, L: LuaState) =
   ## Recompute the completion from the composer: the menu opens while the
@@ -1546,17 +1600,24 @@ proc openModel(state: ptr TuiState) =
   ## the list grows while the walk runs. The refresh uses the TUI's live pump,
   ## so the frame stays alive and Esc/Ctrl+C still reach it.
   clearModelPickerData(state)
-  let cached = restoreCatalog()
   state[].menuKind = mkModel
+  # The block owns the composer as its input child (there is no second input)
+  # and the menu it renders; the header and the keys are constants here.
+  state[].picker = newPicker(input = Widget(state[].inputW),
+    header = modelPickerHeader, keys = modelPickerKeys)
+  if not state[].screen.isNil:
+    state[].screen.picker = state[].picker
+  let cached = restoreCatalog()
   if cached.len > 0:
     setModelPickerRows(state, cached)
   else:
     state[].pickerSource = @[]
     state[].pickerText = @[]
     state[].menu = newMenu(@[], title = "pick a model:")
+    state[].picker.menu = state[].menu
     if not state[].screen.isNil:
       state[].screen.menu = state[].menu
-    updateModelPickerChrome(state)
+    updatePickerFields(state)
   presentApp(state, force = true)
 
   let pump = tuiPump(state)
@@ -1588,11 +1649,10 @@ proc openModel(state: ptr TuiState) =
     return
 
   state[].modelCatalogRefreshed = true
-  setCoreStatus(state, modelPickerRefreshed)
   # Reapply the query so a no-match message keeps its place while the refresh
   # notice returns when the query widens again.
   updatePickerSearch(state)
-  updateModelPickerChrome(state)
+  updatePickerFields(state)
   presentApp(state, force = true)
 
 proc providerItems*(): seq[MenuItem] =
@@ -2377,7 +2437,7 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
       case event.key
       of keyUp, keyDown, keyPageUp, keyPageDown:
         let response = state[].screen.menu.handle(event)
-        updateModelPickerChrome(state)
+        updatePickerFields(state)
         app.invalidate()
         if response.handled: return response
       of keyEnter:

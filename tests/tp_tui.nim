@@ -1600,16 +1600,15 @@ suite "the /model builtin":
       check st.pickerModels[0].provider == specs[0].id
       check st.pickerModels[0].id == specs[0].id & "-fresh"
 
-      var canvas = newCanvas(size(120, 18))
-      st.screen.render(canvas, rect(0, 0, 120, 18))
-      check "(1/" & $specs.len & ")" in canvas.plainText
-      check st.chrome.statusText(coreStatusKey) == "Model catalogs refreshed."
+      check st.picker.counter == "(1/" & $specs.len & ")"
+      check st.picker.notice == "Model catalogs refreshed."
+      check st.picker.menu == st.screen.menu
     finally:
       removeDir(configDir)
       removeDir(root)
       removeFile(path)
 
-  test "the model picker paints the header, counter, display name and keys":
+  test "the model picker owns the header, counter, display name, notice and keys":
     clearProviderEnv()
     let configDir = freshConfig("neopi-tp-tui-model-chrome")
     let root = freshWorkspace("neopi-tp-tui-model-chrome")
@@ -1631,16 +1630,80 @@ suite "the /model builtin":
       typeText(backend, addr st, "/model")
       pressKey(backend, addr st, keyEnter)
 
+      check not st.picker.isNil
+      check st.screen.picker == st.picker
+      check st.picker.input == st.inputW
+      check st.picker.menu == st.screen.menu
+      check st.picker.header == "Only showing models from configured providers. " &
+        "Use /login to add providers."
+      check st.picker.counter ==
+        "(" & $st.screen.menu.items.len & "/" & $specs.len & ")"
+      check st.picker.detail == "Model Name: " & specs[0].id & " fresh"
+      check st.picker.notice == "Model catalogs refreshed."
+      check st.picker.keys == "Enter to select · Escape/Ctrl+C to cancel"
+      check "Ctrl+S" notin st.picker.keys
+
       var canvas = newCanvas(size(120, 20))
       st.screen.render(canvas, rect(0, 0, 120, 20))
-      check "Only showing models from configured providers. " &
-        "Use /login to add providers." in canvas.plainText
-      check "(" & $st.screen.menu.items.len & "/" & $specs.len & ")" in
-        canvas.plainText
-      check "Model Name: " & specs[0].id & " fresh" in canvas.plainText
-      check "Enter to select · Escape/Ctrl+C to cancel" in canvas.plainText
-      check "Ctrl+S" notin canvas.plainText
       check (specs[0].id & "-fresh [" & specs[0].id & "]") in canvas.plainText
+    finally:
+      removeDir(configDir)
+      removeDir(root)
+      removeFile(path)
+
+  test "the model picker paints its fields in pi's order":
+    clearProviderEnv()
+    let configDir = freshConfig("neopi-tp-tui-model-order")
+    let root = freshWorkspace("neopi-tp-tui-model-order")
+    let path = freshSessionPath("model-order")
+    try:
+      let specs = configuredForTests()
+      let fake = newFakeTransport()
+      queueCatalog(fake, specs, "fresh")
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openai", "first", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "first")
+      wireApp(addr st, L, st.app)
+      st.catalogTransport = fake
+      typeText(backend, addr st, "/model")
+      pressKey(backend, addr st, keyEnter)
+
+      var painted = ""
+      for frame in backend.frames:
+        if "openai-fresh [openai]" in frame and
+            "Model catalogs refreshed." in frame:
+          painted = frame
+      check painted.len > 0
+
+      let header = painted.find("Only showing models")
+      let input = painted.find("> ")
+      let row = painted.find("openai-fresh [openai]")
+      let counter = painted.find("(" & $specs.len & "/" & $specs.len & ")")
+      let detail = painted.find("Model Name: openai fresh")
+      let notice = painted.find("Model catalogs refreshed.")
+      let keys = painted.find("Enter to select")
+      check header >= 0
+      check input >= 0
+      check row >= 0
+      check counter >= 0
+      check detail >= 0
+      check notice >= 0
+      check keys >= 0
+      check header < input
+      check input < row
+      check row < counter
+      check counter < detail
+      check detail < notice
+      check notice < keys
+
+      let lines = painted.splitLines()
+      check lines.len == 10
+      check "openai/first | in 0 | out 0" in lines[^1]
     finally:
       removeDir(configDir)
       removeDir(root)
@@ -1679,7 +1742,7 @@ suite "the /model builtin":
           if "cannot refresh the models for " & spec.id in item.text:
             found = true
         check found
-      check st.chrome.statusText(coreStatusKey) == "Model catalogs refreshed."
+      check st.picker.notice == "Model catalogs refreshed."
     finally:
       removeDir(configDir)
       removeDir(root)
@@ -1760,10 +1823,8 @@ suite "the /model builtin":
       check st.menu.isNil
       check st.screen.menu.isNil
       check st.pickerModels.len == 0
-      var chromeText = ""
-      for line in st.chrome.widgetLines(wpBelowEditor):
-        chromeText.add line & "\n"
-      check "Only showing models from configured providers." notin chromeText
+      check st.picker.isNil
+      check st.screen.picker.isNil
 
       # A provider picker has its own data and never inherits the model rows.
       openProvider(addr st, ppmConfigure)
