@@ -112,8 +112,13 @@ type
     ## the measurement harness uses).
     events: seq[UiEvent]
     frames: seq[string]
+    height: int
+      ## The terminal's rows. 0 keeps the harness's ten, which is what most of
+      ## these tests want; the model picker's WINDOW needs a taller one, since a
+      ## ten-row screen cannot show ten rows plus the block's own lines.
 
-method size(backend: TuiFakeBackend): Size = size(40, 10)
+method size(backend: TuiFakeBackend): Size =
+  size(40, if backend.height > 0: backend.height else: 10)
 
 method readEvent(backend: TuiFakeBackend, timeoutMs: int): UiEvent =
   if backend.events.len == 0:
@@ -124,13 +129,13 @@ method readEvent(backend: TuiFakeBackend, timeoutMs: int): UiEvent =
 method present(backend: TuiFakeBackend, frame: Canvas) =
   backend.frames.add frame.plainText
 
-proc wireFakeApp(state: ptr TuiState): TuiFakeBackend =
+proc wireFakeApp(state: ptr TuiState, height = 0): TuiFakeBackend =
   ## Assemble the app the way `tuiLoop` does, on a fake backend: `buildScreen`
   ## wires the state, the input takes the focus (the composer owns the keys at
   ## start, which is what makes a key reach it through the app's dispatch) and
   ## the caller adds the callbacks with `wireApp`. Without production's
   ## assembly there is no queue, no dispatch and no frame.
-  result = TuiFakeBackend()
+  result = TuiFakeBackend(height: height)
   let screen = buildScreen(state)
   state[].app = newApp(result, screen)
   state[].app.focus(Widget(state[].inputW))
@@ -385,6 +390,21 @@ suite "the fuzzy matcher":
     # An empty query is not a filter: the pickers only narrow once something is
     # typed, and the list comes back whole when it is cleared.
     check fuzzyMatch("", "anything at all")
+
+  test "the matcher takes pi's tokens and scores them":
+    # pi's `fuzzyFilter` (`packages/tui/src/fuzzy.ts:121`) splits the query on
+    # whitespace AND slashes and requires EVERY token; neopi matched the whole
+    # query as ONE subsequence, so a space made an otherwise reasonable query
+    # unmatchable — which is what made the search look broken next to pi's.
+    let text = "openai openai/gpt-5 openai gpt-5 GPT Five"
+    check fuzzyMatch("openai gpt", text)
+    check fuzzyMatch("openai/gpt", text)
+    check fuzzyMatch("gpt5", text)
+    check not fuzzyMatch("openai zzz", text)
+    # Best first, pi's order: a tighter match scores LOWER, and the caller sorts
+    # ascending. A scattered match cannot outrank a contiguous one.
+    check fuzzyScore("gpt5", "gpt5") < fuzzyScore("gpt5", "openai/gpt-5")
+    check fuzzyScore("zzz", "anything") < 0
 
 suite "the command completion":
   test "commandItems lists the core builtin and the runtime's registry":
@@ -1376,6 +1396,97 @@ suite "the /login and /logout builtins":
       removeFile(path)
 
 suite "the /model builtin":
+  test "the block's lines take their roles from the theme":
+    # The user's ask, read out of pi's source: the hint is `warning`, the
+    # counter, the `Model Name:` line and the keys are `muted`, the refresh
+    # notice is `success`, and the selected row is `accent` while the provider
+    # badge stays muted on EVERY row (which is why it rides the description).
+    clearProviderEnv()
+    let configDir = freshConfig("neopi-tp-tui-model-roles")
+    let root = freshWorkspace("neopi-tp-tui-model-roles")
+    let path = freshSessionPath("model-roles")
+    try:
+      let specs = configuredForTests()
+      seedCatalog(specs, "cached")
+      let fake = newFakeTransport()
+      queueCatalog(fake, specs, "fresh")
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openai", "first", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "first")
+      wireApp(addr st, L, st.app)
+      st.catalogTransport = fake
+      typeText(backend, addr st, "/model")
+      pressKey(backend, addr st, keyEnter)
+
+      check st.picker.headerStyle == currentTheme.warning
+      check st.picker.counterStyle == currentTheme.muted
+      check st.picker.detailStyle == currentTheme.muted
+      check st.picker.keysStyle == currentTheme.muted
+      check st.picker.noticeStyle == currentTheme.success
+      check st.screen.menu.selectedStyle == currentTheme.accent
+      check st.screen.menu.descriptionStyle == currentTheme.muted
+      check st.screen.menu.selectedDescriptionStyle == currentTheme.muted
+      # The notice lives INSIDE the block: nothing about it is left in the chat
+      # for the picker to outlive.
+      check st.picker.notice == "Model catalogs refreshed."
+      check st.chrome.statusText(coreStatusKey) == ""
+    finally:
+      removeDir(configDir)
+      removeDir(root)
+      removeFile(path)
+
+  test "the list windows to ten rows and the rest scrolls":
+    clearProviderEnv()
+    let configDir = freshConfig("neopi-tp-tui-model-window")
+    let root = freshWorkspace("neopi-tp-tui-model-window")
+    let path = freshSessionPath("model-window")
+    try:
+      let specs = configuredForTests()
+      # A catalog bigger than any terminal, and no fresh answer: the refresh
+      # fails, so the cache is what the block paints.
+      var store = loadModelsStore()
+      var many: seq[ModelInfo]
+      for i in 0 ..< 25:
+        many.add ModelInfo(id: "m" & $i, name: "M " & $i)
+      store.entries[specs[0].id] = CatalogEntry(models: many, checkedAt: 1)
+      saveModelsStore(store)
+      let fake = newFakeTransport()
+      queueCatalog(fake, specs, "fresh", 500)
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openai", "first", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st, height = 30)
+      exposeTuiSink(L, addr st, "first")
+      wireApp(addr st, L, st.app)
+      st.catalogTransport = fake
+      typeText(backend, addr st, "/model")
+      pressKey(backend, addr st, keyEnter)
+
+      var painted = ""
+      for frame in backend.frames:
+        if "m0" in frame and "(1/25)" in frame:
+          painted = frame
+      check painted.len > 0
+      # pi's MAX_VISIBLE: ten rows, and the counter counts what the QUERY
+      # leaves rather than the window.
+      var rows = 0
+      for line in painted.splitLines():
+        if "[" & specs[0].id & "]" in line: inc rows
+      check rows == 10
+      check st.picker.counter == "(1/25)"
+    finally:
+      removeDir(configDir)
+      removeDir(root)
+      removeFile(path)
+
   test "the composer takes the keys again after the /login question closes":
     let root = freshWorkspace("neopi-tp-tui-login-focus")
     let path = freshSessionPath("login-focus")
@@ -1545,20 +1656,25 @@ suite "the /model builtin":
       var freshFrame = -1
       for i, frame in backend.frames:
         if cacheFrame < 0 and
-            (specs[0].id & "-cached [" & specs[0].id & "]") in frame:
+            (specs[0].id & "-cached") in frame and
+            ("[" & specs[0].id & "]") in frame:
           cacheFrame = i
         if freshFrame < 0 and
-            (specs[0].id & "-fresh [" & specs[0].id & "]") in frame:
+            (specs[0].id & "-fresh") in frame and
+            ("[" & specs[0].id & "]") in frame:
           freshFrame = i
       check cacheFrame >= 0
       check freshFrame > cacheFrame
       if cacheFrame >= 0:
         for spec in specs:
-          check (spec.id & "-cached [" & spec.id & "]") in
-            backend.frames[cacheFrame]
+          check (spec.id & "-cached") in backend.frames[cacheFrame]
+          check ("[" & spec.id & "]") in backend.frames[cacheFrame]
       for i, spec in specs:
-        check (spec.id & "-fresh [" & spec.id & "]") in
-          st.screen.menu.items[i].label
+        # The row is pi's: the id is the label and the provider badge is the
+        # menu's DESCRIPTION, which is what lets the badge stay muted on every
+        # row while the selected one paints in the accent.
+        check st.screen.menu.items[i].label == spec.id & "-fresh"
+        check st.screen.menu.items[i].description == "[" & spec.id & "]"
       check st.inputW.text == ""
       check sess.history().len == 0
     finally:
@@ -1592,15 +1708,17 @@ suite "the /model builtin":
 
       typeText(backend, addr st, specs[0].id)
       check st.screen.menu.items.len == 1
-      check st.screen.menu.items[0].label ==
-        (specs[0].id & "-fresh [" & specs[0].id & "]")
+      check st.screen.menu.items[0].label == specs[0].id & "-fresh"
+      check st.screen.menu.items[0].description == "[" & specs[0].id & "]"
       # The menu's index and the data sequence are the same row: the pick never
       # parses the display label back into an id.
       check st.pickerModels.len == 1
       check st.pickerModels[0].provider == specs[0].id
       check st.pickerModels[0].id == specs[0].id & "-fresh"
 
-      check st.picker.counter == "(1/" & $specs.len & ")"
+      # pi's counter is where you stand over what the QUERY leaves: one row
+      # matched, and it is the one under the cursor.
+      check st.picker.counter == "(1/1)"
       check st.picker.notice == "Model catalogs refreshed."
       check st.picker.menu == st.screen.menu
     finally:
@@ -1636,8 +1754,7 @@ suite "the /model builtin":
       check st.picker.menu == st.screen.menu
       check st.picker.header == "Only showing models from configured providers. " &
         "Use /login to add providers."
-      check st.picker.counter ==
-        "(" & $st.screen.menu.items.len & "/" & $specs.len & ")"
+      check st.picker.counter == "(1/" & $st.screen.menu.items.len & ")"
       check st.picker.detail == "Model Name: " & specs[0].id & " fresh"
       check st.picker.notice == "Model catalogs refreshed."
       check st.picker.keys == "Enter to select · Escape/Ctrl+C to cancel"
@@ -1645,7 +1762,8 @@ suite "the /model builtin":
 
       var canvas = newCanvas(size(120, 20))
       st.screen.render(canvas, rect(0, 0, 120, 20))
-      check (specs[0].id & "-fresh [" & specs[0].id & "]") in canvas.plainText
+      check (specs[0].id & "-fresh") in canvas.plainText
+      check ("[" & specs[0].id & "]") in canvas.plainText
     finally:
       removeDir(configDir)
       removeDir(root)
@@ -1675,15 +1793,15 @@ suite "the /model builtin":
 
       var painted = ""
       for frame in backend.frames:
-        if "openai-fresh [openai]" in frame and
+        if "openai-fresh" in frame and "[openai]" in frame and
             "Model catalogs refreshed." in frame:
           painted = frame
       check painted.len > 0
 
       let header = painted.find("Only showing models")
       let input = painted.find("> ")
-      let row = painted.find("openai-fresh [openai]")
-      let counter = painted.find("(" & $specs.len & "/" & $specs.len & ")")
+      let row = painted.find("openai-fresh")
+      let counter = painted.find("(1/" & $specs.len & ")")
       let detail = painted.find("Model Name: openai fresh")
       let notice = painted.find("Model catalogs refreshed.")
       let keys = painted.find("Enter to select")
@@ -1735,8 +1853,8 @@ suite "the /model builtin":
       check st.menuKind == mkModel
       check st.screen.menu.items.len == specs.len
       for i, spec in specs:
-        check (spec.id & "-cached [" & spec.id & "]") in
-          st.screen.menu.items[i].label
+        check st.screen.menu.items[i].label == spec.id & "-cached"
+        check st.screen.menu.items[i].description == "[" & spec.id & "]"
         var found = false
         for item in st.transcriptW.transcript.items:
           if "cannot refresh the models for " & spec.id in item.text:

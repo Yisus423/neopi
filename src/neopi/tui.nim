@@ -308,6 +308,11 @@ method children*(screen: NeopiScreen): seq[Widget] =
   result.add Widget(screen.inputW)
   result.add Widget(screen.footerW)
 
+const modelPickerMaxRows = 10
+  ## How many model rows the block shows at once — pi's `MAX_VISIBLE`
+  ## (`model-selector.ts:38`). The Menu scrolls the rest, so a catalog of 435
+  ## models does not swallow the screen.
+
 proc paintPickerBlock(screen: NeopiScreen, canvas: var Canvas, w, h: int) =
   ## The model picker's own frame. pi's block owns the bottom while it is open
   ## — the header, the filter input, the rows, the counter, the detail, the
@@ -319,8 +324,20 @@ proc paintPickerBlock(screen: NeopiScreen, canvas: var Canvas, w, h: int) =
     for line in screen.chrome.header:
       canvas.writeAnsiText(0, row, line, defaultStyle(), w)
       inc row
+  # pi windows the list to ten rows and scrolls it (MAX_VISIBLE): the block
+  # takes its own lines, the input and AT MOST that many rows, and the Menu's
+  # own scrolling carries the rest. The count is exact — the chrome lines that
+  # are actually present — so a hidden `Model Name:` gives the row back to the
+  # list instead of to nobody.
+  let chromeLines =
+    (if screen.picker.header.len > 0: 1 else: 0) +
+    (if screen.picker.counter.len > 0: 1 else: 0) +
+    (if screen.picker.detail.len > 0: 1 else: 0) +
+    (if screen.picker.notice.len > 0: 1 else: 0) +
+    (if screen.picker.keys.len > 0: 1 else: 0)
+  let windowRows = modelPickerMaxRows + chromeLines + 1
   let wanted = screen.picker.measure(Constraints(maxSize: size(w, h))).h
-  let blockRows = max(3, min(wanted, max(1, h - row - 2)))
+  let blockRows = max(3, min(wanted, max(1, min(h - row - 2, windowRows))))
   let transcriptRows = max(1, h - row - blockRows - 1)
   screen.transcriptW.render(canvas, rect(0, row, w, transcriptRows))
   inc row, transcriptRows
@@ -1139,24 +1156,68 @@ proc completionPrefix*(text: string, cursor: int): string =
       return ""
   text
 
+proc tokenScore(token, lower: string): int =
+  ## One token as a subsequence of `lower`: the characters skipped after the
+  ## match began, plus where it began. LOWER IS BETTER, which is the direction
+  ## pi sorts in. -1 means the token is not a subsequence at all.
+  var i = 0
+  var skipped = 0
+  var start = -1
+  for pos in 0 ..< lower.len:
+    if i < token.len and token[i] == lower[pos]:
+      if start < 0:
+        start = pos
+      inc i
+    elif start >= 0:
+      inc skipped
+  if i < token.len:
+    return -1
+  if start < 0:
+    return 0
+  skipped + start
+
+proc fuzzyScore*(query, text: string): int =
+  ## pi's `fuzzyFilter` STRUCTURE (`packages/tui/src/fuzzy.ts:121`), which is
+  ## what the pickers were missing: the query splits into tokens on whitespace
+  ## AND slashes, EVERY token must match the text as a case-insensitive
+  ## subsequence, the scores add up, and the caller sorts best-first. `-1`
+  ## means "does not match"; an empty query scores 0, so it is no filter at all.
+  ##
+  ## The score ITSELF is ours, not pi's: pi's `matchQuery` weighs the gaps, the
+  ## start position and even swaps an alphanumeric token ("3d" for "d3", +5).
+  ## The STRUCTURE is what the list needs — all tokens, best first — and this
+  ## keeps the cheap half of it.
+  let trimmed = query.strip
+  if trimmed.len == 0:
+    return 0
+  var tokens: seq[string]
+  var current = ""
+  for c in trimmed:
+    if c in {' ', '\t', '\n', '\r', '/'}:
+      if current.len > 0:
+        tokens.add current
+        current = ""
+    else:
+      current.add c.toLowerAscii
+  if current.len > 0:
+    tokens.add current
+  if tokens.len == 0:
+    return 0
+  let lower = text.toLowerAscii
+  var total = 0
+  for token in tokens:
+    let score = tokenScore(token, lower)
+    if score < 0:
+      return -1
+    total += score
+  total
+
 proc fuzzyMatch*(query, text: string): bool =
-  ## Whether `query` matches `text` as a case-insensitive SUBSEQUENCE: every
-  ## character of the query has to appear, in order, but not adjacently — so
-  ## "gpt5" finds "openai/gpt-5" (the dash is never typed) and "5gpt" does not.
-  ## An empty query is not a filter: it matches everything, which is what the
-  ## pickers want while nothing has been typed. One pure proc, the same shape
-  ## the completion's prefix rule has, so both pickers share it and its tests
-  ## need no terminal.
-  if query.len == 0:
-    return true
-  let needle = query.toLowerAscii
-  var q = 0
-  for c in text:
-    if c.toLowerAscii == needle[q]:
-      inc q
-      if q == needle.len:
-        return true
-  false
+  ## Whether `query` matches `text` at all: `fuzzyScore` asked as a yes/no. An
+  ## empty query is not a filter — it matches everything, which is what the
+  ## pickers want while nothing has been typed. One pure proc, so both pickers
+  ## share it and its tests need no terminal.
+  fuzzyScore(query, text) >= 0
 
 proc completionMatches*(items: seq[MenuItem], prefix: string): seq[MenuItem] =
   ## The items whose name prefix-matches the typed token, case-insensitively:
@@ -1233,6 +1294,15 @@ proc applyCompletion(state: ptr TuiState, item: MenuItem) =
   state[].inputW.setText("/" & item.label & " ")
   closeCompletion(state)
 
+proc newModelMenu(items: seq[MenuItem]): Menu =
+  ## The model picker's menu. The SELECTED row paints in the theme's `accent`
+  ## — pi colours the selected id and its cursor that way — while the provider
+  ## badge stays `muted` on every row, selected or not, which is why it rides
+  ## the Menu's DESCRIPTION: the label carries one style only.
+  newMenu(items, selectedStyle = currentTheme.accent,
+    descriptionStyle = currentTheme.muted,
+    selectedDescriptionStyle = currentTheme.muted, title = "pick a model:")
+
 proc updatePickerFields(state: ptr TuiState) =
   ## Fill the model-picker block's own lines from the state: the constant
   ## header and keys, the counter over what the query leaves, and the SELECTED
@@ -1247,9 +1317,14 @@ proc updatePickerFields(state: ptr TuiState) =
     return
   state[].picker.header = modelPickerHeader
   state[].picker.keys = modelPickerKeys
+  # pi's counter is `(selectedIndex + 1 / filteredModels.length)`
+  # (`model-selector.ts:347`): where you are over what the QUERY leaves, so
+  # narrowing the search shrinks the second number and you still know where you
+  # stand. It is not the position over the whole catalog.
   let filtered = if state[].menu.isNil: 0 else: state[].menu.items.len
-  state[].picker.counter =
-    "(" & $filtered & "/" & $state[].pickerModelTotal & ")"
+  let selected = if state[].menu.isNil: -1 else: state[].menu.selected
+  let position = if filtered == 0: 0 else: min(filtered, max(1, selected + 1))
+  state[].picker.counter = "(" & $position & "/" & $filtered & ")"
   var detail = ""
   if not state[].menu.isNil and state[].menu.selected >= 0 and
       state[].menu.selected < state[].pickerModels.len:
@@ -1279,20 +1354,36 @@ proc updatePickerSearch(state: ptr TuiState) =
   if state[].menu.isNil:
     return
   let query = state[].inputW.text
+  var scored: seq[tuple[score, index: int]]
+  for i in 0 ..< state[].pickerSource.len:
+    if i < state[].pickerText.len:
+      let score = fuzzyScore(query, state[].pickerText[i])
+      if score >= 0:
+        scored.add (score, i)
+  # pi sorts best-first, so the list answers "which one do I want" instead of
+  # asking the eye to scan the whole catalog. Ties keep the source order.
+  scored.sort(proc (a, b: tuple[score, index: int]): int =
+    result = cmp(a.score, b.score)
+    if result == 0:
+      result = cmp(a.index, b.index))
+  # The three sequences are rebuilt from the SAME ordered index list, which is
+  # what keeps the menu, the search texts and the rows at one index each.
   var items: seq[MenuItem] = @[]
   var texts: seq[string] = @[]
   var models: seq[ListedModel] = @[]
-  for i, item in state[].pickerSource:
-    if i < state[].pickerText.len and fuzzyMatch(query, state[].pickerText[i]):
-      items.add item
-      texts.add state[].pickerText[i]
-      if state[].menuKind == mkModel and i < state[].pickerModelSource.len:
-        models.add state[].pickerModelSource[i]
+  for entry in scored:
+    items.add state[].pickerSource[entry.index]
+    texts.add state[].pickerText[entry.index]
+    if state[].menuKind == mkModel and
+        entry.index < state[].pickerModelSource.len:
+      models.add state[].pickerModelSource[entry.index]
   state[].pickerVisibleText = texts
   if state[].menuKind == mkModel:
     state[].pickerModels = models
   let kept = state[].menu.selected
-  state[].menu = newMenu(items, title = state[].menu.title)
+  state[].menu =
+    if state[].menuKind == mkModel: newModelMenu(items)
+    else: newMenu(items, title = state[].menu.title)
   if query.len == 0 and items.len > 0:
     # `clamp`, not `min`. An EMPTY menu carries `selected = -1` — the widget's
     # own constructor sets it — and a `min` that keeps it hands -1 back to a
@@ -1304,18 +1395,22 @@ proc updatePickerSearch(state: ptr TuiState) =
     state[].menu.selected = clamp(kept, 0, items.len - 1)
   if not state[].screen.isNil:
     state[].screen.menu = state[].menu
+  # With the model picker open the notice belongs INSIDE its block: a chat line
+  # would outlive the picker and stay on screen after Esc, which is the one
+  # thing the user asked this line not to do.
   if query.len > 0 and items.len == 0:
-    setCoreStatus(state, "no matches: backspace to widen the search")
     if not state[].picker.isNil:
       state[].picker.notice = "no matches: backspace to widen the search"
+    else:
+      setCoreStatus(state, "no matches: backspace to widen the search")
   elif state[].menuKind == mkModel and state[].modelCatalogRefreshed:
-    setCoreStatus(state, modelPickerRefreshed)
     if not state[].picker.isNil:
       state[].picker.notice = modelPickerRefreshed
   else:
-    setCoreStatus(state, "")
     if not state[].picker.isNil:
       state[].picker.notice = ""
+    else:
+      setCoreStatus(state, "")
   updatePickerFields(state)
 
 proc setModelPickerRows(state: ptr TuiState, models: seq[ListedModel]) =
@@ -1327,16 +1422,24 @@ proc setModelPickerRows(state: ptr TuiState, models: seq[ListedModel]) =
   var items: seq[MenuItem] = @[]
   var texts: seq[string] = @[]
   for model in models:
-    items.add MenuItem(label: model.id & " [" & model.provider & "]",
-      description: "")
-    # The provider leads the search text, pi's rule: a provider-prefixed query
-    # lands on this provider's rows instead of losing to a proxy id.
-    texts.add model.provider & "/" & model.id & " " & model.id & " " & model.name
+    # The row is pi's: the id is the row's business, and the provider badge
+    # rides the DESCRIPTION so it can stay muted on every row.
+    items.add MenuItem(label: model.id,
+      description: "[" & model.provider & "]")
+    # The search text is pi's, token for token (`model-search.ts:43`): the
+    # provider leads — twice — so a provider-prefixed query lands on this
+    # provider's rows instead of losing to a proxy id, and the display name
+    # rides along so a query can find the model by the name pi shows.
+    var text = model.provider & " " & model.provider & "/" & model.id & " " &
+      model.provider & " " & model.id
+    if model.name.len > 0:
+      text.add " " & model.name
+    texts.add text
   state[].pickerSource = items
   state[].pickerText = texts
   state[].pickerModels = @[]
   state[].menuKind = mkModel
-  state[].menu = newMenu(items, title = "pick a model:")
+  state[].menu = newModelMenu(items)
   if not state[].screen.isNil:
     state[].screen.menu = state[].menu
   if not state[].picker.isNil:
@@ -1603,8 +1706,15 @@ proc openModel(state: ptr TuiState) =
   state[].menuKind = mkModel
   # The block owns the composer as its input child (there is no second input)
   # and the menu it renders; the header and the keys are constants here.
+  # The roles are pi's, read from its source: the hint is `warning`
+  # (`model-selector.ts:115`), the counter, the `Model Name:` line and the keys
+  # are `muted` (`:347,:363`), and the refresh notice is `success` (`:368`).
+  # nimterm's theme already carries every one of them.
   state[].picker = newPicker(input = Widget(state[].inputW),
-    header = modelPickerHeader, keys = modelPickerKeys)
+    header = modelPickerHeader, keys = modelPickerKeys,
+    headerStyle = currentTheme.warning, counterStyle = currentTheme.muted,
+    detailStyle = currentTheme.muted, noticeStyle = currentTheme.success,
+    keysStyle = currentTheme.muted)
   if not state[].screen.isNil:
     state[].screen.picker = state[].picker
   let cached = restoreCatalog()
@@ -1613,7 +1723,7 @@ proc openModel(state: ptr TuiState) =
   else:
     state[].pickerSource = @[]
     state[].pickerText = @[]
-    state[].menu = newMenu(@[], title = "pick a model:")
+    state[].menu = newModelMenu(@[])
     state[].picker.menu = state[].menu
     if not state[].screen.isNil:
       state[].screen.menu = state[].menu
