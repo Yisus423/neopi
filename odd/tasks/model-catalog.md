@@ -53,6 +53,22 @@ mechanism, and #16 has landed.
   deberíamos crear un nimble lock" and the question "¿y si cambiaramos los
   commits pinneados por el lock?, así dejaríamos de pinnear cada cambio y solo
   sería regenerar el lock. Esto es un poco discutible".
+- **S12** (the list's height, verbatim): "nos falta que solo se vean 10 modelos
+  para no llenar la pantalla y ir bajando"
+- **S13** (the muted tone, verbatim): "que el texto de cosas como el proveedor,
+  model name: ,enter to select... usen ese tono 'muted', habría que revisar con
+  codegraph cli si pi usa el mismo que con el thinking"; and the missing key:
+  "(también nos faltó el ctrl+s para default)"
+- **S14** (the two coloured lines, verbatim): "el only showing debería ser
+  amarillo, que el model refreshed esté dentro del componente en verde y no quede
+  en el chat cuando se salga"
+- **S15** (the selected row, verbatim): "que el modelo sobre el que estás parado
+  se resalte con el color del tema como lo hace pi"
+- **S16** (the search, verbatim): "aparte el buscador de modelos creo que ya no es
+  fuzzy, no me acuerdo si el anterior lo era, creo que el de pi sí"
+- **S17** (the counter, verbatim): "cuando se descartan modelos, solo debería
+  reducirse el número máximo, ejemplo 1/450 -> luego de buscar -> 1/80, el usuario
+  sigue sabiendo en cual esta parado y cuantos hay segun lo que buscó"
 - **S11** (the tooling correction, verbatim): "ni siquieras has usado
   nimlangserver con su skill nim mcp tools" — the project's MCP tools are
   available through codemode and own Nim symbol and diagnostic work
@@ -168,7 +184,50 @@ mechanism, and #16 has landed.
 | R3a | The `Picker` block in our nimterm fork (header, input, rows, counter, detail, notice, keys) AND the `Menu` hardening, with the fork's own tests | S9, S7 | the fork, RED→GREEN | `feat(widgets): the Picker block, in pi's order, and a total Menu` — nimterm `d206e94` |
 | R3b | neopi hands the block the data and the widgets, and its own chrome path goes away | S9 | inline, RED→GREEN | `feat(tui): the model picker becomes the fork's block, in pi's order` — `3578256` |
 | R4 | The pins: chronos by EXACT version, and leave one nimterm revision installed (the lock measured and deferred) | S10 | inline, measured | `build: pin chronos by exact version, and leave one nimterm revision installed` — `11b4f88` |
-| R5 | README + ROADMAP + this round's evidence and close | S7-S10 | inline | the commit that carries this section |
+| R5 | README + ROADMAP + this round's evidence and close | S7-S10 | inline | `docs(model-catalog): round 2 — the crash, the keyless rule, the fork's Picker and the pins` — `c6f868f` |
+
+### Round 3 — the look, side by side with pi
+
+Read from pi with codegraph (the user's own instruction) on 2026-11-11; every
+claim below is from the source, not from the screenshot:
+
+- `MAX_VISIBLE = 10` (`packages/coding-agent/src/modes/interactive/components/model-selector.ts:38`),
+  and the window follows the selection (`:320-322`) — the list scrolls, it does
+  not fill the screen.
+- The roles: the header hint is `theme.fg("warning", hintText)` (`:115`); the
+  cursor `→` and the SELECTED row's id are `accent` (`:334,336`); the provider
+  badge, the model's display name, `· default`, the counter, `Model Name:` and
+  "No matching models" are all `muted` (`:332,338,339,347,359,363`); the refresh
+  notice is `theme.fg(success or muted, …)` (`:368`).
+- The counter is `(${selectedIndex + 1}/${filteredModels.length})` (`:347`): the
+  position over what the QUERY leaves, not over the whole catalog.
+- **pi's search RANKS**: `fuzzyFilter` (`packages/tui/src/fuzzy.ts:121`) says
+  "Filter and sort items by fuzzy match quality (best matches first)", splits the
+  query into tokens on `/\s/]+/` (space AND slash), requires every token to
+  match, and sorts by score. neopi filters with ONE subsequence and keeps the
+  source order — that is what the user noticed.
+- The search text is `` `${provider} ${provider}/${id} ${provider} ${id}${name}` ``
+  (`packages/coding-agent/src/modes/interactive/model-search.ts:43`).
+- The keys line is `Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to
+  cancel` (`:146`).
+- **The thinking is NOT the same token**: pi's reasoning paints with
+  `theme.fg("thinkingText", …)` + italic (`components/assistant-message.ts:195`),
+  while this chrome is `muted`. neopi conflates them (its thinking is
+  `muted + italic`, `tui.nim:832-833`) — a pre-existing divergence, out of this
+  round, and the answer to the user's question is **no**.
+
+nimterm's `Theme` already carries every role this needs
+(`accent`, `success`, `warning`, `muted`, `dim`, `text`), so the colors are
+neopi's mapping and the fork needs no change.
+
+| ID | What | Specs | Route | Commit |
+|---|---|---|---|---|
+| N1 | The list windows to ten rows (pi's `MAX_VISIBLE`) and scrolls instead of filling the screen | S12 | inline | `feat(tui): the model picker reads like pi's — window, roles, counter, ranking` — `f74f2c3` |
+| N2 | The roles from the theme: the header `warning`, the counter/detail/keys `muted`, the notice `success` INSIDE the block and NO chat line left behind | S13, S14 | inline | ↑ `f74f2c3` — N1-N5 are ONE work unit: one surface, the block's look, a handful of lines each |
+| N3 | The counter reads `(position/what the query leaves)` | S17 | inline | ↑ `f74f2c3` |
+| N4 | The search becomes pi's: tokens split on space AND slash, all must match, SCORED and sorted best-first; the search text aligned to pi's | S16 | inline | ↑ `f74f2c3` |
+| N5 | The SELECTED row paints in the theme's `accent` | S15 | inline | ↑ `f74f2c3` |
+| N6 | Tests + this round's evidence and close | S12-S17 | inline | the commit that carries this section |
 
 ## Evidence
 
@@ -247,6 +306,30 @@ Every gate ran with `PATH="$HOME/.local/share/grabnim/current/bin:$PATH"` and
   on 0.24.1 it breaks a bare `nim c` and therefore `nimble test`. The user's read
   is that it is the old nimble, so it waits in the ROADMAP's Deferred.
 
+### Round 3 — the look, side by side with pi
+
+- **N1-N5 landed as ONE work unit** (`f74f2c3`): they are one surface — the
+  block's look — and each is a handful of lines, so five commits would have been
+  five diffs nobody could review apart. The user's own list is what defines the
+  unit.
+- RED, observed: the focused file went to **5 failures** when the code moved —
+  the row's shape (the label gave the ` [provider]` badge to the description)
+  and the counter (`(filtered/total)` became `(position/filtered)`) — and the
+  frame search for `openai-fresh [openai]` stopped matching, because the Menu
+  pads the label to the widest one before it paints the description.
+- GREEN: the focused file **104/104**, the whole suite **275/275** (272 + the
+  three tests this round added), busted **22 successes / 0 failures**, exit 0.
+- The three new tests ARE the round's rules: the block's STYLES come from the
+  theme (`warning`/`muted`/`accent`/`success`); the notice lives in the block
+  and the chat status stays empty; the list windows to **ten** rows on a 30-row
+  terminal with a 25-model catalog (the fake backend grew an optional height
+  for exactly that, since a ten-row screen cannot show ten rows plus the
+  block); and the matcher takes pi's tokens and scores best-first.
+- The `codegraph` reading is in the Verified basis above, including the answer
+  to the user's own question: pi's thinking is `thinkingText` + italic, **not**
+  `muted`, so neopi's conflation of the two is a pre-existing divergence and
+  out of this round.
+
 ### What the slice settled
 
 - **A cache without validators is a clock.** The user asked for pi's shape, and
@@ -290,8 +373,22 @@ Every gate ran with `PATH="$HOME/.local/share/grabnim/current/bin:$PATH"` and
 - **The counter and the name USED to be painted under the EDITOR**, while pi
   paints them under its LIST — RESOLVED by R3b, where the fork's `Picker` paints
   pi's order. The line stays as the record of what the first attempt got wrong.
-- **Ctrl+S "set as default" is out** by the user's call: a default model is a new
-  feature and it goes to a later slice.
+- **Ctrl+S "set as default" is NOT here, and it is not a colour.** pi's row
+  carries ` · default` (`model-selector.ts:332`) and its keys line names
+  `Ctrl+S to set as default` (`:146`), but the feature needs a DEFAULT MODEL:
+  where it is stored, how a turn reads it, and the badge that shows it. The user
+  deferred it once ("ctrl s puede ser el siguiente slice") and this round only
+  matched the look; it is the natural next slice.
+- **The search's SCORE is ours, not pi's.** The structure is pi's `fuzzyFilter`
+  (tokens on space and slash, all required, best first), but pi's `matchQuery`
+  weighs the gaps, the start position and even swaps an alphanumeric token
+  ("3d" for "d3", +5). A ranking difference shows as a different ORDER, never as
+  a wrong set.
+- **The rows do not carry the model's display name** the way pi's do
+  (`id (Name) [provider]`, `model-selector.ts:338`): neopi's row is the id plus
+  the provider badge. The name is still what `Model Name:` prints, and the
+  search text carries it, so a query finds the model by name — the ROW does not
+  repeat it.
 
 ## Log
 
