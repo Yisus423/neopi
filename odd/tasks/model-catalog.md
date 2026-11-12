@@ -163,11 +163,12 @@ mechanism, and #16 has landed.
 
 | ID | What | Specs | Route | Commit |
 |---|---|---|---|---|
-| R1 | The crash: the picker must never hand a negative `selected` back to a non-empty Menu (the `min` that kept `-1`), plus the `Menu` hardening itself with the pin bump | S7 | inline, RED→GREEN | |
-| R2 | The keyless rule: `configuredProviders` requires a real configuration, not `requiresKey: false`; the server-URL question goes to the END of the ROADMAP | S8 | inline, RED→GREEN | |
-| R3 | The picker as a WIDGET in our nimterm fork — header, input, list, counter, name — with the pin bump, so neopi hands it data instead of painting the chrome | S9 | | |
-| R4 | The lock: `nimble lock`, and VERIFY whether it removes the two-chronos-copies hazard at all (the acceptance test is a fresh clone OUTSIDE the project) | S10 | | |
-| R5 | README + ROADMAP + this round's evidence and close | S7-S10 | | |
+| R1 | The crash: the picker must never hand a negative `selected` back to a non-empty Menu (the `min` that kept `-1`), plus the `Menu` hardening itself with the pin bump | S7 | inline, RED→GREEN | `fix(tui): clearing a search that matched nothing no longer crashes the TUI` — `ab7bcdd` |
+| R2 | The keyless rule: `configuredProviders` requires a real configuration, not `requiresKey: false`; the server-URL question goes to the END of the ROADMAP | S8 | inline, RED→GREEN | `fix(catalog): a keyless provider is not configured for merely existing` — `b77a15b` |
+| R3a | The `Picker` block in our nimterm fork (header, input, rows, counter, detail, notice, keys) AND the `Menu` hardening, with the fork's own tests | S9, S7 | the fork, RED→GREEN | `feat(widgets): the Picker block, in pi's order, and a total Menu` — nimterm `d206e94` |
+| R3b | neopi hands the block the data and the widgets, and its own chrome path goes away | S9 | inline, RED→GREEN | `feat(tui): the model picker becomes the fork's block, in pi's order` — `3578256` |
+| R4 | The pins: chronos by EXACT version, and leave one nimterm revision installed (the lock measured and deferred) | S10 | inline, measured | `build: pin chronos by exact version, and leave one nimterm revision installed` — `11b4f88` |
+| R5 | README + ROADMAP + this round's evidence and close | S7-S10 | inline | the commit that carries this section |
 
 ## Evidence
 
@@ -210,6 +211,42 @@ Every gate ran with `PATH="$HOME/.local/share/grabnim/current/bin:$PATH"` and
   composer's keys, the fuzzy matcher, the `/` dispatch) is identical in stdout
   and exit code.
 
+### Round 2 — the fixes the user found living with it
+
+- **R1 (the crash)** — reproduced FIRST, with the user's own stack (`menu.nim:139
+  paint` → `index -1`), before any fix. RED: `Unhandled defect: index -1 not in 0
+  .. 1 [IndexDefect]` out of the clear. GREEN: the focused test 1/1, the file
+  **100/100**, the suite **270/270**, exit 0.
+- **R2 (keyless)** — the tree went RED on my own edits twice, and both are worth
+  the line: `check x.mapIt(it.id)` does not compile (unittest2 wraps the checked
+  expression in an iterator and the `it` breaks there), and neither does `check
+  ids == @[]` (an untyped `@[]` loses its element type in that wrapper). GREEN:
+  the policy 7/7, the TUI 100/100, the suite **271/271**, busted 22/22.
+- **R3a (the fork)** — `Picker` + the `Menu` hardening in
+  `~/proyectos/nimterm`: **87 [OK], 0 FAILED** in the fork's own suite, with the
+  negative-index regression pinned. Commit `d206e94`, pushed by the user.
+- **R3b (neopi uses it)** — TWO delegated workers stalled on this round (and one
+  earlier, on T3); the second left ONLY the tests, and the work moved inline. Its
+  tests were KEPT, because they encode the contract the design wanted: the
+  block's fields, `picker.input == inputW`, `picker.menu == screen.menu`,
+  `picker.isNil` once closed, and the painted ORDER. GREEN: the file **101/101**,
+  the suite **272/272**, busted 22/22, and the shared picker slot unchanged
+  (`/resume` 1, `/login` 13, the command completion 4, the composer 7, its keys
+  3, the `/` dispatch 2).
+- **R4 (the pins)** — measured, and the premise was WRONG: the two chronos copies
+  are not the hazard AGENTS.md documents (they carry different versions,
+  `nimblePath` keeps the higher one, and `4.0.4` has to STAY because
+  `nimlangserver` 1.14.0 requires it — read out of `nimbledata2.json`'s
+  `reverseDeps`). The hazard was the pair the nimterm bump created: version
+  `0.1.0` twice. The old copy is gone, **309 nimcaches** cleared, and the
+  acceptance probe — `newPicker`, a symbol only the pinned revision has —
+  compiles. `chronos == 4.4.1`, an EXACT version rather than a commit URL, since
+  nimble 0.24.1 answers "Unable to identify url" for that repository.
+  `nimble lock` was generated and measured: it fixes the hazard for `nimble
+  build` (an explicit `--path` per locked revision, and no package-list read) but
+  on 0.24.1 it breaks a bare `nim c` and therefore `nimble test`. The user's read
+  is that it is the old nimble, so it waits in the ROADMAP's Deferred.
+
 ### What the slice settled
 
 - **A cache without validators is a clock.** The user asked for pi's shape, and
@@ -222,10 +259,12 @@ Every gate ran with `PATH="$HOME/.local/share/grabnim/current/bin:$PATH"` and
   so the menu's index addresses the row it shows. It is `/model`'s own NUL lesson
   (a string read out of a released widget) turned into structure: a value
   recovered from a label is the same mistake one step later.
-- **The chrome is neopi's because nimterm's `Menu` cannot carry it** — and its
-  `title` only paints inside a border, which is why every picker's title had been
-  invisible. The picker's lines go BELOW the editor, where the floating menu
-  cannot blank them.
+- **The chrome's PLACE belongs to a widget, not to the app.** The first attempt
+  painted the picker's lines in neopi — `Menu` cannot carry a header, a counter
+  or a footer, and its `title` only paints inside a border, so every picker's
+  title had been invisible — and the layout left them BELOW the editor. The
+  user's side-by-side screenshot settled it (R3b): pi's ORDER is a widget's job,
+  and the fork's `Picker` owns it while neopi only hands over the data.
 - **#16 was the missing piece, not a prerequisite that expired.** The pump it
   built now covers the catalog's two waits, so the deferral ("Dejalo para #16")
   came back into the slice it belonged to.
@@ -248,9 +287,9 @@ Every gate ran with `PATH="$HOME/.local/share/grabnim/current/bin:$PATH"` and
   later.
 - **The search text is now `<provider>/<id> <id> <name>`** (the endpoint's
   display name included, pi's rule), where it used to be `<provider> <id>`.
-- **The counter and the name are painted under the EDITOR**, while pi paints its
-  counter, name and keys under its LIST: the lines are pi's, the order is neopi's
-  (its search input sits below the list).
+- **The counter and the name USED to be painted under the EDITOR**, while pi
+  paints them under its LIST — RESOLVED by R3b, where the fork's `Picker` paints
+  pi's order. The line stays as the record of what the first attempt got wrong.
 - **Ctrl+S "set as default" is out** by the user's call: a default model is a new
   feature and it goes to a later slice.
 

@@ -102,9 +102,13 @@ A provider the table does not carry is one flag away (`--base-url=`).
 its variable, so a local server started with a key still receives it. `/model`
 lists every **configured** entry's catalog as `<id> [<provider>]` and
 revalidates it against the endpoint's own validators; `/login` opens the picker
-over this table
-— each entry with its label and its state — and `/logout` opens the same picker
-to drop a credential.
+over this table — each entry with its label and its state — and `/logout` opens
+the same picker to drop a credential. A **keyless** entry is not "configured"
+for merely existing: pi's llama.cpp asks for its server URL rather than a key,
+and neopi has nowhere to store one yet, so `ollama` and `llamacpp` join `/model`
+only once they have a credential of their own (their variable counts — that is
+the local server started with a key). The server URL itself waits at the end of
+the ROADMAP.
 
 **Where the key lives.** `/login` installs the key in the live provider AND
 saves it to `~/.neopi/auth.json` (`NEOPI_CONFIG_DIR` overrides the directory),
