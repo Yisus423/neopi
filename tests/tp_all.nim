@@ -7,6 +7,7 @@ import tp_authstore
 import tp_modelsstore
 import tp_catalog
 import tp_settings
+import tp_start
 import tp_openai_compat
 import tp_lua
 import tp_pump

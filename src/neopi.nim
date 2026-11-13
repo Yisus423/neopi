@@ -11,14 +11,17 @@
 ## next-to-source).
 
 import std/[envvars, json, options, os, parseopt, strutils, syncio, times]
-import neopi/[authstore, extensibility, lua, provider, session, tui]
+import neopi/[authstore, extensibility, lua, provider, session, settings, tui]
 
 # Same file-scope typedef as lua.nim and the bridge modules: no C headers
 # exist to declare the opaque state type, and this file's generated C
 # prototypes take it (loadRuntime's LuaState parameter).
 {.emit: """/*TYPESECTION*/ typedef struct lua_State lua_State;""".}
 
-const DefaultModel = "inclusionai/ling-3.0-flash-vl"
+const DefaultModel* = "inclusionai/ling-3.0-flash-vl"
+  ## The model a run falls back to when neither the CLI, nor the provider's own
+  ## variable, nor the stored default says otherwise. Exported because it is part
+  ## of the START's contract, and the rule that reads it is testable.
   ## The tp_real default (openrouter-flavored); override with --model or
   ## <PROVIDER>_MODEL.
 
@@ -220,18 +223,54 @@ proc runTui(spec: ProviderSpec, modelId, baseUrl: string) =
   if error.len > 0:
     fatal("the agent loop failed: " & error)
 
+proc resolveStartModel*(providerId, modelId: string,
+    sawProvider: bool): tuple[provider, model: string] =
+  ## The model a run STARTS on, in the order the user's choices arrive: the
+  ## CLI's `--model`, the provider's `<ID>_MODEL` variable, the STORED default,
+  ## and finally the built-in one.
+  ##
+  ## The stored default is a PAIR (`"<provider>/<id>"`, pi's shape), so it only
+  ## applies when the user did NOT name a provider: a model id is meaningless
+  ## outside the provider it was picked in, and sending `openai/gpt-5` to groq
+  ## would be a silent lie. A default naming a provider the table no longer
+  ## carries is REPORTED and skipped, never fatal at start.
+  ##
+  ## It is a proc rather than a few lines inside `main` so the rule can be
+  ## tested without an argv — the same reason #27 wants the parser extracted.
+  result.provider = providerId
+  result.model = modelId
+  if result.model.len == 0:
+    result.model = getEnv(providerId.toUpperAscii & "_MODEL", "")
+  if result.model.len == 0 and not sawProvider:
+    try:
+      let pair = splitDefaultModel(loadDefaultModel())
+      let stored = findProvider(pair.provider)
+      if pair.model.len > 0 and stored.isSome:
+        result.provider = pair.provider
+        result.model = pair.model
+      elif pair.model.len > 0:
+        stderr.writeLine("neopi: the stored default names a provider the table " &
+          "does not carry: " & pair.provider)
+    except SettingsError as e:
+      stderr.writeLine("neopi: " & e.msg)
+  if result.model.len == 0:
+    result.model = DefaultModel
+
 proc main() =
   var prompt = ""
   var providerName = "openrouter"
   var modelId = ""
   var baseUrl = ""
   var sawPrompt = false
+  var sawProvider = false
   var p = initOptParser()
   for kind, key, val in p.getopt():
     case kind
     of cmdLongOption, cmdShortOption:
       case key
-      of "provider": providerName = val
+      of "provider":
+        providerName = val
+        sawProvider = true
       of "model": modelId = val
       of "base-url": baseUrl = val
       of "h", "help":
@@ -246,14 +285,14 @@ proc main() =
       sawPrompt = true
     of cmdEnd: discard
   let spec = specOf(providerName)
-  if modelId.len == 0:
-    modelId = getEnv(spec.id.toUpperAscii & "_MODEL", DefaultModel)
+  let start = resolveStartModel(spec.id, modelId, sawProvider)
+  let chosen = specOf(start.provider)
   if not sawPrompt:
     # The TUI mode: no prompt argument; the interactive loop drives the
     # engine. A clean exit returns here; a loop failure fatals inside.
-    runTui(spec, modelId, baseUrl)
+    runTui(chosen, start.model, baseUrl)
     quit(0)
-  runPrint(prompt, spec, modelId, baseUrl)
+  runPrint(prompt, chosen, start.model, baseUrl)
 
 when isMainModule:
   main()

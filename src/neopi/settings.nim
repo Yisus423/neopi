@@ -1,10 +1,11 @@
 ## The global settings file: `$NEOPI_CONFIG_DIR/settings.json` (default
-## `~/.neopi/settings.json`), beside the credential store. It currently holds
-## one preference — whether the model's reasoning is hidden — and follows the
-## credential store's discipline: the directory is resolved once, writes are
-## atomic, and a malformed file is reported instead of being replaced.
+## `~/.neopi/settings.json`), beside the credential store. It holds two
+## preferences — whether the model's reasoning is hidden, and the default model
+## a fresh session starts on — and follows the credential store's discipline:
+## the directory is resolved once, writes are atomic, and a malformed file is
+## reported instead of being replaced.
 
-import std/[json, options, os]
+import std/[json, options, os, strutils]
 from neopi/authstore import configDir
 
 type
@@ -93,6 +94,70 @@ proc preference(node: JsonNode, path: string): Option[bool] =
       "hideThinking must be a boolean in: " & path)
   some(value.getBool())
 
+proc modelPreference(node: JsonNode, path: string): Option[string] =
+  ## The `defaultModel` preference: none when the key is absent, the value when
+  ## it is a `"<provider>/<modelId>"` string, and a `SettingsError` when it is
+  ## anything else — a wrong type, or a string with no separator, which is a
+  ## value this module cannot turn back into a provider and a model. ONE place
+  ## decides, exactly the way the thinking preference does.
+  if node.isNil:
+    return none(string)
+  let value = node{"defaultModel"}
+  if value.isNil:
+    return none(string)
+  if value.kind != JString:
+    raise newException(SettingsError,
+      "defaultModel must be a string in: " & path)
+  let text = value.getStr("")
+  if text.find('/') < 0:
+    raise newException(SettingsError,
+      "defaultModel must be \"<provider>/<modelId>\" in: " & path)
+  some(text)
+
+proc validate(node: JsonNode, path: string) =
+  ## Read EVERY preference once before a write, for the reason #32's
+  ## verification earned the hard way: a file this module cannot read is
+  ## reported and never rewritten, and that rule has to hold for each key — not
+  ## only for the one the caller happens to be changing.
+  discard preference(node, path)
+  discard modelPreference(node, path)
+
+proc splitDefaultModel*(value: string): tuple[provider, model: string] =
+  ## The stored default as the pair a turn needs, split at the FIRST slash: a
+  ## model id may carry slashes of its own (`openrouter/openai/gpt-5` is the
+  ## provider `openrouter` and the model `openai/gpt-5`). A value without one is
+  ## not a default and comes back as two empty strings — the LOAD refuses those
+  ## already, so this only has to be total.
+  let at = value.find('/')
+  if at < 0:
+    return ("", "")
+  (value[0 ..< at], value[at + 1 .. ^1])
+
+proc loadDefaultModel*(): string =
+  ## The stored default model as `"<provider>/<modelId>"`, or "" when the
+  ## settings file or the key is absent. A malformed file, a wrong-typed value
+  ## or a value that is not `provider/model` raises `SettingsError`; a read
+  ## never rewrites the file.
+  let path = settingsFilePath()
+  let stored = modelPreference(readSettings(path), path)
+  if stored.isSome: stored.get else: ""
+
+proc saveDefaultModel*(value: string) =
+  ## Persist the default model, preserving every other key the file carries.
+  ## The write is atomic, and a malformed EXISTING file raises `SettingsError`
+  ## and stays byte-identical. A `value` this module could not read back is
+  ## refused instead of written: half a default is worse than none.
+  if value.find('/') < 0:
+    raise newException(SettingsError,
+      "a default model must be \"<provider>/<modelId>\": " & value)
+  let path = settingsFilePath()
+  var node = readSettings(path)
+  validate(node, path)
+  if node.isNil:
+    node = newJObject()
+  node["defaultModel"] = %value
+  writeSettings(path, node)
+
 proc loadHideThinking*(): bool =
   ## Whether the model's reasoning is hidden. `false` when the settings file or
   ## the `hideThinking` key is absent, because reasoning is visible by default.
@@ -110,7 +175,7 @@ proc saveHideThinking*(value: bool) =
   ## module cannot read are not ours to discard.
   let path = settingsFilePath()
   var node = readSettings(path)
-  discard preference(node, path)
+  validate(node, path)
   if node.isNil:
     node = newJObject()
   node["hideThinking"] = %value

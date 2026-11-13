@@ -2,6 +2,7 @@
 ## reasoning visibility preference, its default, and the discipline that keeps
 ## a malformed settings file reported instead of clobbered.
 import std/[json, os]
+import std/strutils
 import neopi/authstore
 import neopi/settings
 import unittest2
@@ -39,6 +40,65 @@ suite "the global settings":
       saveHideThinking(false)
       check not loadHideThinking()
       check not parseFile(settingsPath())["hideThinking"].getBool
+    finally:
+      if dirExists(dir):
+        removeDir(dir)
+
+  test "the default model round-trips as pi's one string":
+    # pi keeps it as ONE settings string, `"${provider}/${modelId}"`
+    # (`settings-schema.ts:216`): one key cannot go half-written, and a model id
+    # may carry slashes of its own, which is why the split is at the FIRST one.
+    let dir = freshConfig("neopi-tp-settings-default")
+    try:
+      check loadDefaultModel() == ""
+      check not fileExists(settingsPath())
+      saveDefaultModel("openrouter/openai/gpt-5")
+      check loadDefaultModel() == "openrouter/openai/gpt-5"
+      check parseFile(settingsPath())["defaultModel"].getStr ==
+        "openrouter/openai/gpt-5"
+      check splitDefaultModel(loadDefaultModel()) ==
+        (provider: "openrouter", model: "openai/gpt-5")
+      # One file, two preferences: saving one never loses the other.
+      saveHideThinking(true)
+      check loadDefaultModel() == "openrouter/openai/gpt-5"
+      check loadHideThinking()
+      saveDefaultModel("groq/llama-3.3-70b")
+      check loadDefaultModel() == "groq/llama-3.3-70b"
+      check loadHideThinking()
+    finally:
+      if dirExists(dir):
+        removeDir(dir)
+
+  test "a default model this module cannot use is reported, not clobbered":
+    let dir = freshConfig("neopi-tp-settings-default-bad")
+    try:
+      createDir(configDir())
+      # A wrong TYPE and a string that is not `provider/model` are both values
+      # this module cannot interpret, and settings it cannot read are not its
+      # to discard.
+      writeFile(settingsPath(), "{\"defaultModel\": 7}")
+      var before = readFile(settingsPath())
+      expect SettingsError:
+        discard loadDefaultModel()
+      expect SettingsError:
+        saveDefaultModel("openrouter/openai/gpt-5")
+      expect SettingsError:
+        saveHideThinking(true)
+      check readFile(settingsPath()) == before
+
+      writeFile(settingsPath(), "{\"defaultModel\": \"gpt-5\"}")
+      before = readFile(settingsPath())
+      expect SettingsError:
+        discard loadDefaultModel()
+      expect SettingsError:
+        saveDefaultModel("openrouter/openai/gpt-5")
+      check readFile(settingsPath()) == before
+
+      # And the write refuses to CREATE one it could not read back.
+      writeFile(settingsPath(), "{}")
+      expect SettingsError:
+        saveDefaultModel("gpt-5")
+      check readFile(settingsPath()) == "{}"
     finally:
       if dirExists(dir):
         removeDir(dir)

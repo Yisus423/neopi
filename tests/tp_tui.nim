@@ -1396,6 +1396,50 @@ suite "the /login and /logout builtins":
       removeFile(path)
 
 suite "the /model builtin":
+  test "Ctrl+S sets the default model from the row under the cursor":
+    clearProviderEnv()
+    let configDir = freshConfig("neopi-tp-tui-model-default")
+    let root = freshWorkspace("neopi-tp-tui-model-default")
+    let path = freshSessionPath("model-default")
+    try:
+      let specs = configuredForTests()
+      seedCatalog(specs, "cached")
+      let fake = newFakeTransport()
+      queueCatalog(fake, specs, "fresh")
+      let sess = newSession(path)
+      let ext = newExtensibility(root, none(Provider), sess)
+      let L = ext.bus.state
+      var st = initTuiState("openai", "first", sess, root)
+      exposeUi(L)
+      loadRuntimeEntry(L)
+      let backend = wireFakeApp(addr st)
+      exposeTuiSink(L, addr st, "first")
+      wireApp(addr st, L, st.app)
+      st.catalogTransport = fake
+      typeText(backend, addr st, "/model")
+      pressKey(backend, addr st, keyEnter)
+
+      # The cursor is on the first row. Ctrl+S stores THAT pair and leaves the
+      # live model alone — Enter is the one that moves the session — and pi
+      # keeps the list up so a second key can still pick.
+      let liveBefore = st.model
+      pressKey(backend, addr st, keyCtrlS)
+      let saved = specs[0].id & "/" & specs[0].id & "-fresh"
+      check st.defaultModel == saved
+      check loadDefaultModel() == saved
+      check st.model == liveBefore
+      check st.menuKind == mkModel
+      check st.picker.notice == "default model: " & saved
+      # The badge follows the default, on that row and only that one.
+      check "· default" in st.screen.menu.items[0].description
+      check "· default" notin st.screen.menu.items[1].description
+      # And the hint names the key now that it does something.
+      check "Ctrl+S" in st.picker.keys
+    finally:
+      removeDir(configDir)
+      removeDir(root)
+      removeFile(path)
+
   test "the block's lines take their roles from the theme":
     # The user's ask, read out of pi's source: the hint is `warning`, the
     # counter, the `Model Name:` line and the keys are `muted`, the refresh
@@ -1757,8 +1801,8 @@ suite "the /model builtin":
       check st.picker.counter == "(1/" & $st.screen.menu.items.len & ")"
       check st.picker.detail == "Model Name: " & specs[0].id & " fresh"
       check st.picker.notice == "Model catalogs refreshed."
-      check st.picker.keys == "Enter to select · Escape/Ctrl+C to cancel"
-      check "Ctrl+S" notin st.picker.keys
+      check st.picker.keys ==
+        "Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel"
 
       var canvas = newCanvas(size(120, 20))
       st.screen.render(canvas, rect(0, 0, 120, 20))

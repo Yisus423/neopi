@@ -412,8 +412,11 @@ const
   modelPickerHeader = "Only showing models from configured providers. " &
     "Use /login to add providers."
     ## The header the model picker always shows.
-  modelPickerKeys = "Enter to select · Escape/Ctrl+C to cancel"
-    ## The model picker's key hint. Ctrl+S is deliberately absent.
+  modelPickerKeys =
+    "Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel"
+    ## The model picker's key hint, pi's own wording (`model-selector.ts:146`)
+    ## now that the key does something: it used to name only Enter, because a
+    ## hint for a key with no handler is a lie.
   modelPickerRefreshed = "Model catalogs refreshed."
     ## The core status the model picker reports when its refresh walk ends.
   modelPickerNoCatalogs =
@@ -572,6 +575,10 @@ type
     quit*: bool
     appReady*: bool
     screen*: NeopiScreen
+    defaultModel*: string
+      ## The stored default a fresh session starts on, as `"<provider>/<id>"`:
+      ## read once at start and moved by Ctrl+S in the model picker. Empty when
+      ## the settings carry none.
     picker*: Picker
       ## The live model-picker block, or nil when no model picker is open. It
       ## owns the composer as its `input` child, so the search field is still
@@ -618,6 +625,7 @@ proc initTuiState*(provider, model: string, sess: Session,
     syncedId: 0, menuKind: mkNone, questionPurpose: qpNone,
     pickerModels: @[], pickerModelSource: @[], pickerModelTotal: 0,
     pickerVisibleText: @[], catalogTransport: nil, modelCatalogRefreshed: false,
+    defaultModel: "",
     chrome: newChrome())
 
 const confirmYes* = "Yes"
@@ -1424,8 +1432,13 @@ proc setModelPickerRows(state: ptr TuiState, models: seq[ListedModel]) =
   for model in models:
     # The row is pi's: the id is the row's business, and the provider badge
     # rides the DESCRIPTION so it can stay muted on every row.
-    items.add MenuItem(label: model.id,
-      description: "[" & model.provider & "]")
+    var description = "[" & model.provider & "]"
+    # pi badges the default row with ` · default`, in `muted`, right beside the
+    # provider (`model-selector.ts:332`) — so it rides the description too and
+    # the accent label never carries it.
+    if state[].defaultModel == model.provider & "/" & model.id:
+      description.add " · default"
+    items.add MenuItem(label: model.id, description: description)
     # The search text is pi's, token for token (`model-search.ts:43`): the
     # provider leads — twice — so a provider-prefixed query lands on this
     # provider's rows instead of losing to a proxy id, and the display name
@@ -2561,6 +2574,28 @@ proc wireApp*(state: ptr TuiState, L: LuaState, app: var App) =
               setActiveProvider(state, L, spec.get)
           setModel(state, L, pick.id)
         return eventHandled
+      of keyCtrlS:
+        # Ctrl+S sets the DEFAULT and leaves the live model alone: Enter is the
+        # one that moves the session, and pi keeps the list up so a second key
+        # can still pick.
+        let menu = state[].screen.menu
+        let selected = menu.selected
+        if selected >= 0 and selected < state[].pickerModels.len:
+          let pick = state[].pickerModels[selected]
+          let value = pick.provider & "/" & pick.id
+          var notice = "default model: " & value
+          try:
+            saveDefaultModel(value)
+            state[].defaultModel = value
+          except SettingsError as e:
+            notice = "cannot save the default: " & e.msg
+          # The badge follows the default, so the rows are re-derived from the
+          # SAME source (which re-applies the query too), and only then does the
+          # notice speak — a rebuild would otherwise overwrite it.
+          setModelPickerRows(state, state[].pickerModelSource)
+          state[].picker.notice = notice
+          app.invalidate()
+        return eventHandled
       of keyEscape:
         closeMenu(state)
         app.invalidate()
@@ -2671,6 +2706,13 @@ proc tuiLoop*(sess: Session, L: LuaState, provider, model: string,
   var state = initTuiState(provider, model, sess, root)
   try:
     state.hideThinking = loadHideThinking()
+  except SettingsError as e:
+    setCoreStatus(addr state, "settings warning: " & e.msg)
+  try:
+    # The default the picker badges and Ctrl+S moves. Read here, where the
+    # thinking preference already is: the settings file is one file, and a
+    # broken one is reported once, not twice.
+    state.defaultModel = loadDefaultModel()
   except SettingsError as e:
     setCoreStatus(addr state, "settings warning: " & e.msg)
   exposeTuiSink(L, addr state, model)
