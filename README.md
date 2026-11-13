@@ -50,8 +50,11 @@ config file you own, the `require` mechanism loads what it references.
    highlighted one in, **Enter** fills it in and runs it, **Esc** closes the
    menu and keeps the draft); the **/resume** and **/model** pickers filter the
    same way — while one is open the composer is its search field, so typing
-   narrows the list as you go (a fuzzy match: `gpt5` finds `openai/gpt-5`),
-   Enter picks, Esc closes and the query leaves with the picker; **Esc** aborts
+   narrows the list as you go (tokens split on spaces and slashes, every token
+   required, best match first: `gpt5` finds `openai/gpt-5` and `free groq`
+   narrows to both), Enter picks, Esc closes and the query leaves with the
+   picker, and in **/model** **Ctrl+S** stores the row under the cursor as the
+   default model — that row then carries a muted ` · default`; **Esc** aborts
    the stream (the partial turn
    renders marked) or clears the composer; **Ctrl+C** exits; **PgUp/PgDn**
    scroll the transcript; **Ctrl+O** expands or collapses the thinking and the
@@ -136,6 +139,14 @@ it cannot parse is discarded and rebuilt instead of reported, and a provider
 whose refresh fails keeps its cached rows. The refresh does not freeze the
 interface: it runs through the same pump the tool calls use, so a slow endpoint
 can still be painted and aborted.
+
+**Where the default model lives.** `/model`'s `Ctrl+S` writes
+`"<provider>/<id>"` into the same global `settings.json` as the thinking
+preference (one string, so it cannot go half-written). A run starts on the
+CLI's `--model`, then the provider's `<ID>_MODEL`, then that stored default,
+then the built-in one — and the stored default only applies when you did not
+name a provider, because a model id means nothing outside the provider it was
+picked in.
 
 ## What it is
 
