@@ -41,6 +41,38 @@ suite "session tree":
       removeFile(path)
       removeFile(oldPath)
 
+  test "a tool result's details round-trip, and an older file still loads":
+    # pi's own pattern (`examples/extensions/README.md`): a tool writes what it
+    # wants to remember into the result's `details`, the ENTRY carries it, and a
+    # fork carries it too because it is part of the branch. Without this a tool
+    # cannot remember anything between turns.
+    let path = freshPath("details")
+    let oldPath = freshPath("details-old")
+    try:
+      let s = newSession(path)
+      s.append(SessionEntry(kind: ekToolResult, toolCallId: "c1",
+        toolName: "todo", output: "added: write the test\n", isError: false,
+        details: %*{"todos": ["write the test"], "nextId": 2}))
+      let reopened = newSession(path)
+      check reopened.entries[0].details["todos"][0].getStr == "write the test"
+      check reopened.entries[0].details["nextId"].getInt == 2
+
+      # An entry without the key reads as an EMPTY object, never nil — the same
+      # discipline `toolArgs` learned, and the same reason: the node is handed
+      # around (the transcript today, `neopi.session:history()` to an extension
+      # tomorrow) and a nil there is a crash waiting for its first reader.
+      writeFile(oldPath, "{\"type\":\"toolResult\",\"id\":1,\"parentId\":null," &
+        "\"timestamp\":\"2026-01-01T00:00:00Z\",\"toolCallId\":\"c1\"," &
+        "\"toolName\":\"bash\",\"output\":\"hi\\n\",\"isError\":false}\n")
+      let old = newSession(oldPath)
+      check old.entries[0].details.kind == JObject
+      check old.entries[0].details.len == 0
+      # The two nodes are independent: the old file still has its args empty too.
+      check old.entries[0].toolArgs.len == 0
+    finally:
+      removeFile(path)
+      removeFile(oldPath)
+
   test "the assistant's reasoning round-trips, and an older file still loads":
     let path = freshPath("thinking")
     let oldPath = freshPath("thinking-old")

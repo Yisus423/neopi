@@ -267,18 +267,31 @@ local function executeCall(name, args)
       verdict.payload.args ~= nil then
     effective = verdict.payload.args
   end
-  local ran, result = pcall(tool.execute, effective)
+  local ran, result, details = pcall(tool.execute, effective)
   if not ran then
     return tostring(result), true
   end
   local output = tostring(result)
-  local sent, outcome = pcall(neopi.emit, "tool_result",
-    {tool = name, output = output})
-  if sent and type(outcome) == "table" and outcome.patched and
-      type(outcome.payload) == "table" and outcome.payload.output ~= nil then
-    output = tostring(outcome.payload.output)
+  -- What the tool wants to REMEMBER about its own call (pi's `details`). Lua
+  -- returns several values, so a tool that knows nothing about this keeps
+  -- working unchanged: its single return is still the output.
+  if type(details) ~= "table" then
+    details = nil
   end
-  return output, false
+  local sent, outcome = pcall(neopi.emit, "tool_result",
+    {tool = name, output = output, details = details})
+  if sent and type(outcome) == "table" and outcome.patched and
+      type(outcome.payload) == "table" then
+    if outcome.payload.output ~= nil then
+      output = tostring(outcome.payload.output)
+    end
+    -- A hook may patch the state too: one that rewrites an output would
+    -- otherwise silently drop what came with it.
+    if outcome.payload.details ~= nil then
+      details = outcome.payload.details
+    end
+  end
+  return output, false, details
 end
 
 --- Run the agent loop: build the request from the session history and the
@@ -358,12 +371,16 @@ function agent.runTurn(session, config)
   response.continueLoop = (response.stopReason == "toolUse") or hadQueued
   if response.continueLoop then
     for _, call in ipairs(response.toolCalls or {}) do
-      local output, isError = executeCall(call.name, call.args)
+      local output, isError, details = executeCall(call.name, call.args)
       session:append("toolResult", {
         toolCallId = call.id,
         toolName = call.name,
         output = output,
         isError = isError,
+        -- The tool's own state, when it returned one: it rides the ENTRY, so a
+        -- session that forks carries it, and `session_start` can read it back
+        -- off the branch. Absent (nil) when the tool returned only the output.
+        details = details,
         -- The call the model made, as the model's own JSON TEXT: a Lua table
         -- cannot carry a null or tell `{}` from `[]`, so the arguments that get
         -- written down travel as text and are parsed on the way in. Without

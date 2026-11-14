@@ -658,10 +658,19 @@ proc luaSessionAppend(L: LuaState): cint {.cdecl.} =
         discard
     elif payload.hasKey("toolArgs") and payload["toolArgs"].kind == JObject:
       toolArgs = payload["toolArgs"]
+    # The tool's OWN state, when it returned one (pi's `details`): OPTIONAL, and
+    # an empty object when absent. A Lua table that is not an object lands as
+    # `{}` — an EMPTY table arrives here as an empty ARRAY (the jsonOfStack
+    # rule), and for a tool's own bookkeeping "I have no state" and "I sent no
+    # table at all" have to mean the same thing to whoever reads it later.
+    var details = newJObject()
+    if payload.hasKey("details") and payload["details"].kind == JObject:
+      details = payload["details"]
     entry = SessionEntry(kind: ekToolResult,
       toolCallId: payload["toolCallId"].getStr,
       toolName: payload["toolName"].getStr, output: payload["output"].getStr,
-      isError: payloadBool(payload, "isError"), toolArgs: toolArgs)
+      isError: payloadBool(payload, "isError"), toolArgs: toolArgs,
+      details: details)
   of "compaction":
     if not payload.hasKey("summary") or not payload.hasKey("firstKeptId") or
         not payload.hasKey("tokensBefore"):

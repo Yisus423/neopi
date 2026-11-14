@@ -70,6 +70,14 @@ type
         ## a session written before the field existed reads an empty object,
         ## never nil (the transcript hands this node to a widget that
         ## dereferences it).
+      details*: JsonNode
+        ## What the TOOL wants to remember about its own call — pi's
+        ## `details` (`examples/extensions/README.md`: "Store state in tool
+        ## result details for proper forking support"), and the reason a tool
+        ## can keep state across turns: the entry travels the branch, so a
+        ## session that forks carries the state with it. VERBATIM and
+        ## OPTIONAL, with `toolArgs`' discipline: never nil to a reader, and
+        ## empty for an entry written before the field existed.
     of ekCompaction:
       summary*: string
       firstKeptId*, tokensBefore*: int
@@ -160,6 +168,8 @@ proc entryToJson*(entry: SessionEntry): JsonNode =
     result["isError"] = newJBool(entry.isError)
     result["toolArgs"] =
       if entry.toolArgs.isNil: newJObject() else: entry.toolArgs
+    result["details"] =
+      if entry.details.isNil: newJObject() else: entry.details
   of ekCompaction:
     result["summary"] = newJString(entry.summary)
     result["firstKeptId"] = newJInt(entry.firstKeptId)
@@ -192,7 +202,8 @@ proc entryFromJson(node: JsonNode, line: int): SessionEntry =
       toolName: reqString(node, "toolName", line),
       output: reqString(node, "output", line),
       isError: reqBool(node, "isError", line),
-      toolArgs: optObject(node, "toolArgs"))
+      toolArgs: optObject(node, "toolArgs"),
+      details: optObject(node, "details"))
   of "compaction":
     result = SessionEntry(kind: ekCompaction, id: id, parentId: parentId,
       timestamp: timestamp, summary: reqString(node, "summary", line),
@@ -271,8 +282,13 @@ proc append*(s: Session, entry: SessionEntry) =
   # The writer's invariant, so no reader has to survive a nil node: a tool
   # result always carries an OBJECT (an empty one when the caller set none),
   # which is what the file also produces for an entry written before the field.
-  if stored.kind == ekToolResult and stored.toolArgs.isNil:
-    stored.toolArgs = newJObject()
+  # It holds for BOTH nodes a tool result carries: the arguments the model sent
+  # and the details the tool keeps for itself.
+  if stored.kind == ekToolResult:
+    if stored.toolArgs.isNil:
+      stored.toolArgs = newJObject()
+    if stored.details.isNil:
+      stored.details = newJObject()
   var line = ""
   toUgly(line, entryToJson(stored))
   line.add '\n'
