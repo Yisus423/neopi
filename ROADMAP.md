@@ -99,11 +99,30 @@ list — see Done).
   configuration). The specs themselves run today through the test-only runner
   (`tests/busted_main.nim`, 5 spec files, verified green via `nimble test`); the
   CLI-integrated mode waits.
-- **An async API for Lua extensions** — Lua is synchronous; an async surface
-  would need coroutines. The core is async inside already (chronos behind
-  the provider's waitFor); the key drain covers the TUI's responsiveness. The
-  dialogs answered it for the one case that needed it: an answer that arrives
-  later travels as a callback (`d518d0c`), never as a blocking wait.
+- **An async API for Lua extensions** — REOPENED by #19's audit, with the wall
+  pinned by EVIDENCE instead of taste. pi is async, so its `permission-gate.ts`
+  awaits `ctx.ui.confirm` INSIDE its `tool_call` handler; neopi's `emit` collects
+  a `HookOutcome` SYNCHRONOUSLY (`hooks.nim`), so a handler must decide before it
+  returns — while neopi's dialogs answer in a CALLBACK (`d518d0c`). Both halves
+  are deliberate and neither is wrong; together they mean **an extension cannot
+  ask a question and act on the answer in the same hook pass**, and that is a
+  first-class pi pattern (the interactive permission gate).
+  The order of cost, from the audit:
+  1. **A `vim.wait`-shaped `neopi.wait(predicate)` that PUMPS the app** until
+     the answer lands — `tuiPump` already pumps the frame, so a handler could
+     block on a one-shot confirm without freezing the UI. Cheap, and enough for
+     the gate.
+  2. **The real API, which is neovim's `vim.async`**
+     (`runtime/lua/vim/async/`: coroutine-backed tasks plus a queue, a future, an
+     event and a semaphore — ~2k lines) with `async.run`/`async.await`. What
+     neovim does NOT have is **coco**: it uses plain Lua coroutines (with
+     `coxpcall.running` as a fallback), so the model is RESUMABLE TASKS, not a
+     patched VM. The first thing that slice must PROVE rather than assume is
+     whether LuaJIT can yield across the `pcall` neopi's containment wraps every
+     handler in; if it cannot, what changes is the DISPATCH's containment, not
+     the VM.
+  Until then the audit's own list is the honest scope: the interactive gate is
+  a named NON-GOAL of `0.1.0-alpha`.
 - **The global `~/.neopi/init.lua`** — the project config loads today; the
   global one (the user's personal extensions across projects) waits.
 - **A manifest** (package.json-style declared paths) — redundant with the

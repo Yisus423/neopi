@@ -141,9 +141,23 @@ plus the Nim-side table from AGENTS.md):
 |---|---|---|---|---|
 | E1 | This record: the API maps and the gap list, before any port | S1-S3 | inline | |
 | E2 | The ports that MAP: P1-P4, each with its spec and its example (`tests/spec/extensions_spec.lua` + `examples/extensions/*.lua`) | S1 | inline, RED→GREEN | |
-| E3 | The gate ports: P5-P6 — and they START by reading what `neopi.on("tool_call")` actually allows, because the wall of gap 7 is decided there | S1 | inline, RED→GREEN | |
+| E3 | The gate ports: P5-P6 — read what `neopi.on("tool_call")` allows FIRST, because the wall of gap 7 is decided there. **Read, and the wall is exact**: `hooks.nim` collects a `HookOutcome` (`allowed`/`reason`/`patched`/`payload`) SYNCHRONOUSLY from `emit`, so a `tool_call` handler must DECIDE BEFORE IT RETURNS, while neopi's dialogs answer in a CALLBACK. P5 as written is therefore impossible; the honest port is a POLICY the handler consults (set earlier, by a command) and the interactive variant is the wall | S1 | inline, RED→GREEN | |
 | E4 | The ports that hit a WALL: P7-P10, each stopping at the named gap | S1 | inline, RED→GREEN where the port runs | |
 | E5 | The gap list as the audit's result + README + ROADMAP + close | S1-S3 | inline | |
+
+### E3's wall, in one paragraph
+
+pi's `permission-gate.ts` awaits `ctx.ui.confirm` INSIDE its `tool_call`
+handler and returns `{block: true}` when the answer is no. In neopi the hook's
+outcome is a VALUE returned synchronously to `emit` (`src/neopi/hooks.nim`:
+`HookOutcome` with `allowed`, `reason`, `patched`, `payload`), and the dialogs
+answer through a CALLBACK (the shape #21 settled on: `neopi.ui.confirm(title,
+detail, function(answer) ... end)`). Both halves are deliberate and neither is
+wrong; together they mean **an extension cannot ask a question and act on the
+answer inside the same hook pass**. That is the first pi pattern the surface
+cannot express, and it is worth more than the whole list above it: it is the
+reason the async question is now a real one instead of a taste (ROADMAP,
+Deferred: "An async API for Lua extensions").
 
 ## Evidence
 
