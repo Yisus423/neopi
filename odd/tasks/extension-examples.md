@@ -142,8 +142,8 @@ plus the Nim-side table from AGENTS.md):
 | E1 | This record: the API maps and the gap list, before any port | S1-S3 | inline | |
 | E2 | The ports that MAP: P1-P4, each with its spec and its example (`tests/spec/extensions_spec.lua` + `examples/extensions/*.lua`) | S1 | inline, RED→GREEN | |
 | E3 | The gate ports: P5-P6 — read what `neopi.on("tool_call")` allows FIRST, because the wall of gap 7 is decided there. **Read, and the wall is exact**: `hooks.nim` collects a `HookOutcome` (`allowed`/`reason`/`patched`/`payload`) SYNCHRONOUSLY from `emit`, so a `tool_call` handler must DECIDE BEFORE IT RETURNS, while neopi's dialogs answer in a CALLBACK. P5 as written is therefore impossible; the honest port is a POLICY the handler consults (set earlier, by a command) and the interactive variant is the wall | S1 | inline, RED→GREEN | |
-| E4 | The ports that hit a WALL: P7-P10, each stopping at the named gap | S1 | inline, RED→GREEN where the port runs | |
-| E5 | The gap list as the audit's result + README + ROADMAP + close | S1-S3 | inline | |
+| E4 | The ports that hit a WALL: P7-P10 — TWO of them turned out to map once the hook contract was read (the bus, the input rewrite) and two are walls, each pinned by a spec that asserts the absence | S1 | inline, RED→GREEN | `test(extension-examples): the first four ports of pi's examples, and the gap map` — `2a8990d` (E2) |
+| E5 | The gap list as the audit's result + the ROADMAP's item + close | S1-S3 | inline | `docs(extension-examples): the wall the audit found, and what neovim does instead` — `d46c8e5` (E3) + the commit that carries this section |
 
 ### E3's wall, in one paragraph
 
@@ -180,9 +180,24 @@ The gate ran with `PATH="$HOME/.local/share/grabnim/current/bin:$PATH"` and
   (`ui.status`), `widget-placement.lua` (`ui.widget`, pi's two placements,
   with an unknown placement refused), `commands.lua` (`registerCommand` +
   `runCommand`, and the args being the rest of the input).
-- Anti-cheat for the next reader: each example file carries the ORIGINAL pi
-  source in its header and names the shape that changed, so a port can be
-  diffed against its original without leaving the repo.
+- **E3/E4** — the hook contract read (`hooks.nim` + `expose.nim`) turned two of
+  the four remaining ports from walls into MAPS, and pinned the walls as specs:
+  `./build/busted_main tests/spec` → **35 successes / 0 failures** (29 after the
+  four mapped ports, plus the six of `hook_bus_spec.lua`). What came out:
+  - **the inter-extension bus already exists**, because `on` takes any event
+    name and `emit` returns `{allowed, reason, patched, payload}` — richer than
+    pi's `pi.events`, which only publishes;
+  - **the input transform works** (the `!{cmd}` expansion of `inline-bash.ts`
+    is a handler returning the rewritten table);
+  - **the permission gate ports HALF**: the verdict and the reason do, the
+    ASKING does not (E3's wall);
+  - **two walls are pinned**: a tool's result has no `details` to carry state
+    (pi persists it), and a session cannot be named (`setSessionName`,
+    `setLabel`).
+- The audit's OUTPUT, which is what #19 was for: the gaps are no longer an
+  opinion. The tool `details` gap goes to the ROADMAP as its own item; the
+  async API is the Deferred entry it reopened; the session metadata, the
+  editor component and the provider registration are named but unranked.
 
 ## Log
 
