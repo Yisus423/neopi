@@ -80,11 +80,33 @@ keeps that alone, so an extension tool cannot remember anything between turns.
 
 | ID | What | Specs | Route | Commit |
 |---|---|---|---|---|
-| D1 | `session.nim`: `details` on the tool-result entry, written, read, and nil-patched like `toolArgs`, with its round-trip and old-file tests | S1, S3 | inline, RED→GREEN | |
-| D2 | `runtime/agent.lua`: `executeCall` captures the tool's second return and puts it in the entry AND the `tool_result` payload | S1 | inline, RED→GREEN | |
-| D3 | `expose.nim`: `session:append("toolResult", …)` accepts the details table (the boundary the runtime needs) | S1 | test-first where it can be, else covered by D4 | |
-| D4 | The Lua spec: a registered tool returns details, and an extension reconstructs its state from `session:history()` | S1, S3 | inline, RED→GREEN | |
-| D5 | The example (the state-keeping port), README, ROADMAP and the close | S1-S3 | inline | |
+| D1 | `session.nim`: `details` on the tool-result entry, written, read, and nil-patched like `toolArgs`, with its round-trip and old-file tests | S1, S3 | inline, RED→GREEN | `feat(session): a tool result carries the tool's own details` — `2a33574` |
+| D2 | `runtime/agent.lua`: `executeCall` captures the tool's second return and puts it in the entry AND the `tool_result` payload | S1 | inline, RED→GREEN | ↑ `2a33574` |
+| D3 | `expose.nim`: `session:append("toolResult", …)` accepts the details table, normalizing a non-object (the empty-table-as-array rule) to `{}` | S1 | inline (covered end-to-end by D4) | ↑ `2a33574` |
+| D4 | The Lua spec: the round trip through the session, an absent state reading as an empty object, and the EXAMPLE loaded and driven through its own reconstruction | S1, S3 | inline, RED→GREEN | ↑ `2a33574` + the commit that carries this section |
+| D5 | The example (`examples/extensions/state.lua`), this record and the roadmap | S1-S3 | inline | the commit that carries this section |
+
+## Evidence
+
+The gate ran with `PATH="$HOME/.local/share/grabnim/current/bin:$PATH"` and
+`TMPDIR="$HOME/tmp-nim"`.
+
+- **D1** — RED was the compile error the new test earns (`details` did not
+  exist); GREEN: `tests/tp_session.nim` **13/13**.
+- **D1-D4** — the full gate: `./build/busted_main tests/spec` **37 successes /
+  0 failures** and the Nim suite **285/285** (284 + the entry's round-trip
+  test), both exit 0. **The runner had to be REBUILT first**, and that is the
+  slice's own lesson: it embeds the Nim, so a direct run after a Nim change
+  executes the OLD core — which is exactly how this slice got its false RED
+  (`session:history()` looked like it was dropping `details`; it was the stale
+  binary).
+- **D5** — the example is EXECUTED, not just written: `busted` loads
+  `examples/extensions/state.lua`, drives the tool twice, appends what the loop
+  would append, and reads the result back through the port's own
+  `/remembered` command → **38 successes / 0 failures**.
+- What the spec proves, in one line: the tool writes, the ENTRY carries the
+  state, the state survives a re-read, and the read needs no new surface —
+  `neopi.session:history()` is the branch.
 
 ## Log
 
