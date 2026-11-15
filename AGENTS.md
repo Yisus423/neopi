@@ -23,7 +23,12 @@ diagnostics:
   build to find a typo. Configured in .pi/mcp.json (native pi project config;
   local-only, not versioned; loaded at session start, /mcp inspects
   in-session) — verify it is actually loaded, because a session without it
-  silently falls back to grep.
+  silently falls back to grep. **Reach it from a codemode script** (`await
+  searchTools("nim")` lists `nimFindSymbols`, `nimFindReferences`,
+  `nimListSymbols`, `nimCheckFile`, `nimCheckProject`): the tools are NOT
+  declared as direct tools, so a session that only checks that list concludes,
+  wrongly, that the server is missing and falls back to grep. The skill that
+  owns the mandate is `.pi/skills/nim-mcp-tools/SKILL.md`.
 - **grep/find**: the fallback when the two above cannot answer. After renaming
   a symbol, grep the **bare identifier**, not the access pattern:
   `\.streaming` misses the constructor's `streaming: ""`, and the build will
@@ -58,6 +63,18 @@ rebuilds are seconds.
 older revision *alongside* the new one (`~/.nimble/pkgs2/<pkg>-<version>-<hash>`:
 two entries with the SAME `<version>`), and Nim's `nimblePath` then has two
 candidates for the module, so the `requires` line stops deciding what compiles.
+Two refinements MEASURED on 2026-11-11, worth knowing before touching a pin:
+the hazard is specifically two copies of the **SAME version** — two copies with
+DIFFERENT versions are resolved by `nimblePath` keeping the HIGHER one, which is
+why `chronos` 4.0.4 and 4.4.1 coexisted harmlessly and why **4.0.4 must STAY**
+(it is what `nimlangserver` requires; readable in `~/.nimble/nimbledata2.json`
+→ `reverseDeps`); and the installed revision lives at `nimblemeta.json` →
+**`metaData.vcsRevision`**, not at the top level of that JSON.
+**`nimble.lock` is NOT adopted yet**: measured, it fixes this hazard for
+`nimble build` (nimble hands the compiler an explicit `--path` list built from
+the locked revisions) but on nimble 0.24.1 it BREAKS a bare `nim c` and, with
+it, `nimble test` — which runs one. Revisit after a nimble bump (0.26.2 is said
+to fix it), re-verifying both paths.
 Verified on the `f7e518e` → `800bf7f` bump: the new copy won only because its
 hash sorts first (`757d0d4f` before `d4c4f347`) — a coincidence, not a
 guarantee. `nimble uninstall` does NOT help: it only removes what
@@ -87,7 +104,8 @@ entirely: `/tmp/neopi-fresh` is where it has been run and recorded, and
 ## Testing
 
 - `nimble test` — self-contained and offline: the Nim suite via unittest2
-  (112 tests) plus the busted specs. The live OpenRouter check is opt-in:
+  (285 tests at the time of writing — the number drifts, and `nimble test`'s own
+  summary is the authority) plus the busted specs. The live OpenRouter check is opt-in:
   it skips unless NEOPI_LIVE_TEST is set and a key is found in the env or
   in .env. Run it with `NEOPI_LIVE_TEST=1 nimble test` — it needs the
   network and a real turn, so it never gates the default suite.
@@ -101,8 +119,13 @@ entirely: `/tmp/neopi-fresh` is where it has been run and recorded, and
   `entries`/`frames` when you are exploring a slow path: the delta cost
   scales with the transcript.
 - The Lua layer: the busted specs run through the test-only runner
-  `./build/busted_main <spec>` (5 spec files, 13 successes, verified
-  green); the `neopi --spec` CLI mode is deferred.
+  `./build/busted_main <spec>` (nine spec files, 38 successes at the time of
+  writing; `nimble test` runs them as its last step); the `neopi --spec` CLI
+  mode is deferred. **The runner EMBEDS the Nim core**
+  (`tests/busted_main.nim` compiles it in), so running `./build/busted_main`
+  directly after changing `src/neopi/*.nim` executes the OLD core — a false RED
+  that has already cost a round. Rebuild it, or run `nimble test`, whenever the
+  Nim it embeds has changed.
 - The TUI's pty harness: `openpty` + TIOCSCTTY + TIOCSWINSZ (without the
   winsize, terminalHeight() is 0 and the buffer clamps to 1 row — the only
   footer renders; without TIOCSCTTY, no SIGINT). The harness writes keys to
